@@ -1,0 +1,11 @@
+# ESP-IDF build output and local device recovery artifacts
+**/build/
+artifacts/
+
+# Vendored SDKs and board references are reproducible dependencies.
+vendor/
+
+# Local editor and operating-system metadata
+.DS_Store
+.idea/
+.vscode/
