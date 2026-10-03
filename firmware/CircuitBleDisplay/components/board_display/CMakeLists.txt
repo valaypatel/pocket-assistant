@@ -6,10 +6,13 @@ idf_component_register(
         "${WAVESHARE_BSP}/port_power.cpp"
         "${WAVESHARE_BSP}/port_display.cpp"
         "${WAVESHARE_BSP}/port_lvgl.cpp"
+        "${WAVESHARE_BSP}/port_codec.cpp"
     INCLUDE_DIRS
         "${WAVESHARE_BSP}"
     REQUIRES
         driver
         esp_timer
+        codec_board
+        espressif__esp_codec_dev
         lvgl
 )

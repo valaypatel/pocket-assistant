@@ -15,7 +15,9 @@ import android.bluetooth.BluetoothProfile
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import java.net.HttpURLConnection
@@ -28,6 +30,8 @@ class CircuitRelayService : Service() {
         const val extraAddress = "circuit_address"
         private const val channelId = "circuit_relay"
         private const val notificationId = 42
+        private const val preferencesName = "circuit_relay"
+        private const val addressKey = "circuit_address"
         private val serviceUuid = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb")
         private val commandUuid = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb")
         private val relayUuid = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb")
@@ -35,40 +39,97 @@ class CircuitRelayService : Service() {
         @Volatile var relayStatus: String = "Stopped"
         @Volatile private var activeService: CircuitRelayService? = null
         @Volatile var wifiNetworks: List<String> = emptyList()
+        @Volatile var audioStatus: String? = null
         fun writeToCircuit(value: String): Boolean = activeService?.writeCommand(value) ?: false
     }
 
     private val executor = Executors.newSingleThreadExecutor()
+    private val reconnectHandler = Handler(Looper.getMainLooper())
+    private var reconnectDelayMs = 1000L
+    private var shouldReconnect = false
+    private var circuitAddress: String? = null
     private var gatt: BluetoothGatt? = null
     private var command: BluetoothGattCharacteristic? = null
+    private val reconnectRunnable = Runnable { circuitAddress?.let(::connect) }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        circuitAddress = intent?.getStringExtra(extraAddress)
+            ?: getSharedPreferences(preferencesName, MODE_PRIVATE).getString(addressKey, null)
+        if (circuitAddress == null) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        shouldReconnect = true
+        getSharedPreferences(preferencesName, MODE_PRIVATE).edit().putString(addressKey, circuitAddress).apply()
+        reconnectHandler.removeCallbacks(reconnectRunnable)
         relayStatus = "Connecting to Circuit…"
         startAsForeground(relayStatus)
-        intent?.getStringExtra(extraAddress)?.let(::connect)
+        connect(circuitAddress!!)
         return START_STICKY
     }
 
     override fun onCreate() { super.onCreate(); activeService = this }
-    override fun onDestroy() { if (activeService === this) activeService = null; relayStatus = "Stopped"; gatt?.close(); executor.shutdownNow(); super.onDestroy() }
+    override fun onDestroy() {
+        shouldReconnect = false
+        reconnectHandler.removeCallbacks(reconnectRunnable)
+        if (activeService === this) activeService = null
+        relayStatus = "Stopped"
+        gatt?.close()
+        executor.shutdownNow()
+        super.onDestroy()
+    }
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun connect(address: String) {
-        if (!hasBluetoothPermission()) return
+        if (!shouldReconnect || !hasBluetoothPermission()) return
+        reconnectHandler.removeCallbacks(reconnectRunnable)
         gatt?.close()
+        gatt = null
+        command = null
         val device = BluetoothAdapter.getDefaultAdapter()?.getRemoteDevice(address) ?: return
         gatt = device.connectGatt(this, false, callback, BluetoothDevice.TRANSPORT_LE)
     }
 
+    private fun scheduleReconnect() {
+        if (!shouldReconnect || circuitAddress == null) return
+        val delaySeconds = reconnectDelayMs / 1000
+        setRelayStatus("Circuit reconnecting in ${delaySeconds}s…")
+        reconnectHandler.removeCallbacks(reconnectRunnable)
+        reconnectHandler.postDelayed(reconnectRunnable, reconnectDelayMs)
+        reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(30_000L)
+    }
+
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, state: Int) {
-            if (state == BluetoothProfile.STATE_CONNECTED) { setRelayStatus("Circuit relay connected"); gatt.discoverServices() }
-            else setRelayStatus("Circuit relay reconnecting…")
+            if (state == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                reconnectDelayMs = 1000L
+                reconnectHandler.removeCallbacks(reconnectRunnable)
+                gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                setRelayStatus("Circuit relay connected")
+                gatt.discoverServices()
+            } else {
+                if (this@CircuitRelayService.gatt === gatt) {
+                    command = null
+                    this@CircuitRelayService.gatt = null
+                }
+                gatt.close()
+                scheduleReconnect()
+            }
         }
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            val service = gatt.getService(serviceUuid) ?: return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                gatt.disconnect()
+                return
+            }
+            val service = gatt.getService(serviceUuid) ?: run {
+                gatt.disconnect()
+                return
+            }
             command = service.getCharacteristic(commandUuid)
-            val relay = service.getCharacteristic(relayUuid) ?: return
+            val relay = service.getCharacteristic(relayUuid) ?: run {
+                gatt.disconnect()
+                return
+            }
             gatt.setCharacteristicNotification(relay, true)
             relay.getDescriptor(cccdUuid)?.let { descriptor ->
                 descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
@@ -89,6 +150,10 @@ class CircuitRelayService : Service() {
     private fun handleRelayRequest(request: String) {
         if (request.startsWith("@wifi-list")) {
             wifiNetworks = request.lines().drop(1).map { it.trim() }.filter { it.isNotEmpty() }.distinct().sorted()
+            return
+        }
+        if (request.startsWith("@audio-status\n")) {
+            audioStatus = request.substringAfter("@audio-status\n")
             return
         }
         if (request != "@relay\nCHECK") return

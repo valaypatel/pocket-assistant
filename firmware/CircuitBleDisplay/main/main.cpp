@@ -4,15 +4,19 @@
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_vfs_fat.h"
 #include "esp_wifi.h"
 
 #include "lwip/inet.h"
 #include "ping/ping_sock.h"
 #include "nvs_flash.h"
+#include "sdmmc_cmd.h"
+#include "driver/sdmmc_host.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -21,6 +25,7 @@
 #include "port_display.h"
 #include "port_lvgl.h"
 #include "port_power.h"
+#include "port_codec.h"
 
 namespace {
 
@@ -31,6 +36,14 @@ constexpr uint16_t kRelayUuid = 0xFFF2;
 constexpr size_t kMaxTextBytes = 160;
 constexpr char kWifiCommandPrefix[] = "@wifi\n";
 constexpr char kWifiScanCommand[] = "@wifi-scan";
+constexpr char kSdMountPath[] = "/sdcard";
+constexpr char kSdTestFile[] = "/sdcard/CIRCUIT.TXT";
+constexpr char kAudioFile[] = "/sdcard/CIRCUIT.WAV";
+constexpr uint32_t kAudioSampleRate = 16000;
+constexpr uint16_t kAudioChannels = 2;
+constexpr uint16_t kAudioBitsPerSample = 16;
+constexpr size_t kAudioBufferBytes = 4096;
+constexpr uint32_t kMaxRecordingSeconds = 30;
 constexpr uint16_t kServiceHandles = 6;
 
 const char *kTag = "Circuit";
@@ -42,12 +55,35 @@ uint16_t service_handle;
 uint16_t text_handle;
 uint16_t relay_handle;
 uint16_t connection_id = UINT16_MAX;
+sdmmc_card_t *sd_card = nullptr;
+bool audio_ready = false;
+bool audio_busy = false;
+volatile bool recording_active = false;
+volatile bool recording_stop_requested = false;
 
 void send_relay_request(const char *request);
 
 struct TextMessage {
     char value[kMaxTextBytes + 1];
 };
+
+#pragma pack(push, 1)
+struct WavHeader {
+    char riff[4] = {'R', 'I', 'F', 'F'};
+    uint32_t file_size = 0;
+    char wave[4] = {'W', 'A', 'V', 'E'};
+    char format[4] = {'f', 'm', 't', ' '};
+    uint32_t format_size = 16;
+    uint16_t audio_format = 1;
+    uint16_t channels = kAudioChannels;
+    uint32_t sample_rate = kAudioSampleRate;
+    uint32_t byte_rate = kAudioSampleRate * kAudioChannels * kAudioBitsPerSample / 8;
+    uint16_t block_align = kAudioChannels * kAudioBitsPerSample / 8;
+    uint16_t bits_per_sample = kAudioBitsPerSample;
+    char data[4] = {'d', 'a', 't', 'a'};
+    uint32_t data_size = 0;
+};
+#pragma pack(pop)
 
 esp_ble_adv_params_t adv_params = {
     .adv_int_min = 0x20,
@@ -105,6 +141,209 @@ void update_connection_status(const char *status) {
     }
     lv_label_set_text(connection_label, status);
     Lvgl_unlock();
+}
+
+void update_storage_status(const char *status) {
+    if (!Lvgl_lock(-1)) {
+        return;
+    }
+    lv_label_set_text(message_label, status);
+    Lvgl_unlock();
+}
+
+void init_sd_card() {
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = false,
+        .max_files = 5,
+        .allocation_unit_size = 16 * 1024,
+    };
+
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_config.width = 1;
+    slot_config.clk = GPIO_NUM_39;
+    slot_config.cmd = GPIO_NUM_41;
+    slot_config.d0 = GPIO_NUM_40;
+    const esp_err_t mount_status = esp_vfs_fat_sdmmc_mount(
+        kSdMountPath, &host, &slot_config, &mount_config, &sd_card);
+    if (mount_status != ESP_OK || sd_card == nullptr) {
+        ESP_LOGW(kTag, "MicroSD mount failed: %s", esp_err_to_name(mount_status));
+        update_storage_status("MicroSD: unavailable\nInsert a FAT32 card");
+        return;
+    }
+
+    constexpr char kTestContents[] = "Circuit storage verified\n";
+    FILE *file = fopen(kSdTestFile, "w");
+    if (file == nullptr || fputs(kTestContents, file) < 0) {
+        if (file != nullptr) fclose(file);
+        ESP_LOGW(kTag, "MicroSD write test failed");
+        update_storage_status("MicroSD: mounted\nWrite test failed");
+        return;
+    }
+    fclose(file);
+
+    char readback[sizeof(kTestContents)] = {};
+    file = fopen(kSdTestFile, "r");
+    const bool verified = file != nullptr &&
+        fread(readback, 1, sizeof(kTestContents) - 1, file) == sizeof(kTestContents) - 1 &&
+        strcmp(readback, kTestContents) == 0;
+    if (file != nullptr) fclose(file);
+
+    if (verified) {
+        ESP_LOGI(kTag, "MicroSD mounted and read/write test passed");
+        update_storage_status("MicroSD: ready\nStorage verified");
+    } else {
+        ESP_LOGW(kTag, "MicroSD readback test failed");
+        update_storage_status("MicroSD: mounted\nRead test failed");
+    }
+}
+
+void finish_audio_task() {
+    audio_busy = false;
+    recording_active = false;
+    vTaskDelete(nullptr);
+}
+
+void report_audio_status(const char *status) {
+    char message[kMaxTextBytes + 1] = "@audio-status\n";
+    strncat(message, status, sizeof(message) - strlen(message) - 1);
+    send_relay_request(message);
+}
+
+void record_audio_task(void *argument) {
+    const uint32_t seconds = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(argument));
+    if (!audio_ready || sd_card == nullptr) {
+        update_storage_status("MicroSD required\nCannot record audio");
+        report_audio_status("Recording failed: MicroSD unavailable");
+        finish_audio_task();
+        return;
+    }
+
+    FILE *file = fopen(kAudioFile, "wb");
+    if (file == nullptr) {
+        update_storage_status("Audio record failed\nCannot create WAV file");
+        report_audio_status("Recording failed: cannot create file");
+        finish_audio_task();
+        return;
+    }
+
+    WavHeader header{};
+    fwrite(&header, sizeof(header), 1, file);
+    uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(kAudioBufferBytes, MALLOC_CAP_SPIRAM));
+    if (buffer == nullptr) {
+        fclose(file);
+        update_storage_status("Audio record failed\nNot enough memory");
+        report_audio_status("Recording failed: memory unavailable");
+        finish_audio_task();
+        return;
+    }
+
+    const uint32_t target_bytes = seconds * header.byte_rate;
+    uint32_t recorded_bytes = 0;
+    update_storage_status("Recording audio…\nPlease speak near Circuit");
+    report_audio_status("Recording started: speak near Circuit");
+    while (recorded_bytes < target_bytes && !recording_stop_requested) {
+        const size_t bytes = (target_bytes - recorded_bytes) < kAudioBufferBytes
+            ? target_bytes - recorded_bytes : kAudioBufferBytes;
+        if (Codec_RecordData(buffer, bytes) != ESP_OK || fwrite(buffer, 1, bytes, file) != bytes) {
+            break;
+        }
+        recorded_bytes += bytes;
+    }
+    heap_caps_free(buffer);
+
+    header.data_size = recorded_bytes;
+    header.file_size = recorded_bytes + sizeof(WavHeader) - 8;
+    fseek(file, 0, SEEK_SET);
+    fwrite(&header, sizeof(header), 1, file);
+    fclose(file);
+
+    const bool completed = recorded_bytes == target_bytes;
+    update_storage_status(completed
+        ? "Recording saved\nReady to play"
+        : "Recording stopped\nReady to play");
+    report_audio_status(completed
+        ? "Recording saved: ready to play"
+        : "Recording stopped: ready to play");
+    finish_audio_task();
+}
+
+void play_audio_task(void *) {
+    FILE *file = fopen(kAudioFile, "rb");
+    WavHeader header{};
+    if (!audio_ready || file == nullptr || fread(&header, sizeof(header), 1, file) != 1 ||
+        memcmp(header.riff, "RIFF", 4) != 0 || memcmp(header.wave, "WAVE", 4) != 0) {
+        if (file != nullptr) fclose(file);
+        update_storage_status("No recording found\nRecord audio first");
+        report_audio_status("Playback failed: no recording found");
+        finish_audio_task();
+        return;
+    }
+
+    uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(kAudioBufferBytes, MALLOC_CAP_SPIRAM));
+    if (buffer == nullptr) {
+        fclose(file);
+        update_storage_status("Playback failed\nNot enough memory");
+        report_audio_status("Playback failed: memory unavailable");
+        finish_audio_task();
+        return;
+    }
+
+    update_storage_status("Playing recording…\nSpeaker active");
+    report_audio_status("Playing latest recording");
+    size_t bytes = 0;
+    while ((bytes = fread(buffer, 1, kAudioBufferBytes, file)) > 0) {
+        if (Codec_PlaybackData(buffer, bytes) != ESP_OK) break;
+    }
+    heap_caps_free(buffer);
+    fclose(file);
+    update_storage_status("Playback complete\nReady to record");
+    report_audio_status("Playback complete");
+    finish_audio_task();
+}
+
+void start_recording(char *command) {
+    uint32_t seconds = 5;
+    char *duration = strchr(command, '\n');
+    if (duration != nullptr) {
+        seconds = strtoul(duration + 1, nullptr, 10);
+    }
+    if (seconds == 0 || seconds > kMaxRecordingSeconds) {
+        update_storage_status("Recording length: 1–30 sec");
+        report_audio_status("Recording failed: choose 1–30 seconds");
+        return;
+    }
+    if (audio_busy) {
+        update_storage_status("Audio is busy\nPlease wait");
+        report_audio_status("Audio is busy");
+        return;
+    }
+    audio_busy = true;
+    recording_active = true;
+    recording_stop_requested = false;
+    xTaskCreate(record_audio_task, "audio_record", 6144,
+                reinterpret_cast<void *>(static_cast<uintptr_t>(seconds)), 5, nullptr);
+}
+
+void stop_recording() {
+    if (!recording_active) {
+        report_audio_status("No recording is in progress");
+        return;
+    }
+    recording_stop_requested = true;
+    report_audio_status("Stopping recording…");
+}
+
+void start_playback() {
+    if (audio_busy) {
+        update_storage_status("Audio is busy\nPlease wait");
+        report_audio_status("Audio is busy");
+        return;
+    }
+    audio_busy = true;
+    xTaskCreate(play_audio_task, "audio_play", 6144, nullptr, 5, nullptr);
 }
 
 void on_ping_success(esp_ping_handle_t, void *) {
@@ -223,6 +462,12 @@ void text_display_task(void *) {
         if (xQueueReceive(text_queue, &message, portMAX_DELAY) == pdTRUE) {
             if (strcmp(message.value, kWifiScanCommand) == 0) {
                 xTaskCreate(wifi_scan_task, "wifi_scan", 4096, nullptr, 3, nullptr);
+            } else if (strncmp(message.value, "@audio-record", 13) == 0) {
+                start_recording(message.value);
+            } else if (strcmp(message.value, "@audio-stop") == 0) {
+                stop_recording();
+            } else if (strcmp(message.value, "@audio-play") == 0) {
+                start_playback();
             } else if (strcmp(message.value, "@relay-test") == 0) {
                 update_connection_status("Wi-Fi: offline\nInternet: checking phone relay…");
                 send_relay_request("@relay\nCHECK");
@@ -382,6 +627,7 @@ void start_wifi() {
 void init_display() {
     BoardPower_Init();
     BoardPower_EPD_ON();
+    BoardPower_Audio_ON();
     PortLvgl_Start_Init();
     Lvgl_PortInit(flush_display);
 
@@ -418,6 +664,9 @@ extern "C" void app_main(void) {
     text_queue = xQueueCreate(4, sizeof(TextMessage));
     configASSERT(text_queue);
     init_display();
+    init_sd_card();
+    Codec_StartInit();
+    audio_ready = true;
     xTaskCreate(text_display_task, "text_display", 4096, nullptr, 4, nullptr);
     start_wifi();
     start_ble();

@@ -63,6 +63,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   bool _scanningWifi = false;
   bool _hiddenWifi = false;
   bool _startingRelay = false;
+  bool _audioBusy = false;
+  bool _recordingAudio = false;
   bool _relayActive = false;
   List<String> _wifiNetworks = [];
   String? _savedCircuitId;
@@ -95,12 +97,13 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   Future<void> _refreshRelayStatus() async {
     try {
       final status = await _relayChannel.invokeMethod<String>('status');
+      final audioStatus = await _relayChannel.invokeMethod<String>('audioStatus');
       if (!mounted || status == null) return;
       final active = status != 'Stopped';
       if (active || _relayActive) {
         setState(() {
           _relayActive = active;
-          if (active) _status = status;
+          if (active) _status = audioStatus ?? status;
         });
       }
     } on PlatformException {
@@ -324,6 +327,16 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   void _onRelayMessage(List<int> value) {
     final message = utf8.decode(value, allowMalformed: true);
+    if (message.startsWith('@audio-status\n')) {
+      final status = message.substring('@audio-status\n'.length);
+      setState(() {
+        _status = status;
+        if (status.startsWith('Recording saved') || status.startsWith('Recording stopped') || status.startsWith('Recording failed')) {
+          _recordingAudio = false;
+        }
+      });
+      return;
+    }
     if (!message.startsWith('@wifi-list')) return;
     final networks = message
         .split('\n')
@@ -363,6 +376,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     if (device == null) return;
     setState(() => _startingRelay = true);
     try {
+      await _relayChannel.invokeMethod<void>('requestBatteryExemption');
       await device.disconnect();
       await _relayChannel.invokeMethod<void>('start', {'address': device.remoteId.str});
       if (!mounted) return;
@@ -390,6 +404,55 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         _relayActive = false;
         _status = 'Phone relay stopped.';
       });
+    }
+  }
+
+  Future<void> _recordAudio() async {
+    if (_audioBusy) return;
+    setState(() {
+      _audioBusy = true;
+      _recordingAudio = true;
+    });
+    try {
+      await _writeCircuit('@audio-record\n30');
+      _setStatus('Starting recording on Circuit…');
+    } catch (error) {
+      _setStatus('Could not start recording: $error');
+      if (mounted) setState(() => _recordingAudio = false);
+    } finally {
+      if (mounted) setState(() => _audioBusy = false);
+    }
+  }
+
+  Future<void> _stopRecording() async {
+    if (!_recordingAudio) return;
+    setState(() => _audioBusy = true);
+    try {
+      await _writeCircuit('@audio-stop');
+      _setStatus('Stopping recording…');
+    } catch (error) {
+      _setStatus('Could not stop recording: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _audioBusy = false;
+          _recordingAudio = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _playAudio() async {
+    if (_audioBusy) return;
+    setState(() => _audioBusy = true);
+    try {
+      await _writeCircuit('@audio-play');
+      _setStatus('Circuit is playing its latest recording.');
+      await Future<void>.delayed(const Duration(seconds: 6));
+    } catch (error) {
+      _setStatus('Could not play recording: $error');
+    } finally {
+      if (mounted) setState(() => _audioBusy = false);
     }
   }
 
@@ -516,6 +579,38 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
                     ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                     : const Icon(Icons.phonelink_ring),
                 label: Text(_startingRelay ? 'Starting phone relay…' : 'Enable phone relay'),
+              ),
+              const SizedBox(height: 32),
+              Text('Audio recording', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              const Text('Record a voice note to Circuit’s microSD card, then stop or play it.'),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: _audioBusy || _recordingAudio ? null : _recordAudio,
+                      icon: const Icon(Icons.mic),
+                      label: const Text('Record'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _audioBusy || !_recordingAudio ? null : _stopRecording,
+                      icon: const Icon(Icons.stop),
+                      label: const Text('Stop'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _audioBusy || _recordingAudio ? null : _playAudio,
+                      icon: const Icon(Icons.play_arrow),
+                      label: const Text('Play'),
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 32),
               Text('E-ink message', style: Theme.of(context).textTheme.titleMedium),
