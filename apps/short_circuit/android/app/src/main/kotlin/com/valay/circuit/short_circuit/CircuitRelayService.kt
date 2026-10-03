@@ -12,7 +12,10 @@ import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothProfile
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
@@ -50,7 +53,25 @@ class CircuitRelayService : Service() {
     private var circuitAddress: String? = null
     private var gatt: BluetoothGatt? = null
     private var command: BluetoothGattCharacteristic? = null
+    private var relayReady = false
     private val reconnectRunnable = Runnable { circuitAddress?.let(::connect) }
+    private val setupTimeout = Runnable {
+        gatt?.let { failConnection(it, "Circuit setup timed out") }
+    }
+    private val bondReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+            val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
+            if (device.address != circuitAddress) return
+            when (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)) {
+                BluetoothDevice.BOND_BONDED -> {
+                    reconnectDelayMs = 1000L
+                    reconnectHandler.post { connect(device.address) }
+                }
+                BluetoothDevice.BOND_NONE -> stopForUnpairing()
+            }
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         circuitAddress = intent?.getStringExtra(extraAddress)
@@ -68,10 +89,16 @@ class CircuitRelayService : Service() {
         return START_STICKY
     }
 
-    override fun onCreate() { super.onCreate(); activeService = this }
+    override fun onCreate() {
+        super.onCreate()
+        activeService = this
+        registerReceiver(bondReceiver, IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED))
+    }
     override fun onDestroy() {
         shouldReconnect = false
         reconnectHandler.removeCallbacks(reconnectRunnable)
+        reconnectHandler.removeCallbacks(setupTimeout)
+        unregisterReceiver(bondReceiver)
         if (activeService === this) activeService = null
         relayStatus = "Stopped"
         gatt?.close()
@@ -83,11 +110,20 @@ class CircuitRelayService : Service() {
     private fun connect(address: String) {
         if (!shouldReconnect || !hasBluetoothPermission()) return
         reconnectHandler.removeCallbacks(reconnectRunnable)
+        reconnectHandler.removeCallbacks(setupTimeout)
         gatt?.close()
         gatt = null
         command = null
+        relayReady = false
         val device = BluetoothAdapter.getDefaultAdapter()?.getRemoteDevice(address) ?: return
+        if (device.bondState != BluetoothDevice.BOND_BONDED) {
+            setRelayStatus("Pair Circuit in Short-Circuit to enable the relay")
+            device.createBond()
+            return
+        }
+        setRelayStatus("Connecting to Circuit…")
         gatt = device.connectGatt(this, false, callback, BluetoothDevice.TRANSPORT_LE)
+        reconnectHandler.postDelayed(setupTimeout, 15_000L)
     }
 
     private fun scheduleReconnect() {
@@ -99,45 +135,83 @@ class CircuitRelayService : Service() {
         reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(30_000L)
     }
 
+    private fun stopForUnpairing() {
+        shouldReconnect = false
+        reconnectHandler.removeCallbacks(reconnectRunnable)
+        reconnectHandler.removeCallbacks(setupTimeout)
+        relayReady = false
+        command = null
+        gatt?.close()
+        gatt = null
+        getSharedPreferences(preferencesName, MODE_PRIVATE).edit().remove(addressKey).apply()
+        relayStatus = "Circuit unpaired"
+        stopSelf()
+    }
+
+    private fun failConnection(candidate: BluetoothGatt, reason: String) {
+        if (this.gatt !== candidate) return
+        reconnectHandler.removeCallbacks(setupTimeout)
+        command = null
+        relayReady = false
+        this.gatt = null
+        candidate.close()
+        setRelayStatus(reason)
+        scheduleReconnect()
+    }
+
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, state: Int) {
             if (state == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-                reconnectDelayMs = 1000L
-                reconnectHandler.removeCallbacks(reconnectRunnable)
-                gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-                setRelayStatus("Circuit relay connected")
-                gatt.discoverServices()
-            } else {
-                if (this@CircuitRelayService.gatt === gatt) {
-                    command = null
-                    this@CircuitRelayService.gatt = null
+                if (this@CircuitRelayService.gatt !== gatt) {
+                    gatt.close()
+                    return
                 }
-                gatt.close()
-                scheduleReconnect()
+                reconnectDelayMs = 1000L
+                gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                setRelayStatus("Preparing secure Circuit relay…")
+                if (!gatt.discoverServices()) failConnection(gatt, "Could not discover Circuit services")
+            } else {
+                failConnection(gatt, "Circuit disconnected")
             }
         }
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                gatt.disconnect()
+                failConnection(gatt, "Circuit service discovery failed")
                 return
             }
             val service = gatt.getService(serviceUuid) ?: run {
-                gatt.disconnect()
+                failConnection(gatt, "Circuit service was not found")
                 return
             }
-            command = service.getCharacteristic(commandUuid)
+            command = service.getCharacteristic(commandUuid) ?: run {
+                failConnection(gatt, "Circuit command channel was not found")
+                return
+            }
             val relay = service.getCharacteristic(relayUuid) ?: run {
-                gatt.disconnect()
+                failConnection(gatt, "Circuit relay channel was not found")
                 return
             }
-            gatt.setCharacteristicNotification(relay, true)
-            relay.getDescriptor(cccdUuid)?.let { descriptor ->
-                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(descriptor)
+            if (!gatt.setCharacteristicNotification(relay, true)) {
+                failConnection(gatt, "Could not enable Circuit notifications")
+                return
             }
+            val descriptor = relay.getDescriptor(cccdUuid) ?: run {
+                failConnection(gatt, "Circuit notification descriptor was not found")
+                return
+            }
+            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            if (!gatt.writeDescriptor(descriptor)) failConnection(gatt, "Could not subscribe to Circuit")
         }
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            if (descriptor.uuid == cccdUuid && status == BluetoothGatt.GATT_SUCCESS) writeCommand("@relay-test")
+            if (descriptor.uuid != cccdUuid) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                failConnection(gatt, "Circuit notification subscription failed")
+                return
+            }
+            reconnectHandler.removeCallbacks(setupTimeout)
+            relayReady = true
+            setRelayStatus("Circuit relay ready")
+            writeCommand("@relay-test")
         }
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             handleRelayRequest(characteristic.value?.toString(Charsets.UTF_8).orEmpty())
@@ -169,6 +243,7 @@ class CircuitRelayService : Service() {
     }
 
     private fun writeCommand(value: String): Boolean {
+        if (!relayReady) return false
         val characteristic = command ?: return false
         return characteristic.let {
             characteristic.value = value.toByteArray()

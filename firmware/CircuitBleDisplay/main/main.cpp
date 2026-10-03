@@ -9,6 +9,7 @@
 #include "esp_gatts_api.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_random.h"
 #include "esp_vfs_fat.h"
 #include "esp_wifi.h"
 
@@ -60,6 +61,9 @@ bool audio_ready = false;
 bool audio_busy = false;
 volatile bool recording_active = false;
 volatile bool recording_stop_requested = false;
+uint32_t pairing_passkey = 0;
+bool wifi_connected = false;
+bool wifi_internet_online = false;
 
 void send_relay_request(const char *request);
 
@@ -135,12 +139,30 @@ void update_message(const char *message) {
     Lvgl_unlock();
 }
 
+void show_pairing_code() {
+    char pairing_text[80];
+    snprintf(pairing_text, sizeof(pairing_text), "Circuit\nPairing code\n%06lu", static_cast<unsigned long>(pairing_passkey));
+    update_message(pairing_text);
+}
+
+void show_securely_paired() {
+    update_message("Circuit\nSecurely paired\nShort-Circuit ready");
+}
+
 void update_connection_status(const char *status) {
     if (!Lvgl_lock(-1)) {
         return;
     }
     lv_label_set_text(connection_label, status);
     Lvgl_unlock();
+}
+
+void show_relay_disconnected() {
+    update_connection_status(wifi_connected
+        ? (wifi_internet_online
+            ? "Wi-Fi: connected\nInternet: online\nPhone relay: disconnected"
+            : "Wi-Fi: connected\nInternet: offline\nPhone relay: disconnected")
+        : "Wi-Fi: offline\nInternet: offline\nPhone relay: disconnected");
 }
 
 void update_storage_status(const char *status) {
@@ -347,6 +369,7 @@ void start_playback() {
 }
 
 void on_ping_success(esp_ping_handle_t, void *) {
+    wifi_internet_online = true;
     update_connection_status("Wi-Fi: connected\nInternet: online\nPhone relay: unavailable");
 }
 
@@ -355,6 +378,7 @@ void on_ping_end(esp_ping_handle_t handle, void *) {
     uint32_t replies_size = sizeof(replies);
     esp_ping_get_profile(handle, ESP_PING_PROF_REPLY, &replies, replies_size);
     if (replies == 0) {
+        wifi_internet_online = false;
         update_connection_status("Wi-Fi: connected\nInternet: offline\nPhone relay: unavailable");
     }
     esp_ping_delete_session(handle);
@@ -379,8 +403,12 @@ void check_wifi_internet() {
 
 void wifi_event_handler(void *, esp_event_base_t event_base, int32_t event_id, void *) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
+        wifi_connected = true;
+        wifi_internet_online = false;
         update_connection_status("Wi-Fi: connected\nInternet: checking…\nPhone relay: unavailable");
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_connected = false;
+        wifi_internet_online = false;
         update_connection_status("Wi-Fi: offline\nInternet: offline\nPhone relay: unavailable");
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         check_wifi_internet();
@@ -495,6 +523,18 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
     case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
         ESP_LOGI(kTag, "Advertising as %s", kDeviceName);
         break;
+    case ESP_GAP_BLE_SEC_REQ_EVT:
+        ESP_ERROR_CHECK(esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true));
+        break;
+    case ESP_GAP_BLE_AUTH_CMPL_EVT:
+        if (param->ble_security.auth_cmpl.success) {
+            ESP_LOGI(kTag, "Short-Circuit bonded with encrypted BLE");
+            show_securely_paired();
+        } else {
+            ESP_LOGW(kTag, "BLE bonding failed: 0x%x", param->ble_security.auth_cmpl.fail_reason);
+            show_pairing_code();
+        }
+        break;
     default:
         break;
     }
@@ -539,7 +579,7 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         };
         ESP_ERROR_CHECK(esp_ble_gatts_start_service(service_handle));
         ESP_ERROR_CHECK(esp_ble_gatts_add_char(
-            service_handle, &text_uuid, ESP_GATT_PERM_WRITE,
+            service_handle, &text_uuid, ESP_GATT_PERM_WRITE_ENCRYPTED,
             ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR, &text_value, nullptr));
         break;
     }
@@ -549,7 +589,7 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
             esp_bt_uuid_t relay_uuid = {.len = ESP_UUID_LEN_16, .uuid = {.uuid16 = kRelayUuid}};
             esp_attr_value_t relay_value = {.attr_max_len = kMaxTextBytes, .attr_len = 0, .attr_value = nullptr};
             ESP_ERROR_CHECK(esp_ble_gatts_add_char(
-                service_handle, &relay_uuid, ESP_GATT_PERM_READ,
+                service_handle, &relay_uuid, ESP_GATT_PERM_READ_ENCRYPTED,
                 ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY, &relay_value, nullptr));
         } else if (param->add_char.char_uuid.uuid.uuid16 == kRelayUuid) {
             relay_handle = param->add_char.attr_handle;
@@ -561,7 +601,7 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                 .attr_value = descriptor_value,
             };
             ESP_ERROR_CHECK(esp_ble_gatts_add_char_descr(
-                service_handle, &descriptor_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE, &descriptor, nullptr));
+                service_handle, &descriptor_uuid, ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED, &descriptor, nullptr));
             ESP_LOGI(kTag, "Relay characteristic ready (handle %u)", relay_handle);
         }
         break;
@@ -579,9 +619,11 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
     case ESP_GATTS_CONNECT_EVT:
         connection_id = param->connect.conn_id;
         ESP_LOGI(kTag, "Short-Circuit connected");
+        ESP_ERROR_CHECK(esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM));
         break;
     case ESP_GATTS_DISCONNECT_EVT:
         connection_id = UINT16_MAX;
+        show_relay_disconnected();
         ESP_LOGI(kTag, "Client disconnected; advertising again");
         ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&adv_params));
         break;
@@ -598,6 +640,19 @@ void start_ble() {
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
     ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_event_handler));
+    esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
+    esp_ble_io_cap_t io_capability = ESP_IO_CAP_OUT;
+    uint8_t key_size = 16;
+    uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+    uint8_t response_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+    uint8_t only_secure_connections = ESP_BLE_ONLY_ACCEPT_SPECIFIED_AUTH_ENABLE;
+    ESP_ERROR_CHECK(esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req)));
+    ESP_ERROR_CHECK(esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &io_capability, sizeof(io_capability)));
+    ESP_ERROR_CHECK(esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size)));
+    ESP_ERROR_CHECK(esp_ble_gap_set_security_param(ESP_BLE_SM_ONLY_ACCEPT_SPECIFIED_SEC_AUTH, &only_secure_connections, sizeof(only_secure_connections)));
+    ESP_ERROR_CHECK(esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &pairing_passkey, sizeof(pairing_passkey)));
+    ESP_ERROR_CHECK(esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key)));
+    ESP_ERROR_CHECK(esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &response_key, sizeof(response_key)));
     ESP_ERROR_CHECK(esp_ble_gatts_register_callback(gatts_event_handler));
     ESP_ERROR_CHECK(esp_ble_gatts_app_register(0));
 }
@@ -644,7 +699,7 @@ void init_display() {
         lv_obj_set_style_text_align(message_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_font(message_label, &lv_font_montserrat_14, 0);
         lv_label_set_long_mode(message_label, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(message_label, "Circuit\nReady for\nShort-Circuit");
+        lv_label_set_text(message_label, "Circuit\nStarting…");
         lv_obj_align(message_label, LV_ALIGN_BOTTOM_MID, 0, -12);
         Lvgl_unlock();
     }
@@ -663,6 +718,7 @@ extern "C" void app_main(void) {
 
     text_queue = xQueueCreate(4, sizeof(TextMessage));
     configASSERT(text_queue);
+    pairing_passkey = esp_random() % 1000000;
     init_display();
     init_sd_card();
     Codec_StartInit();
@@ -670,4 +726,9 @@ extern "C" void app_main(void) {
     xTaskCreate(text_display_task, "text_display", 4096, nullptr, 4, nullptr);
     start_wifi();
     start_ble();
+    if (esp_ble_get_bond_device_num() == 0) {
+        show_pairing_code();
+    } else {
+        show_securely_paired();
+    }
 }

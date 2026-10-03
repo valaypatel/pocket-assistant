@@ -13,6 +13,7 @@ final _textCharacteristicId = Guid('0000fff1-0000-1000-8000-00805f9b34fb');
 final _relayCharacteristicId = Guid('0000fff2-0000-1000-8000-00805f9b34fb');
 const _relayChannel = MethodChannel('circuit/relay');
 const _savedCircuitIdKey = 'saved_circuit_id';
+const _secureBondMigrationKey = 'secure_bond_migration_complete';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -62,7 +63,6 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   bool _provisioningWifi = false;
   bool _scanningWifi = false;
   bool _hiddenWifi = false;
-  bool _startingRelay = false;
   bool _audioBusy = false;
   bool _recordingAudio = false;
   bool _relayActive = false;
@@ -103,7 +103,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       if (active || _relayActive) {
         setState(() {
           _relayActive = active;
-          if (active) _status = audioStatus ?? status;
+          _status = active ? (audioStatus ?? status) : 'Phone relay stopped.';
         });
       }
     } on PlatformException {
@@ -129,6 +129,17 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     final preferences = await SharedPreferences.getInstance();
     final deviceId = preferences.getString(_savedCircuitIdKey);
     if (deviceId == null || !mounted) return;
+    final savedDevice = BluetoothDevice.fromId(deviceId);
+    if (await savedDevice.bondState.first != BluetoothBondState.bonded) {
+      await preferences.remove(_savedCircuitIdKey);
+      if (mounted) {
+        setState(() {
+          _savedCircuitId = null;
+          _status = 'Circuit was unpaired. Scan to pair it again.';
+        });
+      }
+      return;
+    }
     final relayStatus = await _relayChannel.invokeMethod<String>('status');
     if (relayStatus != null && relayStatus != 'Stopped') {
       setState(() {
@@ -142,7 +153,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       _savedCircuitId = deviceId;
       _status = 'Reconnecting to your saved Circuit…';
     });
-    await _connect(BluetoothDevice.fromId(deviceId), savedReconnect: true);
+    await _connect(savedDevice, savedReconnect: true);
   }
 
   Future<void> _scan() async {
@@ -203,6 +214,17 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         license: License.nonprofit,
         timeout: const Duration(seconds: 15),
       );
+      final preferences = await SharedPreferences.getInstance();
+      var bondState = await device.bondState.first;
+      if (bondState == BluetoothBondState.bonded && preferences.getBool(_secureBondMigrationKey) != true) {
+        await device.removeBond();
+        bondState = BluetoothBondState.none;
+      }
+      if (bondState != BluetoothBondState.bonded) {
+        _setStatus('Enter Circuit’s six-digit code in the Android pairing prompt…');
+        await device.createBond();
+        await preferences.setBool(_secureBondMigrationKey, true);
+      }
       _connectionSubscription?.cancel();
       _connectionSubscription = device.connectionState.listen((state) {
         if (state == BluetoothConnectionState.disconnected && mounted) {
@@ -240,9 +262,9 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         _relayCharacteristic = relay;
         _status = 'Connected. Send text to the e-ink screen.';
       });
-      final preferences = await SharedPreferences.getInstance();
       await preferences.setString(_savedCircuitIdKey, device.remoteId.str);
       _savedCircuitId = device.remoteId.str;
+      await _startPhoneRelay();
     } catch (error) {
       _setStatus(savedReconnect
           ? 'Your saved Circuit is not nearby. Tap Scan only if you need to find it again.'
@@ -374,7 +396,6 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   Future<void> _startPhoneRelay() async {
     final device = _device;
     if (device == null) return;
-    setState(() => _startingRelay = true);
     try {
       await _relayChannel.invokeMethod<void>('requestBatteryExemption');
       await device.disconnect();
@@ -392,8 +413,6 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       await _refreshRelayStatus();
     } catch (error) {
       _setStatus('Could not start phone relay: $error');
-    } finally {
-      if (mounted) setState(() => _startingRelay = false);
     }
   }
 
@@ -573,13 +592,13 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
                 label: Text(_provisioningWifi ? 'Sending Wi-Fi…' : 'Set up Wi-Fi'),
               ),
               const SizedBox(height: 12),
-              if (connected) OutlinedButton.icon(
-                onPressed: _startingRelay ? null : _startPhoneRelay,
-                icon: _startingRelay
-                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.phonelink_ring),
-                label: Text(_startingRelay ? 'Starting phone relay…' : 'Enable phone relay'),
-              ),
+              if (connected)
+                const ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.phonelink_ring),
+                  title: Text('Phone relay stays connected automatically'),
+                  subtitle: Text('Circuit prefers Wi-Fi and uses your phone only when Wi-Fi has no internet.'),
+                ),
               const SizedBox(height: 32),
               Text('Audio recording', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 8),
