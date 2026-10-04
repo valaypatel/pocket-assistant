@@ -13,6 +13,9 @@ vendor/
 # ESP-IDF / clangd index cache
 .cache/
 
+# ESP-IDF regenerates this on every build and writes absolute local paths into it
+firmware/CircuitBleDisplay/dependencies.lock
+
 # Python / AWS SAM build output
 .venv/
 __pycache__/
