@@ -448,6 +448,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   String _displayName = 'Valay';
   DateTime? _recordingStartedAt;
   Timer? _clockTicker;
+  bool _pruneRequested = false;
   // What Circuit reports about its own Wi-Fi: none, connecting, connected, failed.
   String _wifiState = 'none';
   String _wifiSsid = '';
@@ -485,7 +486,10 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     });
     _wifiPollTimer = Timer.periodic(
       const Duration(seconds: 5),
-      (_) => _requestWifiStatus(),
+      (_) {
+        _requestWifiStatus();
+        _checkForLostNotes();
+      },
     );
     _clearAudioOnce();
     unawaited(
@@ -1029,6 +1033,16 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       unawaited(_attachSyncedFile(path, epoch));
       return;
     }
+    if (status.startsWith('Sync: no new notes')) {
+      // Circuit has nothing waiting.
+      setState(() {
+        _audioBusy = false;
+        _syncingNoteId = null;
+        _syncProgress = null;
+      });
+      unawaited(_pruneLostNotes());
+      return;
+    }
     if (status.startsWith('Sync complete: all notes saved') ||
         status.startsWith('Sync complete: no new notes')) {
       setState(() {
@@ -1036,6 +1050,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         _syncingNoteId = null;
         _syncProgress = null;
       });
+      unawaited(_pruneLostNotes());
       return;
     }
     if (status.startsWith('Sync needs Wi-Fi')) {
@@ -1079,6 +1094,55 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   );
 
   String? _pendingSyncNoteId() => _pendingNotes().firstOrNull?.id;
+
+  /// Circuit has confirmed it has nothing waiting, so a note that still has no
+  /// audio after a few minutes can never receive any (for example one recorded
+  /// before Circuit kept every note). Remove those instead of leaving a card
+  /// that can never sync.
+  Iterable<CircuitNote> _notesWithoutAudio(DateTime cutoff) => _notes.where(
+    (note) => note.audioPath == null && note.createdAt.isBefore(cutoff),
+  );
+
+  Future<void> _pruneLostNotes() async {
+    final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
+    final lost = _notesWithoutAudio(cutoff)
+        .where(
+          (note) =>
+              note.createdAt.isBefore(cutoff) &&
+              note.id != _syncingNoteId &&
+              note.id != _transcribingNoteId,
+        )
+        .map((note) => note.id)
+        .toList();
+    debugPrint('Short-Circuit: pruning ${lost.length} note(s) without audio');
+    if (lost.isEmpty) return;
+    final notes = _notes.where((note) => !lost.contains(note.id)).toList();
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(
+      _notesKey,
+      jsonEncode(notes.map((item) => item.toJson()).toList()),
+    );
+    if (!mounted) return;
+    setState(() => _notes = notes);
+    unawaited(_sendHomeStatus());
+    _toast(
+      lost.length == 1
+          ? 'Removed a note whose recording was lost'
+          : 'Removed ${lost.length} notes whose recordings were lost',
+    );
+  }
+
+  /// Once per session, if old notes are still waiting for audio, ask Circuit
+  /// whether it has anything left to send. Its answer decides their fate.
+  void _checkForLostNotes() {
+    if (_pruneRequested || !_circuitAvailable) return;
+    final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
+    if (_notesWithoutAudio(cutoff).isEmpty) return;
+    _pruneRequested = true;
+    _writeCircuit('@audio-sync').catchError((Object _) {
+      _pruneRequested = false;
+    });
+  }
 
   /// A synced file belongs to the oldest note still waiting for audio; if the
   /// recording happened while the app was closed there is none, so make one.
@@ -1317,17 +1381,31 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     });
   }
 
-  Future<void> _writeCircuit(String value) async {
+  Future<void> _writeChain = Future<void>.value();
+
+  /// Android's Bluetooth stack runs one write at a time and rejects the rest, so
+  /// writes to Circuit are queued rather than fired concurrently.
+  Future<void> _writeCircuit(String value) {
+    final result = _writeChain.then((_) => _writeCircuitNow(value));
+    _writeChain = result.catchError((_) {});
+    return result;
+  }
+
+  Future<void> _writeCircuitNow(String value) async {
     final characteristic = _textCharacteristic;
     if (characteristic != null) {
       await characteristic.write(utf8.encode(value), withoutResponse: false);
       return;
     }
     if (_relayActive) {
-      final sent = await _relayChannel.invokeMethod<bool>('write', {
-        'value': value,
-      });
-      if (sent == true) return;
+      // The link can be busy with the service's own write; give it a moment.
+      for (var attempt = 0; attempt < 4; attempt++) {
+        final sent = await _relayChannel.invokeMethod<bool>('write', {
+          'value': value,
+        });
+        if (sent == true) return;
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+      }
     }
     throw StateError('Circuit is not connected.');
   }
