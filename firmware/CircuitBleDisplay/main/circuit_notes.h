@@ -180,4 +180,15 @@ inline size_t clean_synced() {
     return removed;
 }
 
+// Deletes one note (the WAV and its marker). Returns true if a file was removed;
+// a note that is already gone is not an error.
+inline bool remove_note(uint32_t id) {
+    char path[48];
+    path_for(id, "WAV", path, sizeof(path));
+    const bool removed = remove(path) == 0;
+    path_for(id, "SYN", path, sizeof(path));
+    remove(path);
+    return removed;
+}
+
 }  // namespace circuit_notes

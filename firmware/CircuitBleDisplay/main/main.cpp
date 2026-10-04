@@ -1369,6 +1369,21 @@ void text_display_task(void *) {
                 update_connection_status(online
                     ? "Wi-Fi: offline\nInternet: phone relay online"
                     : "Wi-Fi: offline\nInternet: phone relay offline");
+            } else if (strncmp(message.value, "@note-delete\n", 13) == 0) {
+                // The app deleted this note, so remove Circuit's copy as well. Replying
+                // even when the note is already gone lets the app stop retrying.
+                const unsigned long id = strtoul(message.value + 13, nullptr, 10);
+                char result[48];
+                if (id == 0) {
+                    snprintf(result, sizeof(result), "Note delete refused");
+                } else if (audio_busy || recording_active || circuit_sync::is_open()) {
+                    snprintf(result, sizeof(result), "Note delete busy #%lu", id);
+                } else {
+                    const bool removed = circuit_notes::remove_note(static_cast<uint32_t>(id));
+                    ESP_LOGI(kTag, "Deleted note %lu from the card: %s", id, removed ? "removed" : "was already gone");
+                    snprintf(result, sizeof(result), "Note deleted #%lu", id);
+                }
+                report_audio_status(result);
             } else if (strcmp(message.value, "@notes-clean") == 0) {
                 if (audio_busy || recording_active || circuit_sync::is_open()) {
                     report_audio_status("Cannot clean notes while recording or syncing");
