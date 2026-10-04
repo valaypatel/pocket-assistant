@@ -1,15 +1,20 @@
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
+#include <cctype>
+#include <ctime>
 
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_gap_ble_api.h"
+#include "esp_gatt_common_api.h"
 #include "esp_gatts_api.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_random.h"
+#include "esp_sntp.h"
 #include "esp_vfs_fat.h"
 #include "esp_wifi.h"
 
@@ -17,6 +22,7 @@
 #include "ping/ping_sock.h"
 #include "nvs_flash.h"
 #include "sdmmc_cmd.h"
+#include "driver/gpio.h"
 #include "driver/sdmmc_host.h"
 
 #include "freertos/FreeRTOS.h"
@@ -27,6 +33,9 @@
 #include "port_lvgl.h"
 #include "port_power.h"
 #include "port_codec.h"
+#include "circuit_demo_screens.h"
+#include "circuit_notes.h"
+#include "circuit_sync_server.h"
 
 namespace {
 
@@ -37,20 +46,43 @@ constexpr uint16_t kRelayUuid = 0xFFF2;
 constexpr size_t kMaxTextBytes = 160;
 constexpr char kWifiCommandPrefix[] = "@wifi\n";
 constexpr char kWifiScanCommand[] = "@wifi-scan";
+constexpr char kHomeStatusCommand[] = "@home\n";
 constexpr char kSdMountPath[] = "/sdcard";
 constexpr char kSdTestFile[] = "/sdcard/CIRCUIT.TXT";
-constexpr char kAudioFile[] = "/sdcard/CIRCUIT.WAV";
 constexpr uint32_t kAudioSampleRate = 16000;
-constexpr uint16_t kAudioChannels = 2;
+constexpr uint16_t kAudioChannels = 1;
+constexpr uint16_t kCodecCaptureChannels = 2;
 constexpr uint16_t kAudioBitsPerSample = 16;
 constexpr size_t kAudioBufferBytes = 4096;
-constexpr uint32_t kMaxRecordingSeconds = 30;
+// Default cap for a single recording. Kept as one value so a phone setting can
+// replace it later. 16 kHz mono 16-bit is ~1.9 MB/min on the SD card.
+constexpr uint32_t kMaxRecordingSeconds = 600;
+// Use the established relay characteristic for binary audio packets too. This
+// avoids requiring Android to discard a bonded device's cached GATT table.
+constexpr size_t kAudioPacketBytes = 158;
+// The upper side button is the BOOT button (GPIO0). The lower GPIO18 button
+// is power-related, so it deliberately remains outside the audio controls.
+constexpr gpio_num_t kRecordButtonPin = GPIO_NUM_0;
+constexpr TickType_t kButtonPollInterval = pdMS_TO_TICKS(20);
+constexpr TickType_t kButtonDebounceDelay = pdMS_TO_TICKS(50);
+constexpr TickType_t kForceSyncHoldTime = pdMS_TO_TICKS(2000);
 constexpr uint16_t kServiceHandles = 6;
 
 const char *kTag = "Circuit";
 QueueHandle_t text_queue;
 lv_obj_t *message_label;
 lv_obj_t *connection_label;
+lv_obj_t *wordmark_image;
+lv_obj_t *pairing_code_label;
+lv_obj_t *recording_timer_label;
+lv_obj_t *sync_progress_label;
+lv_obj_t *idle_date_label;
+lv_obj_t *idle_time_label;
+lv_obj_t *idle_ampm_label;
+lv_obj_t *idle_pending_label;
+lv_obj_t *idle_done_label;
+lv_obj_t *idle_clock_icon;
+lv_obj_t *idle_check_icon;
 esp_gatt_if_t server_if = ESP_GATT_IF_NONE;
 uint16_t service_handle;
 uint16_t text_handle;
@@ -59,13 +91,42 @@ uint16_t connection_id = UINT16_MAX;
 sdmmc_card_t *sd_card = nullptr;
 bool audio_ready = false;
 bool audio_busy = false;
+TaskHandle_t audio_sync_task_handle = nullptr;
 volatile bool recording_active = false;
 volatile bool recording_stop_requested = false;
+enum class DeviceScreen : uint8_t { Idle, Recording, Saved, Syncing, Pairing };
+volatile DeviceScreen active_screen = DeviceScreen::Idle;
+volatile TickType_t recording_started_at = 0;
 uint32_t pairing_passkey = 0;
 bool wifi_connected = false;
+// What the header icon and the app's Wi-Fi setup screen show.
+enum class WifiUi : uint8_t { None, Connecting, Connected, Failed };
+volatile WifiUi wifi_ui = WifiUi::None;
+char wifi_ssid[33] = "";
+char wifi_detail[48] = "";  // IP address when connected, reason when failed
+int wifi_retries = 0;
+bool wifi_manual_disconnect = false;  // we asked for the next DISCONNECTED event
+bool wifi_auth_failure = false;
+int64_t wifi_failed_at_ms = 0;
+constexpr int kWifiMaxRetries = 4;
+lv_obj_t *icon_wifi_obj;
+lv_obj_t *icon_phone_obj;
+lv_obj_t *icon_storage_obj;
+uint8_t status_icon_frame = 0;
 bool wifi_internet_online = false;
+bool home_status_received = false;
+volatile bool clock_set = false;
+volatile bool ble_encrypted = false;       // bonded phone, link encrypted
+volatile int64_t last_wifi_sync_end_ms = -600000;  // no cooldown at boot
+constexpr int64_t kWifiSyncCooldownMs = 45000;
+constexpr int64_t kWifiSyncMaxCooldownMs = 600000;
+int wifi_sync_failures = 0;  // sessions in a row where the phone never connected
+constexpr TickType_t kSyncSupervisorInterval = pdMS_TO_TICKS(8000);
+bool sntp_started = false;
+constexpr time_t kMinValidEpoch = 1704067200;  // 2024-01-01
 
 void send_relay_request(const char *request);
+esp_err_t send_audio_data(const uint8_t *data, size_t length);
 
 struct TextMessage {
     char value[kMaxTextBytes + 1];
@@ -131,6 +192,142 @@ void flush_display(lv_display_t *display, const lv_area_t *area, uint8_t *color_
     lv_disp_flush_ready(display);
 }
 
+struct ScreenTimeout {
+    DeviceScreen expected;
+    uint32_t delay_ms;
+};
+
+void show_device_screen(DeviceScreen screen);
+
+// Date, clock and note counts stay on screen in every state (see
+// prototypes/circuit-epaper-states). They only appear once the phone has
+// supplied real values; until then they show dashes. The pairing screen
+// keeps its baked "PAIR CODE" header in place of the date.
+void apply_persistent_labels(DeviceScreen screen) {
+    const bool show = true;
+    const auto set_visible = [](lv_obj_t *label, bool visible) {
+        if (visible) lv_obj_clear_flag(label, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+    };
+    // The pairing screen is a dedicated layout with no persistent info.
+    const bool persistent = show && screen != DeviceScreen::Pairing;
+    set_visible(idle_date_label, persistent);
+    set_visible(idle_time_label, persistent);
+    set_visible(idle_ampm_label, persistent);
+    set_visible(idle_pending_label, persistent);
+    set_visible(idle_done_label, persistent);
+    set_visible(idle_clock_icon, persistent);
+    set_visible(idle_check_icon, persistent);
+    // Labels must sit above the full-screen artwork.
+    lv_obj_move_foreground(idle_date_label);
+    lv_obj_move_foreground(idle_time_label);
+    lv_obj_move_foreground(idle_ampm_label);
+    lv_obj_move_foreground(idle_pending_label);
+    lv_obj_move_foreground(idle_done_label);
+    lv_obj_move_foreground(idle_clock_icon);
+    lv_obj_move_foreground(idle_check_icon);
+}
+
+// Sets the system clock once. The phone's UTC offset becomes the local zone.
+void set_clock_from_phone(time_t epoch, int offset_minutes) {
+    if (epoch < kMinValidEpoch) return;
+    char tz[24];
+    const int east = offset_minutes < 0 ? -offset_minutes : offset_minutes;
+    // POSIX TZ offsets are inverted: UTC+5:30 is written "UTC-5:30".
+    snprintf(tz, sizeof(tz), "UTC%c%d:%02d", offset_minutes >= 0 ? '-' : '+', east / 60, east % 60);
+    setenv("TZ", tz, 1);
+    tzset();
+    timeval tv = {.tv_sec = epoch, .tv_usec = 0};
+    settimeofday(&tv, nullptr);
+    clock_set = true;
+}
+
+// Shows a 24-hour time as 12-hour "H:MM" with a small AM/PM beside it.
+// Requires the LVGL lock.
+void set_clock_labels(int hour24, int minute) {
+    char text[8];
+    const int hour12 = hour24 % 12 == 0 ? 12 : hour24 % 12;
+    snprintf(text, sizeof(text), "%d:%02d", hour12, minute);
+    lv_label_set_text(idle_time_label, text);
+    lv_label_set_text(idle_ampm_label, hour24 < 12 ? "AM" : "PM");
+    lv_obj_update_layout(idle_time_label);
+    lv_obj_align_to(idle_ampm_label, idle_time_label, LV_ALIGN_OUT_RIGHT_BOTTOM, 3, -7);
+}
+
+// Requires the LVGL lock.
+// Lays the counts out right to left so the icons follow the digits:
+// [clock]3 [check]9. Requires the LVGL lock.
+void layout_count_labels() {
+    lv_obj_update_layout(idle_done_label);
+    lv_obj_align_to(idle_check_icon, idle_done_label, LV_ALIGN_OUT_LEFT_MID, -3, 0);
+    lv_obj_align_to(idle_pending_label, idle_check_icon, LV_ALIGN_OUT_LEFT_MID, -9, 0);
+    lv_obj_update_layout(idle_pending_label);
+    lv_obj_align_to(idle_clock_icon, idle_pending_label, LV_ALIGN_OUT_LEFT_MID, -3, 0);
+    lv_obj_update_layout(idle_clock_icon);
+    ESP_LOGI(kTag, "Counts layout: clock x=%d | pending x=%d w=%d y=%d | check x=%d | done x=%d w=%d y=%d h=%d",
+        (int)lv_obj_get_x(idle_clock_icon), (int)lv_obj_get_x(idle_pending_label), (int)lv_obj_get_width(idle_pending_label),
+        (int)lv_obj_get_y(idle_pending_label), (int)lv_obj_get_x(idle_check_icon), (int)lv_obj_get_x(idle_done_label),
+        (int)lv_obj_get_width(idle_done_label), (int)lv_obj_get_y(idle_done_label), (int)lv_obj_get_height(idle_done_label));
+}
+
+// Requires the LVGL lock.
+void set_count_labels(int pending, int done) {
+    char text[8];
+    snprintf(text, sizeof(text), "%d", pending);
+    lv_label_set_text(idle_pending_label, text);
+    snprintf(text, sizeof(text), "%d", done);
+    lv_label_set_text(idle_done_label, text);
+    layout_count_labels();
+}
+
+void update_home_status(const char *value) {
+    char buffer[kMaxTextBytes + 1];
+    strncpy(buffer, value, sizeof(buffer) - 1);
+    buffer[sizeof(buffer) - 1] = '\0';
+    char *save = nullptr;
+    strtok_r(buffer, "\n", &save);  // @home
+    const char *time = strtok_r(nullptr, "\n", &save);
+    const char *date = strtok_r(nullptr, "\n", &save);
+    const char *counts = strtok_r(nullptr, "\n", &save);
+    const char *epoch = strtok_r(nullptr, "\n", &save);
+    const char *offset = strtok_r(nullptr, "\n", &save);
+    if (time == nullptr || date == nullptr || counts == nullptr) return;
+    // First time source wins; after that Circuit keeps time on its own.
+    if (!clock_set && epoch != nullptr && offset != nullptr) {
+        set_clock_from_phone(strtoll(epoch, nullptr, 10), atoi(offset));
+    }
+    if (!Lvgl_lock(-1)) return;
+    home_status_received = true;
+    int hour = 0, minute = 0;
+    if (!clock_set) {
+        if (sscanf(time, "%d:%d", &hour, &minute) == 2) set_clock_labels(hour, minute);
+        lv_label_set_text(idle_date_label, date);
+    }
+    // The phone sends "<pending> · <done>"; the separator is not drawn.
+    int pending = 0, done = 0;
+    if (sscanf(counts, "%d %*[^0-9]%d", &pending, &done) == 2) set_count_labels(pending, done);
+    ESP_LOGI(kTag, "Home status: counts=%d/%d clock_set=%d", pending, done, clock_set ? 1 : 0);
+    apply_persistent_labels(active_screen);
+    Lvgl_unlock();
+}
+
+void screen_timeout_task(void *argument) {
+    const ScreenTimeout timeout = *static_cast<ScreenTimeout *>(argument);
+    delete static_cast<ScreenTimeout *>(argument);
+    vTaskDelay(pdMS_TO_TICKS(timeout.delay_ms));
+    if (active_screen == timeout.expected) {
+        show_device_screen(DeviceScreen::Idle);
+    }
+    vTaskDelete(nullptr);
+}
+
+void return_to_idle_after(DeviceScreen expected, uint32_t delay_ms) {
+    auto *timeout = new ScreenTimeout{expected, delay_ms};
+    if (timeout != nullptr) {
+        xTaskCreate(screen_timeout_task, "screen_timeout", 3072, timeout, 2, nullptr);
+    }
+}
+
 void update_message(const char *message) {
     if (!Lvgl_lock(-1)) {
         return;
@@ -139,14 +336,106 @@ void update_message(const char *message) {
     Lvgl_unlock();
 }
 
+void show_device_screen(DeviceScreen screen) {
+    static constexpr const lv_image_dsc_t *kScreens[] = {
+        &circuit_idle_screen,
+        &circuit_record_screen,
+        &circuit_saved_screen,
+        &circuit_sync_screen,
+        &circuit_pair_screen,
+    };
+    if (!Lvgl_lock(-1)) {
+        return;
+    }
+    active_screen = screen;
+    if (screen == DeviceScreen::Recording) {
+        recording_started_at = xTaskGetTickCount();
+    }
+    lv_obj_add_flag(connection_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(message_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(pairing_code_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
+    lv_img_set_src(wordmark_image, kScreens[static_cast<size_t>(screen)]);
+    lv_obj_center(wordmark_image);
+    apply_persistent_labels(screen);
+    if (screen == DeviceScreen::Recording) {
+        lv_label_set_text(recording_timer_label, "00:00");
+        lv_obj_clear_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+    } else if (screen == DeviceScreen::Syncing) {
+        lv_label_set_text(sync_progress_label, "0%");
+        lv_obj_clear_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
+    Lvgl_unlock();
+}
+
+void demo_animation_task(void *) {
+    size_t record_frame = 0;
+    size_t sync_frame = 0;
+    while (true) {
+        if (active_screen == DeviceScreen::Recording && wordmark_image != nullptr) {
+            if (Lvgl_lock(-1)) {
+                // An expanding ring and a breathing dot, stepped for the e-paper.
+                static constexpr const lv_image_dsc_t *kRecordFrames[] = {
+                    &circuit_record_screen, &circuit_record_1_screen,
+                    &circuit_record_2_screen, &circuit_record_3_screen,
+                };
+                lv_img_set_src(wordmark_image, kRecordFrames[record_frame]);
+                const uint32_t elapsed = (xTaskGetTickCount() - recording_started_at) / configTICK_RATE_HZ;
+                char elapsed_text[12];
+                snprintf(elapsed_text, sizeof(elapsed_text), "%02lu:%02lu",
+                    static_cast<unsigned long>(elapsed / 60),
+                    static_cast<unsigned long>(elapsed % 60));
+                lv_label_set_text(recording_timer_label, elapsed_text);
+                lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
+                Lvgl_unlock();
+            }
+            record_frame = (record_frame + 1) % 4;
+            vTaskDelay(pdMS_TO_TICKS(700));
+        } else if (active_screen == DeviceScreen::Syncing && wordmark_image != nullptr) {
+            // The e-paper cannot spin smoothly, so step the refresh icon
+            // through its rotations instead.
+            static constexpr const lv_image_dsc_t *kSyncFrames[] = {
+                &circuit_sync_screen,   &circuit_sync_1_screen, &circuit_sync_2_screen,
+                &circuit_sync_3_screen, &circuit_sync_4_screen, &circuit_sync_5_screen,
+            };
+            sync_frame = (sync_frame + 1) % (sizeof(kSyncFrames) / sizeof(kSyncFrames[0]));
+            if (Lvgl_lock(-1)) {
+                if (active_screen == DeviceScreen::Syncing) {
+                    lv_img_set_src(wordmark_image, kSyncFrames[sync_frame]);
+                }
+                Lvgl_unlock();
+            }
+            vTaskDelay(pdMS_TO_TICKS(700));
+        } else {
+            record_frame = 0;
+            sync_frame = 0;
+            vTaskDelay(pdMS_TO_TICKS(150));
+        }
+    }
+}
+
 void show_pairing_code() {
-    char pairing_text[80];
-    snprintf(pairing_text, sizeof(pairing_text), "Circuit\nPairing code\n%06lu", static_cast<unsigned long>(pairing_passkey));
-    update_message(pairing_text);
+    if (!Lvgl_lock(-1)) return;
+    char code[16];
+    const unsigned long passkey = static_cast<unsigned long>(pairing_passkey % 1000000);
+    snprintf(code, sizeof(code), "%03lu %03lu", passkey / 1000, passkey % 1000);
+    active_screen = DeviceScreen::Pairing;
+    lv_obj_add_flag(connection_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(message_label, LV_OBJ_FLAG_HIDDEN);
+    lv_img_set_src(wordmark_image, &circuit_pair_screen);
+    lv_label_set_text(pairing_code_label, code);
+    lv_obj_clear_flag(pairing_code_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
+    apply_persistent_labels(DeviceScreen::Pairing);
+    lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
+    Lvgl_unlock();
 }
 
 void show_securely_paired() {
-    update_message("Circuit\nSecurely paired\nShort-Circuit ready");
+    show_device_screen(DeviceScreen::Idle);
 }
 
 void update_connection_status(const char *status) {
@@ -215,6 +504,16 @@ void init_sd_card() {
 
     if (verified) {
         ESP_LOGI(kTag, "MicroSD mounted and read/write test passed");
+        circuit_notes::init();
+        ESP_LOGI(kTag, "Notes on card: %u unsynced", static_cast<unsigned>(circuit_notes::count_unsynced()));
+        circuit_notes::for_each_wav([](uint32_t id) {
+            circuit_notes::Note note;
+            if (circuit_notes::describe(id, &note)) {
+                ESP_LOGI(kTag, "  note %lu: %lu bytes, recorded %lld, %s", static_cast<unsigned long>(note.id),
+                    static_cast<unsigned long>(note.bytes), static_cast<long long>(note.recorded),
+                    note.synced ? "synced" : "waiting");
+            }
+        });
         update_storage_status("MicroSD: ready\nStorage verified");
     } else {
         ESP_LOGW(kTag, "MicroSD readback test failed");
@@ -243,7 +542,11 @@ void record_audio_task(void *argument) {
         return;
     }
 
-    FILE *file = fopen(kAudioFile, "wb");
+    show_device_screen(DeviceScreen::Recording);
+
+    char note_path[48];
+    circuit_notes::path_for(circuit_notes::next_id(), "WAV", note_path, sizeof(note_path));
+    FILE *file = fopen(note_path, "wb");
     if (file == nullptr) {
         update_storage_status("Audio record failed\nCannot create WAV file");
         report_audio_status("Recording failed: cannot create file");
@@ -267,12 +570,20 @@ void record_audio_task(void *argument) {
     update_storage_status("Recording audio…\nPlease speak near Circuit");
     report_audio_status("Recording started: speak near Circuit");
     while (recorded_bytes < target_bytes && !recording_stop_requested) {
-        const size_t bytes = (target_bytes - recorded_bytes) < kAudioBufferBytes
-            ? target_bytes - recorded_bytes : kAudioBufferBytes;
-        if (Codec_RecordData(buffer, bytes) != ESP_OK || fwrite(buffer, 1, bytes, file) != bytes) {
+        const size_t mono_bytes = (target_bytes - recorded_bytes) < (kAudioBufferBytes / kCodecCaptureChannels)
+            ? target_bytes - recorded_bytes : (kAudioBufferBytes / kCodecCaptureChannels);
+        const size_t stereo_bytes = mono_bytes * kCodecCaptureChannels;
+        if (Codec_RecordData(buffer, stereo_bytes) != ESP_OK) {
             break;
         }
-        recorded_bytes += bytes;
+        // The board codec delivers stereo 16-bit samples. Voice notes retain
+        // the first microphone channel only, halving both storage and BLE sync.
+        auto *samples = reinterpret_cast<int16_t *>(buffer);
+        for (size_t frame = 0; frame < mono_bytes / sizeof(int16_t); ++frame) {
+            samples[frame] = samples[frame * kCodecCaptureChannels];
+        }
+        if (fwrite(buffer, 1, mono_bytes, file) != mono_bytes) break;
+        recorded_bytes += mono_bytes;
     }
     heap_caps_free(buffer);
 
@@ -283,6 +594,8 @@ void record_audio_task(void *argument) {
     fclose(file);
 
     const bool completed = recorded_bytes == target_bytes;
+    show_device_screen(DeviceScreen::Saved);
+    return_to_idle_after(DeviceScreen::Saved, 3000);
     update_storage_status(completed
         ? "Recording saved\nReady to play"
         : "Recording stopped\nReady to play");
@@ -292,8 +605,17 @@ void record_audio_task(void *argument) {
     finish_audio_task();
 }
 
+// Path of the most recent note, or an empty string if there is none.
+void latest_note_path(char *out, size_t size) {
+    const uint32_t id = circuit_notes::newest_id();
+    if (id == 0) { out[0] = '\0'; return; }
+    circuit_notes::path_for(id, "WAV", out, size);
+}
+
 void play_audio_task(void *) {
-    FILE *file = fopen(kAudioFile, "rb");
+    char latest[48];
+    latest_note_path(latest, sizeof(latest));
+    FILE *file = latest[0] ? fopen(latest, "rb") : nullptr;
     WavHeader header{};
     if (!audio_ready || file == nullptr || fread(&header, sizeof(header), 1, file) != 1 ||
         memcmp(header.riff, "RIFF", 4) != 0 || memcmp(header.wave, "WAVE", 4) != 0) {
@@ -305,7 +627,12 @@ void play_audio_task(void *) {
     }
 
     uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(kAudioBufferBytes, MALLOC_CAP_SPIRAM));
-    if (buffer == nullptr) {
+    uint8_t *stereo_buffer = header.channels == 1
+        ? static_cast<uint8_t *>(heap_caps_malloc(kAudioBufferBytes * 2, MALLOC_CAP_SPIRAM))
+        : nullptr;
+    if (buffer == nullptr || (header.channels == 1 && stereo_buffer == nullptr)) {
+        if (buffer != nullptr) heap_caps_free(buffer);
+        if (stereo_buffer != nullptr) heap_caps_free(stereo_buffer);
         fclose(file);
         update_storage_status("Playback failed\nNot enough memory");
         report_audio_status("Playback failed: memory unavailable");
@@ -317,9 +644,21 @@ void play_audio_task(void *) {
     report_audio_status("Playing latest recording");
     size_t bytes = 0;
     while ((bytes = fread(buffer, 1, kAudioBufferBytes, file)) > 0) {
-        if (Codec_PlaybackData(buffer, bytes) != ESP_OK) break;
+        if (header.channels == 1) {
+            auto *mono = reinterpret_cast<int16_t *>(buffer);
+            auto *stereo = reinterpret_cast<int16_t *>(stereo_buffer);
+            const size_t samples = bytes / sizeof(int16_t);
+            for (size_t index = 0; index < samples; ++index) {
+                stereo[index * 2] = mono[index];
+                stereo[index * 2 + 1] = mono[index];
+            }
+            if (Codec_PlaybackData(stereo_buffer, samples * kCodecCaptureChannels * sizeof(int16_t)) != ESP_OK) break;
+        } else if (Codec_PlaybackData(buffer, bytes) != ESP_OK) {
+            break;
+        }
     }
     heap_caps_free(buffer);
+    if (stereo_buffer != nullptr) heap_caps_free(stereo_buffer);
     fclose(file);
     update_storage_status("Playback complete\nReady to record");
     report_audio_status("Playback complete");
@@ -333,8 +672,11 @@ void start_recording(char *command) {
         seconds = strtoul(duration + 1, nullptr, 10);
     }
     if (seconds == 0 || seconds > kMaxRecordingSeconds) {
-        update_storage_status("Recording length: 1–30 sec");
-        report_audio_status("Recording failed: choose 1–30 seconds");
+        char limit_text[48];
+        snprintf(limit_text, sizeof(limit_text), "Recording length: 1–%lu sec", static_cast<unsigned long>(kMaxRecordingSeconds));
+        update_storage_status(limit_text);
+        snprintf(limit_text, sizeof(limit_text), "Recording failed: choose 1–%lu seconds", static_cast<unsigned long>(kMaxRecordingSeconds));
+        report_audio_status(limit_text);
         return;
     }
     if (audio_busy) {
@@ -356,6 +698,376 @@ void stop_recording() {
     }
     recording_stop_requested = true;
     report_audio_status("Stopping recording…");
+}
+
+// Slow BLE fallback, used only for a force sync with no Wi-Fi sync available.
+// Sends the oldest unsynced note and marks it synced once every packet has been
+// acknowledged by the phone's BLE stack.
+void audio_sync_task(void *) {
+    circuit_notes::Note oldest[1];
+    const size_t waiting = circuit_notes::list_unsynced(oldest, 1);
+    char latest[48] = {};
+    if (waiting > 0) circuit_notes::path_for(oldest[0].id, "WAV", latest, sizeof(latest));
+    FILE *file = waiting > 0 ? fopen(latest, "rb") : nullptr;
+    if (file == nullptr || connection_id == UINT16_MAX || relay_handle == 0) {
+        if (file != nullptr) fclose(file);
+        update_storage_status("Sync failed\nConnect Short-Circuit");
+        report_audio_status("Sync failed: phone is not connected");
+        finish_audio_task();
+        audio_sync_task_handle = nullptr;
+        return;
+    }
+    fseek(file, 0, SEEK_END);
+    const long length = ftell(file);
+    rewind(file);
+    if (length <= 0) {
+        fclose(file);
+        update_storage_status("Sync failed\nNo recording found");
+        report_audio_status("Sync failed: no recording found");
+        finish_audio_task();
+        audio_sync_task_handle = nullptr;
+        return;
+    }
+
+    show_device_screen(DeviceScreen::Syncing);
+    char started[kMaxTextBytes + 1];
+    snprintf(started, sizeof(started), "Sync started\n%ld bytes", length);
+    update_storage_status("Syncing audio\n0%");
+    report_audio_status(started);
+
+    uint8_t buffer[kAudioPacketBytes];
+    long sent = 0;
+    int last_progress_bucket = -1;
+    bool failed = false;
+    while (!failed) {
+        const size_t bytes = fread(buffer, 1, sizeof(buffer), file);
+        if (bytes == 0) break;
+        if (send_audio_data(buffer, bytes) != ESP_OK) {
+            failed = true;
+            break;
+        }
+        sent += static_cast<long>(bytes);
+        const int percent = static_cast<int>((sent * 100) / length);
+        if (percent / 10 != last_progress_bucket) {
+            char progress[64];
+            snprintf(progress, sizeof(progress), "Syncing audio\n%d%%", percent);
+            update_storage_status(progress);
+            if (Lvgl_lock(-1)) {
+                char percent_text[8];
+                snprintf(percent_text, sizeof(percent_text), "%d%%", percent);
+                lv_label_set_text(sync_progress_label, percent_text);
+                Lvgl_unlock();
+            }
+            snprintf(progress, sizeof(progress), "Sync in progress: %d%%", percent);
+            report_audio_status(progress);
+            last_progress_bucket = percent / 10;
+        }
+        // ATT confirmation means the packet reached the phone's BLE stack,
+        // not necessarily that Android has finished dispatching the callback
+        // to the app. Give that callback time to drain before sending the
+        // next packet.
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    fclose(file);
+    if (failed || sent != length) {
+        if (Lvgl_lock(-1)) {
+            lv_label_set_text(sync_progress_label, "ERR");
+            Lvgl_unlock();
+        }
+        return_to_idle_after(DeviceScreen::Syncing, 3000);
+        update_storage_status("Sync failed\nTry again in app");
+        report_audio_status("Sync failed: connection interrupted");
+    } else {
+        if (Lvgl_lock(-1)) {
+            lv_label_set_text(sync_progress_label, "100%");
+            Lvgl_unlock();
+        }
+        return_to_idle_after(DeviceScreen::Syncing, 3000);
+        circuit_notes::mark_synced(oldest[0].id);
+        update_storage_status("Sync complete\nReady on phone");
+        report_audio_status("Sync complete: ready on phone");
+    }
+    finish_audio_task();
+    audio_sync_task_handle = nullptr;
+}
+
+// ---- Wi-Fi state, status icons and app feedback ---------------------------
+
+const char *wifi_reason_text(uint8_t reason) {
+    switch (reason) {
+    case WIFI_REASON_NO_AP_FOUND:
+    case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+    case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+    case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+        return "Network not found";
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_MIC_FAILURE:
+    case WIFI_REASON_AUTH_EXPIRE:
+        return "Wrong password";
+    case WIFI_REASON_ASSOC_FAIL:
+    case WIFI_REASON_ASSOC_TOOMANY:
+        return "Router refused the connection";
+    default:
+        return "Could not connect";
+    }
+}
+
+void send_wifi_status() {
+    static const char *const names[] = {"none", "connecting", "connected", "failed"};
+    char message[kMaxTextBytes + 1];
+    snprintf(message, sizeof(message), "@wifi-status\n%s\n%s\n%s", names[static_cast<int>(wifi_ui)], wifi_ssid, wifi_detail);
+    send_relay_request(message);
+}
+
+void set_wifi_ui(WifiUi state, const char *detail = "") {
+    wifi_ui = state;
+    snprintf(wifi_detail, sizeof(wifi_detail), "%s", detail);
+    if (state == WifiUi::Failed) wifi_failed_at_ms = circuit_sync::now_ms();
+    send_wifi_status();
+}
+
+// Redraws the header icons when what they show has changed. Icons only appear
+// for things that are available: Wi-Fi once configured (animated while it is
+// connecting, crossed out if it failed), the phone while bonded, the SD card.
+void refresh_status_icons() {
+    static const lv_image_dsc_t *const connecting[] = {
+        &circuit_icon_wifi_zero, &circuit_icon_wifi_low, &circuit_icon_wifi_high, &circuit_icon_wifi};
+    static const lv_image_dsc_t *shown_wifi = nullptr;
+    static int shown_state = -1;
+    const lv_image_dsc_t *wifi_src = nullptr;
+    switch (wifi_ui) {
+    case WifiUi::Connected: wifi_src = &circuit_icon_wifi; break;
+    case WifiUi::Failed: wifi_src = &circuit_icon_wifi_off; break;
+    case WifiUi::Connecting: wifi_src = connecting[status_icon_frame % 4]; break;
+    default: break;
+    }
+    const bool phone = ble_encrypted;
+    const bool storage = sd_card != nullptr;
+    const int state = (phone ? 1 : 0) | (storage ? 2 : 0);
+    if (wifi_src == shown_wifi && state == shown_state) return;
+    if (!Lvgl_lock(-1)) return;
+    shown_wifi = wifi_src;
+    shown_state = state;
+    int x_right = 198;
+    const auto place = [&x_right](lv_obj_t *object, const lv_image_dsc_t *source, int y) {
+        if (source == nullptr) {
+            lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+        lv_img_set_src(object, source);
+        lv_obj_set_pos(object, x_right - source->header.w, y);
+        lv_obj_clear_flag(object, LV_OBJ_FLAG_HIDDEN);
+        x_right -= source->header.w + 3;
+    };
+    place(icon_storage_obj, storage ? &circuit_icon_hard_drive : nullptr, 5);
+    place(icon_phone_obj, phone ? &circuit_icon_phone : nullptr, 5);
+    place(icon_wifi_obj, wifi_src, 3);
+    Lvgl_unlock();
+}
+
+void status_icon_task(void *) {
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(900));
+        ++status_icon_frame;
+        refresh_status_icons();
+    }
+}
+
+// ---- Wi-Fi sync sessions -------------------------------------------------
+
+void wifi_sync_progress(uint32_t percent) {
+    static uint32_t last_shown = 101;
+    if (active_screen != DeviceScreen::Syncing) {
+        last_shown = 101;
+        show_device_screen(DeviceScreen::Syncing);
+    }
+    if (percent / 5 == last_shown / 5 && percent < 100) return;
+    last_shown = percent;
+    if (Lvgl_lock(-1)) {
+        char text[8];
+        snprintf(text, sizeof(text), "%u%%", static_cast<unsigned>(percent));
+        lv_label_set_text(sync_progress_label, text);
+        Lvgl_unlock();
+    }
+}
+
+bool can_offer_wifi_sync() {
+    char ip[16];
+    return ble_encrypted && connection_id != UINT16_MAX && circuit_sync::wifi_ip(ip, sizeof(ip)) &&
+           !circuit_sync::is_open() && !circuit_sync::locked_out() && !audio_busy;
+}
+
+// Opens a session and hands the phone what it needs over the bonded BLE link.
+bool offer_wifi_sync() {
+    char ip[16];
+    uint16_t port = 0;
+    char token[33];
+    const char *fingerprint = nullptr;
+    uint32_t count = 0, bytes = 0;
+    if (!can_offer_wifi_sync() || !circuit_sync::wifi_ip(ip, sizeof(ip))) return false;
+    circuit_sync::state.on_progress = wifi_sync_progress;
+    if (!circuit_sync::open_session(&port, token, sizeof(token), &fingerprint, &count, &bytes)) return false;
+    char offer[kMaxTextBytes + 40];
+    snprintf(offer, sizeof(offer), "@sync-offer\n%s\n%u\n%s\n%s\n%lu\n%lu", ip, static_cast<unsigned>(port), token,
+        fingerprint, static_cast<unsigned long>(count), static_cast<unsigned long>(bytes));
+    send_relay_request(offer);
+    ESP_LOGI(kTag, "Wi-Fi sync offered: %lu notes, %lu bytes", static_cast<unsigned long>(count),
+        static_cast<unsigned long>(bytes));
+    return true;
+}
+
+// Shows the sync screen briefly with `text`, then returns to idle. Used so a
+// button hold always gets a visible answer.
+void flash_sync_result(const char *text) {
+    show_device_screen(DeviceScreen::Syncing);
+    if (Lvgl_lock(-1)) {
+        lv_label_set_text(sync_progress_label, text);
+        Lvgl_unlock();
+    }
+    return_to_idle_after(DeviceScreen::Syncing, 2500);
+}
+
+void end_wifi_sync() {
+    const uint32_t served = circuit_sync::state.served_bytes;
+    circuit_sync::close_session();
+    last_wifi_sync_end_ms = circuit_sync::now_ms();
+    if (served == 0) {  // the phone never connected: back off, and say so if the screen is showing sync
+        if (wifi_sync_failures < 4) ++wifi_sync_failures;
+        if (active_screen == DeviceScreen::Syncing) flash_sync_result("ERR");
+        return;
+    }
+    wifi_sync_failures = 0;
+    const bool complete = circuit_notes::count_unsynced() == 0;
+    if (Lvgl_lock(-1)) {
+        lv_label_set_text(sync_progress_label, complete ? "100%" : "ERR");
+        Lvgl_unlock();
+    }
+    return_to_idle_after(DeviceScreen::Syncing, 3000);
+    report_audio_status(complete ? "Sync complete: notes saved on phone" : "Sync interrupted: will retry");
+}
+
+// Starts a sync when the phone is bonded and connected and both are on Wi-Fi;
+// closes sessions that finished, stalled or were abused.
+void sync_supervisor_task(void *) {
+    // Create (or load) the sync certificate now so a failure shows up at boot.
+    ESP_LOGI(kTag, "Sync identity %s", circuit_sync::ensure_identity() ? "ready" : "FAILED");
+    while (true) {
+        vTaskDelay(kSyncSupervisorInterval);
+        // After giving up, try again now and then (sooner if it was not a password problem).
+        if (wifi_ui == WifiUi::Failed && wifi_ssid[0] != '\0' &&
+            circuit_sync::now_ms() - wifi_failed_at_ms > (wifi_auth_failure ? 300000 : 60000)) {
+            wifi_retries = 0;
+            set_wifi_ui(WifiUi::Connecting);
+            esp_wifi_connect();
+        }
+        if (circuit_sync::is_open()) {
+            const bool all_synced = circuit_sync::state.acked > 0 && circuit_notes::count_unsynced() == 0;
+            if (all_synced || circuit_sync::expired() || connection_id == UINT16_MAX) end_wifi_sync();
+            continue;
+        }
+        int64_t cooldown = kWifiSyncCooldownMs << wifi_sync_failures;  // 45 s, 90 s, 3 min, ...
+        if (cooldown > kWifiSyncMaxCooldownMs) cooldown = kWifiSyncMaxCooldownMs;
+        if (circuit_sync::now_ms() - last_wifi_sync_end_ms < cooldown) continue;
+        if (circuit_notes::count_unsynced() > 0 && !recording_active) offer_wifi_sync();
+    }
+}
+
+// `forced` is the device button: it falls back to BLE when Wi-Fi sync is not
+// possible. The app can only ask for Wi-Fi sync.
+void start_audio_sync(bool forced) {
+    if (audio_busy) {
+        report_audio_status("Audio is busy");
+        return;
+    }
+    ESP_LOGI(kTag, "Sync requested (%s): %u note(s) waiting", forced ? "button" : "app",
+        static_cast<unsigned>(circuit_notes::count_unsynced()));
+    if (circuit_notes::count_unsynced() == 0) {
+        update_storage_status("Nothing to sync");
+        report_audio_status("Sync: no new notes");
+        if (forced) flash_sync_result("OK");  // everything is already on the phone
+        return;
+    }
+    if (circuit_sync::is_open()) {
+        report_audio_status("Sync already in progress");
+        return;
+    }
+    if (offer_wifi_sync()) {
+        if (forced) {  // show progress right away; the phone connects within a second or two
+            show_device_screen(DeviceScreen::Syncing);
+            if (Lvgl_lock(-1)) {
+                lv_label_set_text(sync_progress_label, "0%");
+                Lvgl_unlock();
+            }
+        }
+        return;
+    }
+    if (!forced) {
+        update_storage_status("Sync needs Wi-Fi\nCircuit and phone");
+        report_audio_status("Sync needs Wi-Fi: connect Circuit and your phone to the same network");
+        return;
+    }
+    audio_busy = true;
+    xTaskCreate(audio_sync_task, "audio_sync", 6144, nullptr, 4, &audio_sync_task_handle);
+}
+
+// The upper side button (BOOT, GPIO0) does two things:
+//   tap (released within 2 s)  start or stop a recording
+//   hold for 2 s               force a sync (Bluetooth fallback when Wi-Fi is not available)
+// The lower button is wired to power, so holding it switches the board off.
+void record_button_task(void *) {
+    // GPIO0 is active-low. Waiting for a released state avoids treating a
+    // button held during boot as an unintended request.
+    bool was_pressed = gpio_get_level(kRecordButtonPin) == 0;
+    TickType_t pressed_at = 0;
+    bool hold_handled = false;
+    while (true) {
+        const bool is_pressed = gpio_get_level(kRecordButtonPin) == 0;
+        if (is_pressed && !was_pressed) {
+            vTaskDelay(kButtonDebounceDelay);
+            if (gpio_get_level(kRecordButtonPin) == 0) {
+                pressed_at = xTaskGetTickCount();
+                hold_handled = false;
+            } else {
+                was_pressed = false;
+                continue;
+            }
+        }
+        if (is_pressed && !hold_handled && xTaskGetTickCount() - pressed_at >= kForceSyncHoldTime) {
+            hold_handled = true;
+            ESP_LOGI(kTag, "BOOT held: force sync");
+            if (!recording_active) {
+                update_storage_status("Force sync requested\nStarting sync…");
+                report_audio_status("Force sync requested");
+                start_audio_sync(true);
+            }
+        }
+        if (!is_pressed && was_pressed && !hold_handled) {  // released: it was a tap
+            if (recording_active) {
+                stop_recording();
+            } else {
+                // Records until the button is pressed again or the cap is hit.
+                char command[32];
+                snprintf(command, sizeof(command), "@audio-record\n%lu", static_cast<unsigned long>(kMaxRecordingSeconds));
+                start_recording(command);
+            }
+        }
+        was_pressed = is_pressed;
+        vTaskDelay(kButtonPollInterval);
+    }
+}
+
+void init_record_button() {
+    gpio_config_t config = {
+        .pin_bit_mask = 1ULL << kRecordButtonPin,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&config));
+    xTaskCreate(record_button_task, "record_button", 3072, nullptr, 3, nullptr);
 }
 
 void start_playback() {
@@ -401,17 +1113,73 @@ void check_wifi_internet() {
     }
 }
 
-void wifi_event_handler(void *, esp_event_base_t event_base, int32_t event_id, void *) {
+// Keeps the date and clock current from SNTP over Wi-Fi whenever the phone has
+// not sent a fresh @home update. Note counts still come from the phone.
+void on_sntp_sync(timeval *) {
+    // One sync is enough; the system clock keeps time from here.
+    clock_set = true;
+    esp_sntp_stop();
+}
+
+void local_clock_task(void *) {
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        const time_t now = time(nullptr);
+        if (!clock_set || now < kMinValidEpoch) continue;
+        tm local = {};
+        localtime_r(&now, &local);
+        char date_text[16];
+        strftime(date_text, sizeof(date_text), "%a %d %b", &local);
+        for (char *c = date_text; *c; ++c) *c = toupper(static_cast<unsigned char>(*c));
+        if (!Lvgl_lock(-1)) continue;
+        set_clock_labels(local.tm_hour, local.tm_min);
+        lv_label_set_text(idle_date_label, date_text);
+        Lvgl_unlock();
+    }
+}
+
+void start_sntp() {
+    if (sntp_started || clock_set) return;
+    sntp_started = true;
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    sntp_set_time_sync_notification_cb(on_sntp_sync);
+    esp_sntp_init();
+}
+
+void wifi_event_handler(void *, esp_event_base_t event_base, int32_t event_id, void *event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
         wifi_connected = true;
         wifi_internet_online = false;
         update_connection_status("Wi-Fi: connected\nInternet: checking…\nPhone relay: unavailable");
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        const uint8_t reason = static_cast<wifi_event_sta_disconnected_t *>(event_data)->reason;
         wifi_connected = false;
         wifi_internet_online = false;
         update_connection_status("Wi-Fi: offline\nInternet: offline\nPhone relay: unavailable");
+        if (wifi_manual_disconnect) {  // we caused this one while switching networks
+            wifi_manual_disconnect = false;
+            return;
+        }
+        if (wifi_ui == WifiUi::None) return;
+        if (wifi_retries < kWifiMaxRetries) {
+            ++wifi_retries;
+            set_wifi_ui(WifiUi::Connecting);
+            esp_wifi_connect();
+        } else {
+            wifi_auth_failure = reason == WIFI_REASON_AUTH_FAIL || reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+                                reason == WIFI_REASON_HANDSHAKE_TIMEOUT;
+            set_wifi_ui(WifiUi::Failed, wifi_reason_text(reason));
+        }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        const auto *got = static_cast<ip_event_got_ip_t *>(event_data);
+        char ip[16];
+        snprintf(ip, sizeof(ip), IPSTR, IP2STR(&got->ip_info.ip));
+        wifi_retries = 0;
+        wifi_auth_failure = false;
+        set_wifi_ui(WifiUi::Connected, ip);
         check_wifi_internet();
+        start_sntp();
     }
 }
 
@@ -447,13 +1215,30 @@ void provision_wifi(char *value) {
     wifi_config_t config = {};
     if (!parse_wifi_command(value, &config)) {
         update_connection_status("Wi-Fi setup failed\nCheck SSID/password");
+        wifi_ssid[0] = '\0';
+        set_wifi_ui(WifiUi::Failed, "Invalid network name or password");
         return;
     }
-
-    ESP_ERROR_CHECK(esp_wifi_disconnect());
+    // Switching networks makes the old link report a disconnect we should ignore.
+    wifi_manual_disconnect = wifi_connected;
+    esp_wifi_disconnect();
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &config));
+    snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", reinterpret_cast<const char *>(config.sta.ssid));
+    wifi_retries = 0;
     update_connection_status("Wi-Fi: connecting…\nInternet: checking…\nPhone relay: unavailable");
+    set_wifi_ui(WifiUi::Connecting);
     ESP_ERROR_CHECK(esp_wifi_connect());
+}
+
+void forget_wifi() {
+    wifi_manual_disconnect = wifi_connected;
+    esp_wifi_disconnect();
+    wifi_config_t empty = {};
+    esp_wifi_set_config(WIFI_IF_STA, &empty);
+    wifi_ssid[0] = '\0';
+    wifi_retries = 0;
+    set_wifi_ui(WifiUi::None);
+    update_connection_status("Wi-Fi: not configured\nInternet: offline\nPhone relay: unavailable");
 }
 
 void wifi_scan_task(void *) {
@@ -496,6 +1281,16 @@ void text_display_task(void *) {
                 stop_recording();
             } else if (strcmp(message.value, "@audio-play") == 0) {
                 start_playback();
+            } else if (strcmp(message.value, "@audio-sync") == 0) {
+                start_audio_sync(false);
+            } else if (strcmp(message.value, "@audio-clear") == 0) {
+                if (audio_busy) {
+                    report_audio_status("Audio is busy");
+                } else {
+                    // Notes are kept on the device; cleaning is a separate step.
+                    update_storage_status("Notes are kept\nReady to record");
+                    report_audio_status("Audio cleared");
+                }
             } else if (strcmp(message.value, "@relay-test") == 0) {
                 update_connection_status("Wi-Fi: offline\nInternet: checking phone relay…");
                 send_relay_request("@relay\nCHECK");
@@ -504,6 +1299,22 @@ void text_display_task(void *) {
                 update_connection_status(online
                     ? "Wi-Fi: offline\nInternet: phone relay online"
                     : "Wi-Fi: offline\nInternet: phone relay offline");
+            } else if (strcmp(message.value, "@notes-clean") == 0) {
+                if (audio_busy || recording_active || circuit_sync::is_open()) {
+                    report_audio_status("Cannot clean notes while recording or syncing");
+                } else {
+                    const size_t removed = circuit_notes::clean_synced();
+                    ESP_LOGI(kTag, "Cleaned %u synced note(s)", static_cast<unsigned>(removed));
+                    char result[64];
+                    snprintf(result, sizeof(result), "Notes cleaned: %u removed from Circuit", static_cast<unsigned>(removed));
+                    report_audio_status(result);
+                }
+            } else if (strcmp(message.value, "@wifi-status") == 0) {
+                send_wifi_status();
+            } else if (strcmp(message.value, "@wifi-forget") == 0) {
+                forget_wifi();
+            } else if (strncmp(message.value, kHomeStatusCommand, strlen(kHomeStatusCommand)) == 0) {
+                update_home_status(message.value);
             } else if (strncmp(message.value, kWifiCommandPrefix, strlen(kWifiCommandPrefix)) == 0) {
                 ESP_LOGI(kTag, "Received Wi-Fi configuration");
                 provision_wifi(message.value);
@@ -529,7 +1340,9 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
         if (param->ble_security.auth_cmpl.success) {
             ESP_LOGI(kTag, "Short-Circuit bonded with encrypted BLE");
-            show_securely_paired();
+            ble_encrypted = true;
+            show_pairing_code();
+            return_to_idle_after(DeviceScreen::Pairing, 3000);
         } else {
             ESP_LOGW(kTag, "BLE bonding failed: 0x%x", param->ble_security.auth_cmpl.fail_reason);
             show_pairing_code();
@@ -552,6 +1365,21 @@ void send_relay_request(const char *request) {
     ESP_ERROR_CHECK(esp_ble_gatts_send_indicate(
         server_if, connection_id, relay_handle, strlen(request),
         reinterpret_cast<uint8_t *>(const_cast<char *>(request)), false));
+}
+
+esp_err_t send_audio_data(const uint8_t *data, size_t length) {
+    if (server_if == ESP_GATT_IF_NONE || relay_handle == 0 || connection_id == UINT16_MAX || length > kAudioPacketBytes) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t packet[kAudioPacketBytes + 2] = {0xA5, 0x5A};
+    memcpy(packet + 2, data, length);
+    // Audio needs flow control. A confirmed indication prevents the BLE stack
+    // from filling its transmit queue after the first packet.
+    ulTaskNotifyTake(pdTRUE, 0);
+    const esp_err_t status = esp_ble_gatts_send_indicate(
+        server_if, connection_id, relay_handle, length + 2, packet, true);
+    if (status != ESP_OK) return status;
+    return ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1500)) > 0 ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
@@ -590,7 +1418,9 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
             esp_attr_value_t relay_value = {.attr_max_len = kMaxTextBytes, .attr_len = 0, .attr_value = nullptr};
             ESP_ERROR_CHECK(esp_ble_gatts_add_char(
                 service_handle, &relay_uuid, ESP_GATT_PERM_READ_ENCRYPTED,
-                ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY, &relay_value, nullptr));
+                ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY |
+                    ESP_GATT_CHAR_PROP_BIT_INDICATE,
+                &relay_value, nullptr));
         } else if (param->add_char.char_uuid.uuid.uuid16 == kRelayUuid) {
             relay_handle = param->add_char.attr_handle;
             esp_bt_uuid_t descriptor_uuid = {.len = ESP_UUID_LEN_16, .uuid = {.uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG}};
@@ -623,9 +1453,15 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         break;
     case ESP_GATTS_DISCONNECT_EVT:
         connection_id = UINT16_MAX;
+        ble_encrypted = false;
         show_relay_disconnected();
         ESP_LOGI(kTag, "Client disconnected; advertising again");
         ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&adv_params));
+        break;
+    case ESP_GATTS_CONF_EVT:
+        if (param->conf.handle == relay_handle && audio_sync_task_handle != nullptr) {
+            xTaskNotifyGive(audio_sync_task_handle);
+        }
         break;
     default:
         break;
@@ -639,6 +1475,7 @@ void start_ble() {
     ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
+    ESP_ERROR_CHECK(esp_ble_gatt_set_local_mtu(185));
     ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_event_handler));
     esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
     esp_ble_io_cap_t io_capability = ESP_IO_CAP_OUT;
@@ -672,7 +1509,9 @@ void start_wifi() {
     wifi_config_t saved_config = {};
     ESP_ERROR_CHECK(esp_wifi_get_config(WIFI_IF_STA, &saved_config));
     if (saved_config.sta.ssid[0] != '\0') {
+        snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", reinterpret_cast<const char *>(saved_config.sta.ssid));
         update_connection_status("Wi-Fi: reconnecting…\nInternet: checking…\nPhone relay: unavailable");
+        set_wifi_ui(WifiUi::Connecting);
         ESP_ERROR_CHECK(esp_wifi_connect());
     } else {
         update_connection_status("Wi-Fi: not configured\nInternet: offline\nPhone relay: unavailable");
@@ -701,6 +1540,71 @@ void init_display() {
         lv_label_set_long_mode(message_label, LV_LABEL_LONG_WRAP);
         lv_label_set_text(message_label, "Circuit\nStarting…");
         lv_obj_align(message_label, LV_ALIGN_BOTTOM_MID, 0, -12);
+
+        wordmark_image = lv_img_create(lv_screen_active());
+        lv_img_set_src(wordmark_image, &circuit_idle_screen);
+        lv_obj_center(wordmark_image);
+        lv_obj_add_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
+
+        // Header icons: positioned and shown by refresh_status_icons().
+        icon_wifi_obj = lv_img_create(lv_screen_active());
+        icon_phone_obj = lv_img_create(lv_screen_active());
+        icon_storage_obj = lv_img_create(lv_screen_active());
+        for (lv_obj_t *icon : {icon_wifi_obj, icon_phone_obj, icon_storage_obj}) lv_obj_add_flag(icon, LV_OBJ_FLAG_HIDDEN);
+
+        // Positions follow prototypes/circuit-epaper-states on the 200x200 panel.
+        const auto make_label = [](const lv_font_t *font, lv_coord_t width, lv_text_align_t align) {
+            lv_obj_t *label = lv_label_create(lv_screen_active());
+            lv_obj_set_width(label, width);
+            lv_obj_set_style_text_align(label, align, 0);
+            lv_obj_set_style_text_font(label, font, 0);
+            lv_obj_set_style_text_color(label, lv_color_black(), 0);
+            lv_obj_set_style_bg_color(label, lv_color_white(), 0);
+            lv_obj_set_style_bg_opa(label, LV_OPA_COVER, 0);
+            lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+            return label;
+        };
+
+        // The code sits inside the rounded box baked into the pair screen.
+        pairing_code_label = make_label(&lv_font_montserrat_36, 150, LV_TEXT_ALIGN_CENTER);
+        lv_obj_align(pairing_code_label, LV_ALIGN_TOP_LEFT, 25, 90);
+
+        recording_timer_label = make_label(&lv_font_montserrat_24, 84, LV_TEXT_ALIGN_LEFT);
+        lv_obj_set_style_text_letter_space(recording_timer_label, 1, 0);
+        lv_obj_align(recording_timer_label, LV_ALIGN_TOP_LEFT, 116, 124);
+
+        sync_progress_label = make_label(&lv_font_montserrat_24, 84, LV_TEXT_ALIGN_LEFT);
+        lv_obj_set_style_text_letter_space(sync_progress_label, 1, 0);
+        lv_obj_align(sync_progress_label, LV_ALIGN_TOP_LEFT, 116, 129);
+
+        idle_date_label = make_label(&lv_font_montserrat_12, 100, LV_TEXT_ALIGN_LEFT);
+        lv_obj_set_style_text_letter_space(idle_date_label, 1, 0);
+        lv_obj_align(idle_date_label, LV_ALIGN_TOP_LEFT, 8, 7);
+
+        idle_time_label = make_label(&lv_font_montserrat_36, LV_SIZE_CONTENT, LV_TEXT_ALIGN_LEFT);
+        lv_obj_align(idle_time_label, LV_ALIGN_TOP_LEFT, 8, 36);
+
+        idle_ampm_label = make_label(&lv_font_montserrat_12, LV_SIZE_CONTENT, LV_TEXT_ALIGN_LEFT);
+        lv_obj_set_style_text_letter_space(idle_ampm_label, 1, 0);
+
+        // Note counts: [clock]pending [check]done, right-aligned and laid out
+        // by set_count_labels() so the icons stay beside their numbers.
+        idle_done_label = make_label(&lv_font_montserrat_20, LV_SIZE_CONTENT, LV_TEXT_ALIGN_LEFT);
+        lv_obj_align(idle_done_label, LV_ALIGN_TOP_RIGHT, -4, 43);
+        idle_pending_label = make_label(&lv_font_montserrat_20, LV_SIZE_CONTENT, LV_TEXT_ALIGN_LEFT);
+        idle_check_icon = lv_img_create(lv_screen_active());
+        lv_img_set_src(idle_check_icon, &circuit_icon_check);
+        lv_obj_add_flag(idle_check_icon, LV_OBJ_FLAG_HIDDEN);
+        idle_clock_icon = lv_img_create(lv_screen_active());
+        lv_img_set_src(idle_clock_icon, &circuit_icon_clock);
+        lv_obj_add_flag(idle_clock_icon, LV_OBJ_FLAG_HIDDEN);
+
+        lv_label_set_text(idle_date_label, "--- -- ---");
+        lv_label_set_text(idle_time_label, "-:--");
+        lv_label_set_text(idle_ampm_label, "");
+        lv_label_set_text(idle_pending_label, "-");
+        lv_label_set_text(idle_done_label, "-");
+        layout_count_labels();
         Lvgl_unlock();
     }
 }
@@ -723,7 +1627,15 @@ extern "C" void app_main(void) {
     init_sd_card();
     Codec_StartInit();
     audio_ready = true;
+    init_record_button();
+    xTaskCreate(demo_animation_task, "demo_animation", 3072, nullptr, 2, nullptr);
     xTaskCreate(text_display_task, "text_display", 4096, nullptr, 4, nullptr);
+    // Until the phone supplies its UTC offset, SNTP time is shown as IST.
+    setenv("TZ", "IST-5:30", 1);
+    tzset();
+    xTaskCreate(status_icon_task, "status_icons", 3072, nullptr, 2, nullptr);
+    xTaskCreate(sync_supervisor_task, "sync_supervisor", 10240, nullptr, 3, nullptr);
+    xTaskCreate(local_clock_task, "local_clock", 3072, nullptr, 2, nullptr);
     start_wifi();
     start_ble();
     if (esp_ble_get_bond_device_num() == 0) {
