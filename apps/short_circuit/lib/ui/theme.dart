@@ -85,8 +85,9 @@ ThemeData buildScTheme() {
     switchTheme: SwitchThemeData(
       thumbColor: WidgetStateProperty.all(Colors.white),
       trackColor: WidgetStateProperty.resolveWith(
-        (states) =>
-            states.contains(WidgetState.selected) ? Sc.accent : const Color(0xffd4cec7),
+        (states) => states.contains(WidgetState.selected)
+            ? Sc.accent
+            : const Color(0xffd4cec7),
       ),
       trackOutlineColor: WidgetStateProperty.all(Colors.transparent),
     ),
@@ -185,37 +186,164 @@ class ScGroupLabel extends StatelessWidget {
   );
 }
 
-/// "‹ Back" link with an optional eyebrow on the right.
+/// Back arrow (icon button) with an optional eyebrow on the right.
 class ScBackRow extends StatelessWidget {
-  const ScBackRow({super.key, required this.label, required this.onBack, this.eyebrow});
+  const ScBackRow({
+    super.key,
+    required this.label,
+    required this.onBack,
+    this.eyebrow,
+  });
   final String label;
   final VoidCallback onBack;
   final String? eyebrow;
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: 14),
+    padding: const EdgeInsets.only(bottom: 10),
     child: Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        GestureDetector(
-          onTap: onBack,
-          behavior: HitTestBehavior.opaque,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Text(
-              '‹ $label',
-              style: const TextStyle(
-                color: Color(0xff6b55d9),
-                fontSize: 13,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ),
+        ScIconButton(
+          icon: LucideIcons.arrowLeft,
+          tooltip: 'Back to $label',
+          onPressed: onBack,
         ),
         if (eyebrow != null) ScEyebrow(eyebrow!),
       ],
     ),
+  );
+}
+
+enum ScTone { neutral, primary, danger, dark }
+
+/// Square-rounded icon-only button. The tooltip doubles as the screen-reader
+/// label and as the long-press hint, so the icon never has to carry text.
+class ScIconButton extends StatelessWidget {
+  const ScIconButton({
+    super.key,
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.tone = ScTone.neutral,
+    this.busy = false,
+    this.size = 48,
+    this.expand = false,
+    this.caption,
+  });
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final ScTone tone;
+  final bool busy;
+  final double size;
+
+  /// Stretch to the available width (one primary action per screen).
+  final bool expand;
+
+  /// Optional one-word caption under the icon, for actions whose icon alone
+  /// would be ambiguous (device actions). Not used for obvious icons.
+  final String? caption;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onPressed != null && !busy;
+    final (bg, fg) = switch (tone) {
+      ScTone.primary => (Sc.accent, Colors.white),
+      ScTone.danger => (Sc.dangerSoft, Sc.danger),
+      ScTone.dark => (Sc.dark, Colors.white),
+      ScTone.neutral => (Sc.neutralButton, Sc.neutralInk),
+    };
+    final button = Tooltip(
+      message: tooltip,
+      child: Semantics(
+        button: true,
+        enabled: enabled,
+        label: tooltip,
+        excludeSemantics: true,
+        child: Material(
+          color: enabled ? bg : Sc.neutralButton,
+          borderRadius: BorderRadius.circular(size * .3),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(size * .3),
+            onTap: enabled ? onPressed : null,
+            child: SizedBox(
+              width: expand ? double.infinity : size,
+              height: size,
+              child: Center(
+                child: busy
+                    ? SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: fg,
+                        ),
+                      )
+                    : Icon(
+                        icon,
+                        size: 20,
+                        color: enabled ? fg : const Color(0xffb3aaa2),
+                      ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    if (caption == null) return button;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        button,
+        const SizedBox(height: 4),
+        ExcludeSemantics(
+          child: Text(
+            caption!,
+            style: const TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              color: Sc.faint,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Cancel / confirm pair for dialogs, as icons. The confirm icon carries the
+/// outcome (check, trash, plus) and the tooltip names it for screen readers.
+List<Widget> scDialogActions(
+  BuildContext context, {
+  required IconData confirmIcon,
+  required String confirmTooltip,
+  required VoidCallback onConfirm,
+  VoidCallback? onCancel,
+  bool danger = false,
+}) => [
+  ScIconButton(
+    icon: LucideIcons.x,
+    tooltip: 'Cancel',
+    onPressed: onCancel ?? () => Navigator.pop(context, null),
+  ),
+  ScIconButton(
+    icon: confirmIcon,
+    tooltip: confirmTooltip,
+    tone: danger ? ScTone.danger : ScTone.primary,
+    onPressed: onConfirm,
+  ),
+];
+
+/// Evenly spaced row of icon buttons (e.g. play / review / retry / delete).
+class ScActionBar extends StatelessWidget {
+  const ScActionBar({super.key, required this.children});
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    children: children,
   );
 }
 
@@ -320,7 +448,7 @@ class ScPlayButton extends StatelessWidget {
         width: 31,
         height: 31,
         child: Icon(
-          active ? Icons.pause : Icons.play_arrow_rounded,
+          active ? LucideIcons.pause : LucideIcons.play,
           size: 18,
           color: Colors.white,
         ),
@@ -399,10 +527,19 @@ class ScRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: const TextStyle(fontSize: 14, color: Color(0xff332d28))),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Color(0xff332d28),
+                  ),
+                ),
                 if (caption != null) ...[
                   const SizedBox(height: 3),
-                  Text(caption!, style: const TextStyle(fontSize: 11, color: Sc.faint)),
+                  Text(
+                    caption!,
+                    style: const TextStyle(fontSize: 11, color: Sc.faint),
+                  ),
                 ],
               ],
             ),
@@ -422,7 +559,11 @@ class ScRow extends StatelessWidget {
             ),
           ?trailing,
           if (onTap != null && trailing == null && value == null)
-            const Icon(Icons.chevron_right, color: Color(0xff9f968d)),
+            const Icon(
+              LucideIcons.chevronRight,
+              size: 18,
+              color: Color(0xff9f968d),
+            ),
         ],
       ),
     ),
@@ -493,10 +634,10 @@ class ScNavBar extends StatelessWidget {
   final ValueChanged<int> onSelect;
 
   static const _items = [
-    (Icons.home_outlined, Icons.home, 'Home'),
-    (Icons.description_outlined, Icons.description, 'Notes'),
-    (Icons.check_box_outlined, Icons.check_box, 'Tasks'),
-    (Icons.settings_outlined, Icons.settings, 'Settings'),
+    (LucideIcons.house, LucideIcons.house, 'Home'),
+    (LucideIcons.fileText, LucideIcons.fileText, 'Notes'),
+    (LucideIcons.squareCheck, LucideIcons.squareCheck, 'Tasks'),
+    (LucideIcons.settings, LucideIcons.settings, 'Settings'),
   ];
 
   @override
@@ -509,7 +650,11 @@ class ScNavBar extends StatelessWidget {
         color: Colors.white,
         borderRadius: BorderRadius.circular(17),
         boxShadow: const [
-          BoxShadow(color: Color(0x1a252b35), blurRadius: 24, offset: Offset(0, 8)),
+          BoxShadow(
+            color: Color(0x1a252b35),
+            blurRadius: 24,
+            offset: Offset(0, 8),
+          ),
         ],
       ),
       child: Row(
@@ -532,7 +677,9 @@ class ScNavBar extends StatelessWidget {
                       Icon(
                         i == index ? _items[i].$2 : _items[i].$1,
                         size: 20,
-                        color: i == index ? Sc.accentInk : const Color(0xff92939a),
+                        color: i == index
+                            ? Sc.accentInk
+                            : const Color(0xff92939a),
                       ),
                       const SizedBox(height: 2),
                       Text(
@@ -540,7 +687,9 @@ class ScNavBar extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 10,
                           fontWeight: FontWeight.w800,
-                          color: i == index ? Sc.accentInk : const Color(0xff92939a),
+                          color: i == index
+                              ? Sc.accentInk
+                              : const Color(0xff92939a),
                         ),
                       ),
                     ],
@@ -549,6 +698,31 @@ class ScNavBar extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    ),
+  );
+}
+
+/// Small read-only label for categories (filled) and tags (outlined).
+class ScChip extends StatelessWidget {
+  const ScChip(this.text, {super.key, this.tag = false});
+  final String text;
+  final bool tag;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+    decoration: BoxDecoration(
+      color: tag ? Colors.transparent : Sc.accentSoft,
+      borderRadius: BorderRadius.circular(99),
+      border: tag ? Border.all(color: Sc.line) : null,
+    ),
+    child: Text(
+      tag ? '#$text' : text,
+      style: TextStyle(
+        fontSize: 11.5,
+        fontWeight: FontWeight.w700,
+        color: tag ? Sc.neutralInk : Sc.accentInk,
       ),
     ),
   );

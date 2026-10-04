@@ -438,8 +438,12 @@ class CircuitRelayService : Service() {
             }
         } catch (_: Exception) { /* counts stay at what we could read */ }
         // Notes downloaded in the background that the app screen has not adopted yet.
+        val unreferenced = ArrayList<String>()
         filesDir.listFiles()?.filter { it.name.startsWith("circuit-note-") && it.name.endsWith(".wav") }
-            ?.forEach { if (it.absolutePath !in known) synced++ }
+            ?.forEach { if (it.absolutePath !in known) { synced++; unreferenced.add("${it.name} (${it.length()} B)") } }
+        if (unreferenced.isNotEmpty()) {
+            Log.i("CircuitCounts", "pending=$pending synced=$synced referenced=${known.size} unreferenced=$unreferenced")
+        }
         val offsetMinutes = TimeZone.getDefault().getOffset(now.timeInMillis) / 60_000
         writeCommand("@home\n$time\n$date\n$pending · $synced\n${now.timeInMillis / 1000}\n$offsetMinutes")
     }
@@ -524,7 +528,13 @@ class CircuitRelayService : Service() {
             publishAudioStatus("Sync started\n$totalBytes bytes")
             for ((id, bytes, epoch) in notes) {
                 if (superseded()) return
-                val target = File(filesDir, "circuit-note-$epoch-$id.wav")
+                // The same recording may already be here under a different time stamp
+                // (an acknowledgement was lost and Circuit offered it again). Reuse it
+                // rather than keeping two copies.
+                val existing = filesDir.listFiles()?.firstOrNull {
+                    Regex("circuit-note-\\d+-$id\\.wav").matches(it.name) && it.length() == bytes
+                }
+                val target = existing ?: File(filesDir, "circuit-note-$epoch-$id.wav")
                 val partial = File(filesDir, "circuit-note-$epoch-$id.part")
                 if (!(target.exists() && target.length() == bytes)) {
                     var attempts = 0

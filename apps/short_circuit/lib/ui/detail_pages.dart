@@ -7,14 +7,14 @@ class GeminiSettingsPage extends StatefulWidget {
   State<GeminiSettingsPage> createState() => _GeminiSettingsPageState();
 }
 
-class HermesSettingsPage extends StatefulWidget {
-  const HermesSettingsPage({super.key});
+class AiServiceSettingsPage extends StatefulWidget {
+  const AiServiceSettingsPage({super.key});
 
   @override
-  State<HermesSettingsPage> createState() => _HermesSettingsPageState();
+  State<AiServiceSettingsPage> createState() => _AiServiceSettingsPageState();
 }
 
-class _HermesSettingsPageState extends State<HermesSettingsPage> {
+class _AiServiceSettingsPageState extends State<AiServiceSettingsPage> {
   final _url = TextEditingController();
   final _key = TextEditingController();
   final _model = TextEditingController();
@@ -30,11 +30,11 @@ class _HermesSettingsPageState extends State<HermesSettingsPage> {
 
   Future<void> _load() async {
     // Built-in defaults are never shown as if the user had typed them.
-    final url = await _hermes.baseUrl();
-    final model = await _hermes.model();
-    _url.text = url == _defaultHermesBaseUrl ? '' : url;
-    _key.text = await _hermes.apiKey() ?? '';
-    _model.text = model == _defaultHermesModel ? '' : model;
+    final url = await _ai.baseUrl();
+    final model = await _ai.model();
+    _url.text = url == _defaultAiBaseUrl ? '' : url;
+    _key.text = await _ai.apiKey() ?? '';
+    _model.text = model == _defaultAiModel ? '' : model;
     if (mounted) setState(() => _loading = false);
   }
 
@@ -45,12 +45,8 @@ class _HermesSettingsPageState extends State<HermesSettingsPage> {
   Future<void> _save({bool test = false}) async {
     setState(() => _busy = true);
     try {
-      await _hermes.save(
-        apiKey: _key.text,
-        baseUrl: _url.text,
-        model: _model.text,
-      );
-      if (test) await _hermes.testConnection();
+      await _ai.save(apiKey: _key.text, baseUrl: _url.text, model: _model.text);
+      if (test) await _ai.testConnection();
       _snack(test ? 'AI service is connected.' : 'AI settings saved securely.');
     } catch (error) {
       _snack(error.toString().replaceFirst('Exception: ', ''));
@@ -105,8 +101,9 @@ class _HermesSettingsPageState extends State<HermesSettingsPage> {
                   autocorrect: false,
                   decoration: InputDecoration(
                     suffixIcon: IconButton(
+                      tooltip: 'Show or hide the key',
                       icon: Icon(
-                        _obscure ? Icons.visibility : Icons.visibility_off,
+                        _obscure ? LucideIcons.eye : LucideIcons.eyeOff,
                       ),
                       onPressed: () => setState(() => _obscure = !_obscure),
                     ),
@@ -120,24 +117,27 @@ class _HermesSettingsPageState extends State<HermesSettingsPage> {
                   decoration: const InputDecoration(hintText: 'Model name'),
                 ),
                 const SizedBox(height: 22),
-                FilledButton.icon(
-                  onPressed: _busy ? null : () => _save(test: true),
-                  icon: _busy
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Icon(Icons.auto_awesome),
-                  label: Text(_busy ? 'Testing…' : 'Save and test AI'),
-                ),
-                const SizedBox(height: 10),
-                ScButton(
-                  label: 'Save without testing',
-                  onPressed: _busy ? null : _save,
+                Row(
+                  children: [
+                    Expanded(
+                      child: ScIconButton(
+                        expand: true,
+                        size: 54,
+                        icon: LucideIcons.flaskConical,
+                        tone: ScTone.primary,
+                        busy: _busy,
+                        tooltip: 'Save and test the AI service',
+                        onPressed: _busy ? null : () => _save(test: true),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    ScIconButton(
+                      size: 54,
+                      icon: LucideIcons.save,
+                      tooltip: 'Save without testing',
+                      onPressed: _busy ? null : _save,
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -254,8 +254,9 @@ class _GeminiSettingsPageState extends State<GeminiSettingsPage> {
                     autocorrect: false,
                     decoration: InputDecoration(
                       suffixIcon: IconButton(
+                        tooltip: 'Show or hide the key',
                         icon: Icon(
-                          _obscureKey ? Icons.visibility : Icons.visibility_off,
+                          _obscureKey ? LucideIcons.eye : LucideIcons.eyeOff,
                           size: 20,
                         ),
                         onPressed: () =>
@@ -277,25 +278,28 @@ class _GeminiSettingsPageState extends State<GeminiSettingsPage> {
                     style: TextStyle(color: Sc.faint, fontSize: 11),
                   ),
                   const SizedBox(height: 24),
-                  FilledButton.icon(
-                    onPressed: _saving || _testing ? null : _test,
-                    icon: _testing
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : const Icon(Icons.wifi_tethering, size: 18),
-                    label: Text(_testing ? 'Testing…' : 'Save and test Gemini'),
-                  ),
-                  const SizedBox(height: 10),
-                  ScButton(
-                    label: 'Clear Gemini settings',
-                    danger: true,
-                    onPressed: _saving || _testing ? null : _clear,
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ScIconButton(
+                          expand: true,
+                          size: 54,
+                          icon: LucideIcons.flaskConical,
+                          tone: ScTone.primary,
+                          busy: _testing,
+                          tooltip: 'Save and test Gemini',
+                          onPressed: _saving || _testing ? null : _test,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      ScIconButton(
+                        size: 54,
+                        icon: LucideIcons.trash2,
+                        tone: ScTone.danger,
+                        tooltip: 'Clear Gemini settings',
+                        onPressed: _saving || _testing ? null : _clear,
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -311,6 +315,7 @@ class TranscriptPage extends StatefulWidget {
     required this.noteId,
     required this.category,
     required this.title,
+    required this.status,
     required this.transcript,
     required this.onForceTranscribe,
     required this.audioPath,
@@ -325,12 +330,16 @@ class TranscriptPage extends StatefulWidget {
     this.tags = const [],
     this.suggestions = const [],
     required this.onSuggestionState,
+    this.noteById,
+    this.onEnrich,
+    this.onOpenChat,
   });
 
   final DateTime createdAt;
   final String noteId;
   final String category;
   final String title;
+  final String status;
   final String transcript;
   final Future<GeminiTranscription?> Function(String noteId) onForceTranscribe;
   final String? audioPath;
@@ -347,6 +356,16 @@ class TranscriptPage extends StatefulWidget {
   final Future<void> Function(String noteId, String suggestionId, String state)
   onSuggestionState;
 
+  /// Lets the page show the latest saved version of its note, so it updates
+  /// while an AI review runs in the background.
+  final CircuitNote? Function(String noteId)? noteById;
+
+  /// Runs the AI review of this note again.
+  final Future<void> Function(String noteId)? onEnrich;
+
+  /// Opens the chat about this note.
+  final VoidCallback? onOpenChat;
+
   @override
   State<TranscriptPage> createState() => _TranscriptPageState();
 }
@@ -357,38 +376,40 @@ class _TranscriptPageState extends State<TranscriptPage> {
   late String _category;
   bool _forcing = false;
   bool _extractingReminder = false;
+  Timer? _ticker;
+
+  CircuitNote? get _live => widget.noteById?.call(widget.noteId);
 
   Future<void> _approveSuggestion(NoteActionSuggestion suggestion) async {
+    final when = suggestion.type == 'task'
+        ? null
+        : DateTime.tryParse(suggestion.scheduledAt ?? '');
+    // Without a clear date and time there is nothing for Calendar to open, so
+    // the suggestion becomes a task instead of a dead end.
+    final asTask = when == null;
+    final note = suggestion.type != 'task' && when == null
+        ? '\n\nNo date or time was found, so this will be a task.'
+        : '';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Use this suggestion?'),
+        title: Text(asTask ? 'Add to your tasks?' : 'Add to Calendar?'),
         content: Text(
-          '${suggestion.title}${suggestion.details.isEmpty ? '' : '\n\n${suggestion.details}'}',
+          '${suggestion.title}${suggestion.details.isEmpty ? '' : '\n\n${suggestion.details}'}$note',
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Approve'),
-          ),
-        ],
+        actions: scDialogActions(
+          context,
+          confirmIcon: asTask ? LucideIcons.listPlus : LucideIcons.calendarPlus,
+          confirmTooltip: asTask ? 'Add as task' : 'Open Calendar',
+          onCancel: () => Navigator.pop(context, false),
+          onConfirm: () => Navigator.pop(context, true),
+        ),
       ),
     );
     if (confirmed != true) return;
-    if (suggestion.type == 'task') {
+    if (when == null) {
       await widget.onAddTask(suggestion.title, suggestion.details);
     } else {
-      final when = DateTime.tryParse(suggestion.scheduledAt ?? '');
-      if (when == null) {
-        _snack(
-          'This suggestion needs a clear date and time before it can open Calendar.',
-        );
-        return;
-      }
       await _relayChannel.invokeMethod<void>('openCalendarEvent', {
         'title': suggestion.title,
         'description': suggestion.details,
@@ -399,7 +420,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
       });
     }
     await widget.onSuggestionState(widget.noteId, suggestion.id, 'approved');
-    _snack('Suggestion approved.');
+    _snack(asTask ? 'Added to your tasks.' : 'Suggestion approved.');
   }
 
   @override
@@ -408,6 +429,9 @@ class _TranscriptPageState extends State<TranscriptPage> {
     _title = widget.title;
     _transcript = widget.transcript;
     _category = widget.category;
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
   }
 
   void _snack(String message) {
@@ -426,21 +450,26 @@ class _TranscriptPageState extends State<TranscriptPage> {
       final draft = await widget.onCreateReminder(_transcript);
       if (!mounted || draft == null) return;
       if (!draft.hasReminder || draft.scheduledAt == null) {
-        await showDialog<void>(
+        final addTask = await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
-            title: const Text('No dated reminder found'),
+            title: const Text('No date or time found'),
             content: const Text(
-              'Gemini could not find a clear reminder date or time in this note.',
+              'This note has no clear date or time for Calendar. Add it to your tasks instead?',
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('Close'),
-              ),
-            ],
+            actions: scDialogActions(
+              dialogContext,
+              confirmIcon: LucideIcons.listPlus,
+              confirmTooltip: 'Add as task',
+              onCancel: () => Navigator.pop(dialogContext, false),
+              onConfirm: () => Navigator.pop(dialogContext, true),
+            ),
           ),
         );
+        if (addTask == true) {
+          await widget.onAddTask(_title, null);
+          _snack('Added to your tasks');
+        }
         return;
       }
       final date = draft.scheduledAt!.toLocal();
@@ -451,17 +480,13 @@ class _TranscriptPageState extends State<TranscriptPage> {
         builder: (dialogContext) => AlertDialog(
           title: const Text('Create calendar reminder?'),
           content: Text('${draft.title}\n$dateText\n\n${draft.details}'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Open Calendar'),
-            ),
-          ],
+          actions: scDialogActions(
+            dialogContext,
+            confirmIcon: LucideIcons.calendarPlus,
+            confirmTooltip: 'Open Calendar',
+            onCancel: () => Navigator.pop(dialogContext, false),
+            onConfirm: () => Navigator.pop(dialogContext, true),
+          ),
         ),
       );
       if (confirmed == true && mounted) {
@@ -504,6 +529,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
 
   @override
   void dispose() {
+    _ticker?.cancel();
     unawaited(_relayChannel.invokeMethod<void>('stopPlayback'));
     super.dispose();
   }
@@ -511,6 +537,16 @@ class _TranscriptPageState extends State<TranscriptPage> {
   @override
   Widget build(BuildContext context) {
     final local = widget.createdAt.toLocal();
+    final live = _live;
+    final status = live?.status ?? widget.status;
+    final summary = live?.summary ?? widget.summary;
+    final translation = live?.englishTranslation ?? widget.englishTranslation;
+    final language = live?.language ?? widget.language;
+    final categories = live?.categories ?? widget.categories;
+    final tags = live?.tags ?? widget.tags;
+    final suggestions = live?.actionSuggestions ?? widget.suggestions;
+    final enriching = live?.enrichmentStatus == 'enriching';
+    final hasTranscript = _transcript.trim().isNotEmpty;
     return Scaffold(
       body: SafeArea(
         child: ListView(
@@ -522,10 +558,10 @@ class _TranscriptPageState extends State<TranscriptPage> {
               eyebrow:
                   '${_dayLabel(widget.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}',
             ),
-            ScTitle(_title),
+            ScTitle(live?.title ?? _title),
             const SizedBox(height: 8),
             Text(
-              'Transcribed · AI reviewed · ${_category.replaceAll('_', ' ')}${widget.language?.isNotEmpty == true ? ' · ${widget.language}' : ''}',
+              '$status · ${_category.replaceAll('_', ' ')}${language?.isNotEmpty == true ? ' · $language' : ''}',
               style: const TextStyle(
                 color: Sc.muted,
                 fontSize: 12,
@@ -541,20 +577,29 @@ class _TranscriptPageState extends State<TranscriptPage> {
                 color: Sc.warmCard,
                 borderRadius: BorderRadius.circular(18),
               ),
-              child: SelectableText(
-                _transcript,
-                style: const TextStyle(
-                  fontSize: 15,
-                  height: 1.5,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
+              child: _transcript.trim().isEmpty
+                  ? const Text(
+                      'Transcript not available yet. The recording will appear here after sync and transcription.',
+                      style: TextStyle(
+                        fontSize: 14,
+                        height: 1.5,
+                        color: Sc.muted,
+                      ),
+                    )
+                  : SelectableText(
+                      _transcript,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        height: 1.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
             ),
-            if (widget.summary?.isNotEmpty == true) ...[
+            if (summary?.isNotEmpty == true) ...[
               const SizedBox(height: 20),
               const ScGroupLabel('Summary'),
               Text(
-                widget.summary!,
+                summary!,
                 style: const TextStyle(
                   fontSize: 14,
                   height: 1.45,
@@ -562,8 +607,8 @@ class _TranscriptPageState extends State<TranscriptPage> {
                 ),
               ),
             ],
-            if (widget.englishTranslation?.isNotEmpty == true &&
-                widget.englishTranslation != _transcript) ...[
+            if (translation?.isNotEmpty == true &&
+                translation != _transcript) ...[
               const SizedBox(height: 20),
               const ScGroupLabel('English translation'),
               Container(
@@ -574,29 +619,29 @@ class _TranscriptPageState extends State<TranscriptPage> {
                   borderRadius: BorderRadius.circular(18),
                 ),
                 child: SelectableText(
-                  widget.englishTranslation!,
+                  translation!,
                   style: const TextStyle(fontSize: 14, height: 1.5),
                 ),
               ),
             ],
-            if (widget.categories.isNotEmpty || widget.tags.isNotEmpty) ...[
+            if (categories.isNotEmpty || tags.isNotEmpty) ...[
               const SizedBox(height: 20),
               const ScGroupLabel('Metadata'),
               Wrap(
                 spacing: 6,
                 runSpacing: 6,
                 children: [
-                  ...widget.categories.map((item) => Chip(label: Text(item))),
-                  ...widget.tags.map((item) => Chip(label: Text('#$item'))),
+                  ...categories.map((item) => ScChip(item)),
+                  ...tags.map((item) => ScChip(item, tag: true)),
                 ],
               ),
             ],
-            if (widget.suggestions
+            if (suggestions
                 .where((item) => item.state == 'pending')
                 .isNotEmpty) ...[
               const SizedBox(height: 22),
               const ScGroupLabel('Suggested actions'),
-              for (final suggestion in widget.suggestions.where(
+              for (final suggestion in suggestions.where(
                 (item) => item.state == 'pending',
               ))
                 Column(
@@ -606,36 +651,41 @@ class _TranscriptPageState extends State<TranscriptPage> {
                       caption: suggestion.details.isEmpty
                           ? suggestion.type.replaceAll('_', ' ')
                           : suggestion.details,
-                      trailing: const Text(
-                        'Review',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w800,
-                          color: Sc.accent,
-                        ),
+                      trailing: const Icon(
+                        LucideIcons.chevronRight,
+                        size: 18,
+                        color: Sc.accent,
                       ),
                       onTap: () => _approveSuggestion(suggestion),
                     ),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        TextButton(
-                          onPressed: () async {
-                            await widget.onSuggestionState(
-                              widget.noteId,
-                              suggestion.id,
-                              'dismissed',
-                            );
-                            _snack('Suggestion dismissed.');
-                          },
-                          child: const Text('Dismiss'),
-                        ),
-                        const SizedBox(width: 6),
-                        FilledButton.tonal(
-                          onPressed: () => _approveSuggestion(suggestion),
-                          child: const Text('Approve'),
-                        ),
-                      ],
+                    Padding(
+                      padding: const EdgeInsets.only(top: 10, bottom: 4),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          ScIconButton(
+                            size: 40,
+                            icon: LucideIcons.x,
+                            tooltip: 'Dismiss suggestion',
+                            onPressed: () async {
+                              await widget.onSuggestionState(
+                                widget.noteId,
+                                suggestion.id,
+                                'dismissed',
+                              );
+                              _snack('Suggestion dismissed.');
+                            },
+                          ),
+                          const SizedBox(width: 8),
+                          ScIconButton(
+                            size: 40,
+                            icon: LucideIcons.check,
+                            tooltip: 'Approve suggestion',
+                            tone: ScTone.primary,
+                            onPressed: () => _approveSuggestion(suggestion),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -646,13 +696,10 @@ class _TranscriptPageState extends State<TranscriptPage> {
               ScRow(
                 title: 'Add to tasks',
                 caption: _title,
-                trailing: const Text(
-                  'Add task',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xff6d5e51),
-                  ),
+                trailing: const Icon(
+                  LucideIcons.listPlus,
+                  size: 20,
+                  color: Color(0xff6d5e51),
                 ),
                 onTap: () async {
                   await widget.onAddTask(_title, null);
@@ -664,34 +711,66 @@ class _TranscriptPageState extends State<TranscriptPage> {
                 caption: _extractingReminder
                     ? 'Checking the note…'
                     : 'Find a date and time in this note',
-                trailing: const Text(
-                  'Create',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xff6d5e51),
-                  ),
+                trailing: const Icon(
+                  LucideIcons.calendarPlus,
+                  size: 20,
+                  color: Color(0xff6d5e51),
                 ),
                 onTap: _extractingReminder ? null : _createReminder,
               ),
             ],
             const SizedBox(height: 22),
-            ScButton(
-              label: 'Play recording',
-              icon: Icons.play_arrow,
-              onPressed: widget.audioPath == null
-                  ? null
-                  : () => widget.onPlayNote(widget.audioPath),
+            ScActionBar(
+              children: [
+                ScIconButton(
+                  icon: LucideIcons.play,
+                  tone: ScTone.dark,
+                  caption: 'Play',
+                  tooltip: widget.audioPath == null
+                      ? 'Play recording (not on this phone yet)'
+                      : 'Play recording',
+                  onPressed: widget.audioPath == null
+                      ? null
+                      : () => widget.onPlayNote(widget.audioPath),
+                ),
+                ScIconButton(
+                  icon: LucideIcons.messageCircle,
+                  caption: 'Ask',
+                  tone: ScTone.primary,
+                  tooltip: hasTranscript
+                      ? 'Ask about this note'
+                      : 'Ask about this note (needs a transcript first)',
+                  onPressed: hasTranscript ? widget.onOpenChat : null,
+                ),
+                ScIconButton(
+                  icon: LucideIcons.sparkles,
+                  caption: 'AI review',
+                  busy: enriching,
+                  tooltip: !hasTranscript
+                      ? 'Run AI review (needs a transcript first)'
+                      : enriching
+                      ? 'AI review running'
+                      : 'Run AI review again',
+                  onPressed: hasTranscript && widget.onEnrich != null
+                      ? () => widget.onEnrich!(widget.noteId)
+                      : null,
+                ),
+                ScIconButton(
+                  icon: LucideIcons.languages,
+                  caption: 'Transcribe',
+                  busy: _forcing,
+                  tooltip: _forcing ? 'Transcribing' : 'Transcribe again',
+                  onPressed: _transcribeAgain,
+                ),
+                ScIconButton(
+                  icon: LucideIcons.trash2,
+                  caption: 'Delete',
+                  tone: ScTone.danger,
+                  tooltip: 'Delete note',
+                  onPressed: _delete,
+                ),
+              ],
             ),
-            const SizedBox(height: 10),
-            ScButton(
-              label: _forcing ? 'Transcribing…' : 'Transcribe again',
-              icon: Icons.refresh,
-              busy: _forcing,
-              onPressed: _transcribeAgain,
-            ),
-            const SizedBox(height: 10),
-            ScButton(label: 'Delete note', danger: true, onPressed: _delete),
           ],
         ),
       ),

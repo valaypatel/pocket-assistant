@@ -45,20 +45,14 @@ Future<bool> _confirmDeleteNote(BuildContext context) async =>
         content: const Text(
           'This removes only the phone copy. Circuit keeps nothing once a note is synced.',
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              minimumSize: const Size(0, 44),
-              backgroundColor: Sc.danger,
-            ),
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Delete'),
-          ),
-        ],
+        actions: scDialogActions(
+          dialogContext,
+          confirmIcon: LucideIcons.trash2,
+          confirmTooltip: 'Delete note',
+          danger: true,
+          onCancel: () => Navigator.pop(dialogContext, false),
+          onConfirm: () => Navigator.pop(dialogContext, true),
+        ),
       ),
     ) ??
     false;
@@ -122,13 +116,13 @@ extension _ScPages on _CircuitHomePageState {
             ),
             const SizedBox(width: 8),
             Icon(
-              _wifiState == 'failed' ? Icons.wifi_off : Icons.wifi,
+              _wifiState == 'failed' ? LucideIcons.wifiOff : LucideIcons.wifi,
               size: 15,
               color: wifiColor,
             ),
             const SizedBox(width: 6),
             Icon(
-              Icons.phone_android,
+              LucideIcons.smartphone,
               size: 15,
               color: _relayActive ? Sc.orange : const Color(0xffa6a9af),
             ),
@@ -173,7 +167,7 @@ extension _ScPages on _CircuitHomePageState {
           children: [
             const Row(
               children: [
-                Icon(Icons.sync_problem, color: Sc.danger, size: 22),
+                Icon(LucideIcons.refreshCwOff, color: Sc.danger, size: 22),
                 SizedBox(width: 10),
                 Text(
                   'Sync needs attention',
@@ -197,19 +191,17 @@ extension _ScPages on _CircuitHomePageState {
             const SizedBox(height: 12),
             Row(
               children: [
-                FilledButton(
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size(0, 40),
-                    padding: const EdgeInsets.symmetric(horizontal: 18),
-                    backgroundColor: Sc.danger,
-                  ),
+                ScIconButton(
+                  icon: LucideIcons.refreshCw,
+                  tooltip: 'Retry sync',
+                  tone: ScTone.danger,
                   onPressed: _retrySync,
-                  child: const Text('Retry sync'),
                 ),
                 const SizedBox(width: 10),
-                TextButton(
+                ScIconButton(
+                  icon: LucideIcons.x,
+                  tooltip: 'Dismiss sync error',
                   onPressed: () => _update(() => _syncError = null),
-                  child: const Text('Dismiss'),
                 ),
               ],
             ),
@@ -282,7 +274,10 @@ extension _ScPages on _CircuitHomePageState {
       note.actionSuggestions.any((item) => item.state == 'pending');
 
   Future<void> _retryEnrichment(String id) async {
-    if (!_hermesConnected) {
+    _enrichAttempts.remove(
+      id,
+    ); // a manual run starts the automatic back-off afresh
+    if (!_aiConnected) {
       _setStatus('Add an AI service in Settings before retrying review.');
       return;
     }
@@ -290,13 +285,13 @@ extension _ScPages on _CircuitHomePageState {
   }
 
   IconData _noteIcon(CircuitNote note) {
-    if (_noteNeedsAttention(note)) return Icons.error_outline;
+    if (_noteNeedsAttention(note)) return LucideIcons.circleAlert;
     return switch (note.category) {
-      'reminder' || 'task' || 'calendar_event' => Icons.check,
-      'idea' => Icons.auto_awesome,
-      'shopping' => Icons.shopping_bag_outlined,
-      'journal' => Icons.menu_book_outlined,
-      _ => note.transcript == null ? Icons.mic_none : Icons.notes,
+      'reminder' || 'task' || 'calendar_event' => LucideIcons.check,
+      'idea' => LucideIcons.sparkles,
+      'shopping' => LucideIcons.shoppingBag,
+      'journal' => LucideIcons.bookOpen,
+      _ => note.transcript == null ? LucideIcons.mic : LucideIcons.notebookText,
     };
   }
 
@@ -326,7 +321,6 @@ extension _ScPages on _CircuitHomePageState {
   }
 
   VoidCallback? _openNote(CircuitNote note) {
-    if (note.transcript == null) return null;
     return () => Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => TranscriptPage(
@@ -334,7 +328,8 @@ extension _ScPages on _CircuitHomePageState {
           noteId: note.id,
           category: note.category ?? 'note',
           title: note.title ?? 'Voice note',
-          transcript: note.transcript!,
+          status: note.status,
+          transcript: note.transcript ?? '',
           onForceTranscribe: _transcribeNote,
           audioPath: note.audioPath,
           onPlayNote: _playSyncedNote,
@@ -348,6 +343,20 @@ extension _ScPages on _CircuitHomePageState {
           tags: note.tags,
           suggestions: note.actionSuggestions,
           onSuggestionState: _setSuggestionState,
+          noteById: (id) => _notes.where((n) => n.id == id).firstOrNull,
+          onEnrich: _retryEnrichment,
+          onOpenChat: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => NoteChatPage(
+                noteId: note.id,
+                title: note.title ?? 'Voice note',
+                loadHistory: _loadNoteChat,
+                saveHistory: _saveNoteChat,
+                ask: _askAboutNote,
+                onAddTask: (title, detail) => _addTask(title, detail: detail),
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -359,15 +368,25 @@ extension _ScPages on _CircuitHomePageState {
     final needsSync = note.audioPath == null && note.id != _syncingNoteId;
     final footerButtons = <Widget>[
       if (actions &&
-          note.enrichmentStatus == 'failed' &&
-          note.transcript != null)
-        TextButton.icon(
+          (note.enrichmentStatus == 'failed' ||
+              note.enrichmentStatus == 'pending') &&
+          (note.transcript ?? '').trim().isNotEmpty)
+        ScIconButton(
+          size: 40,
+          icon: LucideIcons.sparkles,
+          tooltip: note.enrichmentStatus == 'failed'
+              ? 'Retry AI review'
+              : 'Run AI review',
           onPressed: () => _retryEnrichment(note.id),
-          icon: const Icon(Icons.auto_awesome, size: 16),
-          label: const Text('Retry AI review'),
         ),
       if (actions && canTranscribe)
-        TextButton.icon(
+        ScIconButton(
+          size: 40,
+          icon: LucideIcons.languages,
+          tooltip: _transcribingNoteId == note.id
+              ? 'Transcribing'
+              : 'Transcribe',
+          busy: _transcribingNoteId == note.id,
           onPressed: _transcribingNoteId != null
               ? null
               : () async {
@@ -379,22 +398,13 @@ extension _ScPages on _CircuitHomePageState {
                   final open = updated == null ? null : _openNote(updated);
                   open?.call();
                 },
-          icon: _transcribingNoteId == note.id
-              ? const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.translate, size: 16),
-          label: Text(
-            _transcribingNoteId == note.id ? 'Transcribing…' : 'Transcribe',
-          ),
         ),
       if (actions && needsSync)
-        TextButton.icon(
+        ScIconButton(
+          size: 40,
+          icon: LucideIcons.refreshCw,
+          tooltip: 'Sync now',
           onPressed: () => _syncLatestRecording(note.id),
-          icon: const Icon(Icons.sync, size: 16),
-          label: const Text('Sync now'),
         ),
     ];
     return ScTile(
@@ -422,7 +432,7 @@ extension _ScPages on _CircuitHomePageState {
             )
           : footerButtons.isEmpty
           ? null
-          : Wrap(spacing: 4, children: footerButtons),
+          : Wrap(spacing: 8, children: footerButtons),
     );
   }
 
@@ -543,7 +553,7 @@ extension _ScPages on _CircuitHomePageState {
       ),
       if (worth.isEmpty)
         const ScTile(
-          icon: Icons.mic_none,
+          icon: LucideIcons.mic,
           title: 'No voice notes yet',
           subtitle: 'Tap the upper side button on Circuit to start recording.',
         )
@@ -581,52 +591,63 @@ extension _ScPages on _CircuitHomePageState {
         .where((note) => !_noteNeedsAttention(note))
         .toList();
     return [
-      const ScEyebrow('Library'),
-      const SizedBox(height: 4),
-      const ScTitle('All notes'),
-      const SizedBox(height: 8),
-      const Text(
-        'Your recordings, transcriptions, and saved ideas in one place.',
-        style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.45),
+      Row(
+        children: [
+          const Expanded(child: ScTitle('Notes')),
+          ScIconButton(
+            size: 44,
+            icon: _noteSearchOpen ? LucideIcons.x : LucideIcons.search,
+            tooltip: _noteSearchOpen ? 'Close search' : 'Search notes',
+            onPressed: () => _update(() {
+              if (_noteSearchOpen) _noteSearchController.clear();
+              _noteSearchOpen = !_noteSearchOpen;
+            }),
+          ),
+        ],
       ),
-      const SizedBox(height: 20),
-      TextField(
-        controller: _noteSearchController,
-        onChanged: (_) => _update(() {}),
-        decoration: InputDecoration(
-          hintText: 'Search notes, tags, and actions',
-          prefixIcon: const Icon(Icons.search),
-          suffixIcon: query.isEmpty
-              ? null
-              : IconButton(
-                  icon: const Icon(Icons.clear),
-                  onPressed: () {
-                    _noteSearchController.clear();
-                    _update(() {});
-                  },
-                ),
+      if (_noteSearchOpen) ...[
+        const SizedBox(height: 10),
+        TextField(
+          controller: _noteSearchController,
+          autofocus: true,
+          onChanged: (_) => _update(() {}),
+          decoration: const InputDecoration(
+            hintText: 'Search',
+            prefixIcon: Icon(LucideIcons.search, size: 18),
+            isDense: true,
+          ),
         ),
-      ),
-      const SizedBox(height: 16),
+      ],
+      const SizedBox(height: 14),
       _syncHealthCard(),
       _syncBanner(),
       if (_notes.any(_noteNeedsAttention)) ...[
         const SizedBox(height: 18),
-        const ScGroupLabel('Review queue'),
-        const Text(
-          'These notes need your attention before they become actions.',
-          style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.4),
-        ),
-        const SizedBox(height: 8),
-      for (final note in visibleNotes.where(_noteNeedsAttention).take(5)) ...[
-          _noteTile(note, actions: true),
+        const ScGroupLabel('Needs attention'),
+        for (final note in visibleNotes.where(_noteNeedsAttention).take(5)) ...[
+          Dismissible(
+            key: ValueKey('review-${note.id}'),
+            direction: DismissDirection.endToStart,
+            background: Container(
+              alignment: Alignment.centerRight,
+              padding: const EdgeInsets.symmetric(horizontal: 22),
+              decoration: BoxDecoration(
+                color: Sc.dangerSoft,
+                borderRadius: BorderRadius.circular(18),
+              ),
+              child: const Icon(LucideIcons.trash2, color: Sc.danger),
+            ),
+            confirmDismiss: (_) => _confirmDeleteNote(context),
+            onDismissed: (_) => _deleteNote(note.id),
+            child: _noteTile(note, actions: true),
+          ),
           const SizedBox(height: 8),
         ],
         const SizedBox(height: 10),
       ],
       if (visibleNotes.isEmpty)
         const ScTile(
-          icon: Icons.mic_none,
+          icon: LucideIcons.mic,
           title: 'No matching notes',
           subtitle: 'Try another word or search tag.',
         )
@@ -642,7 +663,7 @@ extension _ScPages on _CircuitHomePageState {
                 color: Sc.dangerSoft,
                 borderRadius: BorderRadius.circular(18),
               ),
-              child: const Icon(Icons.delete_outline, color: Sc.danger),
+              child: const Icon(LucideIcons.trash2, color: Sc.danger),
             ),
             confirmDismiss: (_) => _confirmDeleteNote(context),
             onDismissed: (_) => _deleteNote(note.id),
@@ -668,17 +689,12 @@ extension _ScPages on _CircuitHomePageState {
           decoration: const InputDecoration(hintText: 'What needs doing?'),
           onSubmitted: (value) => Navigator.pop(dialogContext, value),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
-            onPressed: () => Navigator.pop(dialogContext, controller.text),
-            child: const Text('Add'),
-          ),
-        ],
+        actions: scDialogActions(
+          dialogContext,
+          confirmIcon: LucideIcons.plus,
+          confirmTooltip: 'Add task',
+          onConfirm: () => Navigator.pop(dialogContext, controller.text),
+        ),
       ),
     );
     controller.dispose();
@@ -691,7 +707,7 @@ extension _ScPages on _CircuitHomePageState {
     background: Container(
       alignment: Alignment.centerRight,
       padding: const EdgeInsets.only(right: 8),
-      child: const Icon(Icons.delete_outline, color: Sc.danger),
+      child: const Icon(LucideIcons.trash2, color: Sc.danger),
     ),
     onDismissed: (_) => _deleteTask(task.id),
     child: InkWell(
@@ -770,7 +786,15 @@ extension _ScPages on _CircuitHomePageState {
         for (final task in done) _taskRow(task),
       ],
       const SizedBox(height: 20),
-      ScButton(label: '+ Add task', onPressed: _promptAddTask),
+      Align(
+        alignment: Alignment.centerRight,
+        child: ScIconButton(
+          icon: LucideIcons.plus,
+          tooltip: 'Add task',
+          tone: ScTone.primary,
+          onPressed: _promptAddTask,
+        ),
+      ),
     ];
   }
 
@@ -790,17 +814,12 @@ extension _ScPages on _CircuitHomePageState {
             hintText: 'Shown in the Home greeting',
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
-            onPressed: () => Navigator.pop(dialogContext, controller.text),
-            child: const Text('Save'),
-          ),
-        ],
+        actions: scDialogActions(
+          dialogContext,
+          confirmIcon: LucideIcons.check,
+          confirmTooltip: 'Save name',
+          onConfirm: () => Navigator.pop(dialogContext, controller.text),
+        ),
       ),
     );
     controller.dispose();
@@ -870,7 +889,11 @@ extension _ScPages on _CircuitHomePageState {
                 ],
               ),
             ),
-            const Icon(Icons.chevron_right, color: Color(0xff6e7d72)),
+            const Icon(
+              LucideIcons.chevronRight,
+              size: 18,
+              color: Color(0xff6e7d72),
+            ),
           ],
         ),
       ),
@@ -902,7 +925,7 @@ extension _ScPages on _CircuitHomePageState {
                 borderRadius: BorderRadius.circular(11),
               ),
               child: const Icon(
-                Icons.smart_toy_outlined,
+                LucideIcons.bot,
                 size: 19,
                 color: Color(0xffdb5b37),
               ),
@@ -928,7 +951,11 @@ extension _ScPages on _CircuitHomePageState {
                 ],
               ),
             ),
-            const Icon(Icons.chevron_right, color: Color(0xff9f968d)),
+            const Icon(
+              LucideIcons.chevronRight,
+              size: 18,
+              color: Color(0xff9f968d),
+            ),
           ],
         ),
       ),
@@ -938,9 +965,11 @@ extension _ScPages on _CircuitHomePageState {
       borderRadius: BorderRadius.circular(18),
       onTap: () async {
         await Navigator.of(context).push(
-          MaterialPageRoute<void>(builder: (_) => const HermesSettingsPage()),
+          MaterialPageRoute<void>(
+            builder: (_) => const AiServiceSettingsPage(),
+          ),
         );
-        await _loadHermesState();
+        await _loadAiState();
       },
       child: Container(
         padding: const EdgeInsets.all(14),
@@ -959,7 +988,7 @@ extension _ScPages on _CircuitHomePageState {
                 borderRadius: BorderRadius.circular(11),
               ),
               child: const Icon(
-                Icons.auto_awesome,
+                LucideIcons.sparkles,
                 size: 18,
                 color: Color(0xffdb5b37),
               ),
@@ -974,7 +1003,7 @@ extension _ScPages on _CircuitHomePageState {
                     style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
                   ),
                   Text(
-                    _hermesConnected
+                    _aiConnected
                         ? 'Smart notes and action suggestions ready'
                         : 'Connect an AI service for smart note review',
                     style: const TextStyle(
@@ -985,7 +1014,11 @@ extension _ScPages on _CircuitHomePageState {
                 ],
               ),
             ),
-            const Icon(Icons.chevron_right, color: Color(0xff9f968d)),
+            const Icon(
+              LucideIcons.chevronRight,
+              size: 18,
+              color: Color(0xff9f968d),
+            ),
           ],
         ),
       ),
@@ -1017,20 +1050,14 @@ extension _ScPages on _CircuitHomePageState {
         content: const Text(
           'The phone will stop connecting to it. You can pair it again by scanning.',
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              minimumSize: const Size(0, 44),
-              backgroundColor: Sc.danger,
-            ),
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Forget'),
-          ),
-        ],
+        actions: scDialogActions(
+          dialogContext,
+          confirmIcon: LucideIcons.unlink,
+          confirmTooltip: 'Forget this Circuit',
+          danger: true,
+          onCancel: () => Navigator.pop(dialogContext, false),
+          onConfirm: () => Navigator.pop(dialogContext, true),
+        ),
       ),
     );
     if (confirmed != true) return;
@@ -1116,38 +1143,44 @@ extension _ScPages on _CircuitHomePageState {
       _syncBanner(),
       if (!available) ...[
         const ScGroupLabel('Connect'),
-        ScButton(
-          label: _scanning ? 'Scanning…' : 'Scan for Circuit',
-          icon: Icons.bluetooth_searching,
-          busy: _scanning,
-          onPressed: _connecting ? null : _scan,
+        Row(
+          children: [
+            ScIconButton(
+              icon: LucideIcons.bluetoothSearching,
+              tooltip: _scanning ? 'Scanning for Circuit' : 'Scan for Circuit',
+              caption: 'Scan',
+              tone: ScTone.primary,
+              busy: _scanning,
+              onPressed: _connecting ? null : _scan,
+            ),
+            if (_savedCircuitId != null) ...[
+              const SizedBox(width: 16),
+              ScIconButton(
+                icon: LucideIcons.rotateCw,
+                tooltip: 'Reconnect saved Circuit',
+                caption: 'Reconnect',
+                onPressed: _connecting
+                    ? null
+                    : () => _connect(
+                        BluetoothDevice.fromId(_savedCircuitId!),
+                        savedReconnect: true,
+                      ),
+              ),
+            ],
+          ],
         ),
-        if (_savedCircuitId != null) ...[
-          const SizedBox(height: 10),
-          ScButton(
-            label: 'Reconnect saved Circuit',
-            icon: Icons.refresh,
-            onPressed: _connecting
-                ? null
-                : () => _connect(
-                    BluetoothDevice.fromId(_savedCircuitId!),
-                    savedReconnect: true,
-                  ),
-          ),
-        ],
         const SizedBox(height: 10),
         for (final result in _circuits.values) ...[
           ScTile(
-            icon: Icons.developer_board,
+            icon: LucideIcons.cpu,
             title: _circuitName,
             subtitle: '${result.device.remoteId.str} · ${result.rssi} dBm',
-            trailing: FilledButton(
-              style: FilledButton.styleFrom(
-                minimumSize: const Size(0, 38),
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-              ),
+            trailing: ScIconButton(
+              size: 40,
+              icon: LucideIcons.link,
+              tooltip: 'Connect to $_circuitName',
+              tone: ScTone.primary,
               onPressed: _connecting ? null : () => _connect(result.device),
-              child: const Text('Connect'),
             ),
           ),
           const SizedBox(height: 10),
@@ -1258,7 +1291,7 @@ extension _ScPages on _CircuitHomePageState {
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.circle, size: 9, color: Colors.white),
+                        Icon(LucideIcons.circle, size: 9, color: Colors.white),
                         SizedBox(width: 8),
                         Text(
                           'Record',
@@ -1278,37 +1311,48 @@ extension _ScPages on _CircuitHomePageState {
         ),
       ),
       const SizedBox(height: 14),
-      ScButton(
-        label: 'Play latest recording on Circuit',
-        icon: Icons.play_arrow,
-        onPressed: available && !_audioBusy && !_recordingAudio
-            ? _playAudio
-            : null,
+      ScActionBar(
+        children: [
+          ScIconButton(
+            icon: LucideIcons.play,
+            tooltip: 'Play latest recording on Circuit',
+            caption: 'Play',
+            onPressed: available && !_audioBusy && !_recordingAudio
+                ? _playAudio
+                : null,
+          ),
+          ScIconButton(
+            icon: LucideIcons.eraser,
+            tooltip: 'Free up Circuit storage',
+            caption: 'Free space',
+            onPressed: available && !_audioBusy && !_recordingAudio
+                ? _cleanCircuitNotes
+                : null,
+          ),
+          if (_relayActive)
+            ScIconButton(
+              icon: LucideIcons.radio,
+              tooltip: 'Stop phone relay',
+              caption: 'Stop relay',
+              onPressed: _stopPhoneRelay,
+            ),
+          if (_textCharacteristic != null)
+            ScIconButton(
+              icon: LucideIcons.unplug,
+              tooltip: 'Disconnect from Circuit',
+              caption: 'Disconnect',
+              onPressed: () => _device?.disconnect(),
+            ),
+          if (_savedCircuitId != null)
+            ScIconButton(
+              icon: LucideIcons.unlink,
+              tooltip: 'Forget this Circuit',
+              caption: 'Forget',
+              tone: ScTone.danger,
+              onPressed: _forgetCircuit,
+            ),
+        ],
       ),
-      const SizedBox(height: 10),
-      ScButton(
-        label: 'Free up Circuit storage',
-        icon: Icons.cleaning_services_outlined,
-        onPressed: available && !_audioBusy && !_recordingAudio
-            ? _cleanCircuitNotes
-            : null,
-      ),
-      if (_relayActive) ...[
-        const SizedBox(height: 10),
-        ScButton(label: 'Stop phone relay', onPressed: _stopPhoneRelay),
-      ],
-      if (_textCharacteristic != null) ...[
-        const SizedBox(height: 10),
-        ScButton(label: 'Disconnect', onPressed: () => _device?.disconnect()),
-      ],
-      if (_savedCircuitId != null) ...[
-        const SizedBox(height: 10),
-        ScButton(
-          label: 'Forget this Circuit',
-          danger: true,
-          onPressed: _forgetCircuit,
-        ),
-      ],
       const SizedBox(height: 8),
       Text(
         _status,
@@ -1331,7 +1375,7 @@ extension _ScPages on _CircuitHomePageState {
       String subtitle,
     ) = switch (_wifiState) {
       'connected' => (
-        Icons.wifi,
+        LucideIcons.wifi,
         Sc.green,
         'Connected to $_wifiSsid',
         _wifiDetail.isEmpty
@@ -1339,7 +1383,7 @@ extension _ScPages on _CircuitHomePageState {
             : 'Online at $_wifiDetail. Notes sync automatically when your phone is on this network.',
       ),
       'connecting' => (
-        Icons.wifi_find,
+        LucideIcons.wifi,
         Sc.accent,
         'Connecting to $_wifiSsid…',
         slow
@@ -1347,7 +1391,7 @@ extension _ScPages on _CircuitHomePageState {
             : 'Circuit is joining the network.',
       ),
       'failed' => (
-        Icons.wifi_off,
+        LucideIcons.wifiOff,
         Sc.danger,
         _wifiSsid.isEmpty
             ? 'Wi‑Fi setup failed'
@@ -1357,7 +1401,7 @@ extension _ScPages on _CircuitHomePageState {
             : '$_wifiDetail. Check the details and try again.',
       ),
       _ => (
-        Icons.wifi_off_outlined,
+        LucideIcons.wifiOff,
         Sc.faint,
         'Circuit is not on Wi‑Fi',
         'Set up Wi‑Fi so notes sync quickly. Without it only a button-hold sync over Bluetooth works, and it is slow.',
@@ -1421,7 +1465,7 @@ extension _ScPages on _CircuitHomePageState {
       suffixIcon: IconButton(
         tooltip: _showWifiPassword ? 'Hide password' : 'Show password',
         icon: Icon(
-          _showWifiPassword ? Icons.visibility_off : Icons.visibility,
+          _showWifiPassword ? LucideIcons.eyeOff : LucideIcons.eye,
           size: 20,
         ),
         onPressed: () => _update(() => _showWifiPassword = !_showWifiPassword),
@@ -1444,10 +1488,15 @@ extension _ScPages on _CircuitHomePageState {
       _wifiStatusCard(),
       if (_wifiState == 'connected') ...[
         const SizedBox(height: 10),
-        ScButton(
-          label: 'Forget this network',
-          danger: true,
-          onPressed: _forgetWifi,
+        Align(
+          alignment: Alignment.centerRight,
+          child: ScIconButton(
+            icon: LucideIcons.wifiOff,
+            tooltip: 'Forget this network',
+            caption: 'Forget',
+            tone: ScTone.danger,
+            onPressed: _forgetWifi,
+          ),
         ),
       ],
       const SizedBox(height: 22),
@@ -1455,19 +1504,12 @@ extension _ScPages on _CircuitHomePageState {
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           const ScGroupLabel('Nearby networks'),
-          GestureDetector(
-            onTap: _scanningWifi ? null : _scanWifi,
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text(
-                _scanningWifi ? 'Scanning…' : 'Scan again',
-                style: const TextStyle(
-                  color: Color(0xff6b55d9),
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ),
+          ScIconButton(
+            size: 40,
+            icon: LucideIcons.refreshCw,
+            tooltip: _scanningWifi ? 'Scanning for networks' : 'Scan again',
+            busy: _scanningWifi,
+            onPressed: _scanWifi,
           ),
         ],
       ),
@@ -1518,7 +1560,11 @@ extension _ScPages on _CircuitHomePageState {
                       ),
                     )
                   else
-                    const Icon(Icons.wifi, size: 18, color: Color(0xff6e5e50)),
+                    const Icon(
+                      LucideIcons.wifi,
+                      size: 18,
+                      color: Color(0xff6e5e50),
+                    ),
                 ],
               ),
             ),
@@ -1527,23 +1573,29 @@ extension _ScPages on _CircuitHomePageState {
         const SizedBox(height: 8),
       ],
       const SizedBox(height: 6),
-      ScButton(
-        label: '+ Add hidden network',
-        onPressed: () => _goTo(_AppPage.hiddenWifi),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: ScIconButton(
+          icon: LucideIcons.wifiPen,
+          tooltip: 'Add hidden network',
+          caption: 'Hidden',
+          onPressed: () => _goTo(_AppPage.hiddenWifi),
+        ),
       ),
       const SizedBox(height: 22),
       const ScGroupLabel('Password'),
       _passwordField(_wifiPasswordController),
       const SizedBox(height: 14),
-      FilledButton(
+      ScIconButton(
+        expand: true,
+        size: 54,
+        icon: LucideIcons.wifi,
+        tone: ScTone.primary,
+        busy: connecting,
+        tooltip: selected.isEmpty
+            ? 'Choose a network first'
+            : 'Connect Circuit to $selected',
         onPressed: connecting || selected.isEmpty ? null : _provisionWifi,
-        child: Text(
-          connecting
-              ? 'Connecting…'
-              : (selected.isEmpty
-                    ? 'Choose a network'
-                    : 'Connect to $selected'),
-        ),
       ),
     ];
   }
@@ -1568,14 +1620,19 @@ extension _ScPages on _CircuitHomePageState {
     const ScGroupLabel('Password'),
     _passwordField(_wifiPasswordController),
     const SizedBox(height: 18),
-    FilledButton(
+    ScIconButton(
+      expand: true,
+      size: 54,
+      icon: LucideIcons.check,
+      tone: ScTone.primary,
+      busy: _provisioningWifi,
+      tooltip: 'Save hidden Wi-Fi and connect',
       onPressed: _provisioningWifi || _wifiSsidController.text.trim().isEmpty
           ? null
           : () async {
               await _provisionWifi();
               if (mounted) _goBack();
             },
-      child: const Text('Save hidden Wi‑Fi'),
     ),
   ];
 
@@ -1587,48 +1644,81 @@ extension _ScPages on _CircuitHomePageState {
         ? Duration.zero
         : DateTime.now().difference(started);
     final clock = '${_two(elapsed.inMinutes)}:${_two(elapsed.inSeconds % 60)}';
+    // The glow breathes once a second (the screen already rebuilds each second).
+    final glow = elapsed.inSeconds.isEven ? 14.0 : 26.0;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+      padding: const EdgeInsets.fromLTRB(24, 24, 24, 24),
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Container(
-            width: 132,
-            height: 132,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(color: Sc.accent),
-              boxShadow: const [
-                BoxShadow(color: Color(0x12f05b3d), spreadRadius: 16),
-                BoxShadow(color: Color(0x08f05b3d), spreadRadius: 32),
-              ],
+          const Spacer(flex: 2),
+          // Sized to include the glow, so it never runs into the text below.
+          SizedBox(
+            width: 220,
+            height: 220,
+            child: Center(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 900),
+                curve: Curves.easeInOut,
+                width: 132,
+                height: 132,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Sc.accent),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0x14f05b3d),
+                      spreadRadius: glow,
+                    ),
+                    BoxShadow(
+                      color: const Color(0x0af05b3d),
+                      spreadRadius: glow * 1.7,
+                    ),
+                  ],
+                ),
+                child: const Icon(
+                  LucideIcons.circle,
+                  size: 38,
+                  color: Sc.accent,
+                ),
+              ),
             ),
-            child: const Icon(Icons.circle, size: 38, color: Sc.accent),
           ),
           const SizedBox(height: 28),
-          const ScTitle('Recording on Circuit'),
-          const SizedBox(height: 9),
+          const Text(
+            'Recording on Circuit',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 26,
+              fontWeight: FontWeight.w800,
+              letterSpacing: -1,
+              height: 1.1,
+            ),
+          ),
+          const SizedBox(height: 12),
           Text(
             clock,
             style: const TextStyle(
-              fontSize: 28,
+              fontSize: 40,
               fontWeight: FontWeight.w800,
-              letterSpacing: -1,
+              letterSpacing: -1.5,
+              fontFeatures: [FontFeature.tabularFigures()],
             ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 10),
           const Text(
             "Speak naturally. Press stop when you're done.",
-            style: TextStyle(color: Sc.muted, fontSize: 12),
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Sc.muted, fontSize: 13, height: 1.4),
           ),
-          const SizedBox(height: 24),
-          SizedBox(
-            width: 220,
-            child: FilledButton(
-              onPressed: _audioBusy ? null : _stopRecording,
-              child: const Text('Stop recording'),
-            ),
+          const Spacer(flex: 3),
+          // Anchored at the bottom, where a thumb reaches it.
+          ScIconButton(
+            size: 72,
+            icon: LucideIcons.square,
+            tone: ScTone.primary,
+            tooltip: 'Stop recording',
+            onPressed: _audioBusy ? null : _stopRecording,
           ),
         ],
       ),

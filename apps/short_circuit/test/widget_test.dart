@@ -23,7 +23,9 @@ void main() {
     expect(parsed?['transcript'], 'A useful idea');
   });
 
-  testWidgets('shows the Short-Circuit home with bottom navigation', (tester) async {
+  testWidgets('shows the Short-Circuit home with bottom navigation', (
+    tester,
+  ) async {
     await tester.pumpWidget(const ShortCircuitApp());
     await tester.pump(const Duration(seconds: 1));
 

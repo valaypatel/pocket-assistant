@@ -7,9 +7,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+part 'ui/chat_page.dart';
 part 'ui/detail_pages.dart';
 part 'ui/pages.dart';
 part 'ui/theme.dart';
@@ -26,11 +28,11 @@ const _notesKey = 'circuit_notes';
 const _geminiApiKey = 'gemini_api_key';
 const _geminiModelKey = 'gemini_model';
 const _defaultGeminiModel = 'gemini-3.5-flash-lite';
-const _hermesApiKey = 'hermes_api_key';
-const _hermesBaseUrlKey = 'hermes_base_url';
-const _hermesModelKey = 'hermes_model';
-const _defaultHermesModel = 'hermes-agent';
-const _defaultHermesBaseUrl = 'https://hermes.yourdomain.com/v1';
+const _aiApiKey = 'hermes_api_key';
+const _aiBaseUrlKey = 'hermes_base_url';
+const _aiModelKey = 'hermes_model';
+const _defaultAiModel = 'hermes-agent';
+const _defaultAiBaseUrl = 'https://hermes.yourdomain.com/v1';
 const _secureStorage = FlutterSecureStorage();
 
 class GeminiClient {
@@ -157,63 +159,6 @@ class GeminiClient {
     final heading = words.join(' ');
     return heading.length > 48 ? '${heading.substring(0, 48)}…' : heading;
   }
-
-  Future<ReminderDraft> extractReminder(String transcript) async {
-    final key = await apiKey();
-    if (key == null || key.trim().isEmpty) {
-      throw Exception('Add a Gemini API key in Settings first.');
-    }
-    final selectedModel = await model();
-    final uri = Uri.parse(
-      'https://generativelanguage.googleapis.com/v1beta/models/'
-      '$selectedModel:generateContent?key=${Uri.encodeQueryComponent(key)}',
-    );
-    final response = await http
-        .post(
-          uri,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'contents': [
-              {
-                'parts': [
-                  {
-                    'text':
-                        'Read this voice note and detect whether it contains a reminder or task. Today is ${DateTime.now().toIso8601String()}. Return JSON only with hasReminder (boolean), title (short title), scheduledAt (ISO 8601 local date/time or null if no date/time is present), and details (short details). Preserve Gujarati meaning. Transcript: $transcript',
-                  },
-                ],
-              },
-            ],
-            'generationConfig': {'responseMimeType': 'application/json'},
-          }),
-        )
-        .timeout(const Duration(seconds: 45));
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('Gemini ${response.statusCode}: ${response.body}');
-    }
-    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-    final candidates = decoded['candidates'] as List<dynamic>?;
-    final content = candidates?.isNotEmpty == true
-        ? (candidates!.first as Map<String, dynamic>)['content']
-              as Map<String, dynamic>?
-        : null;
-    final parts = content?['parts'] as List<dynamic>?;
-    final text = parts
-        ?.whereType<Map<String, dynamic>>()
-        .map((part) => part['text'])
-        .whereType<String>()
-        .join()
-        .trim();
-    if (text == null || text.isEmpty) {
-      throw Exception('Gemini returned no reminder suggestion.');
-    }
-    final parsed = jsonDecode(text) as Map<String, dynamic>;
-    return ReminderDraft(
-      hasReminder: parsed['hasReminder'] == true,
-      title: (parsed['title'] as String?)?.trim() ?? 'Reminder',
-      scheduledAt: DateTime.tryParse(parsed['scheduledAt'] as String? ?? ''),
-      details: (parsed['details'] as String?)?.trim() ?? transcript,
-    );
-  }
 }
 
 /// Extracts the user-facing fields from Gemini's JSON response.
@@ -318,8 +263,8 @@ class NoteActionSuggestion {
   );
 }
 
-class HermesEnrichment {
-  const HermesEnrichment({
+class AiEnrichment {
+  const AiEnrichment({
     required this.title,
     required this.category,
     required this.categories,
@@ -340,39 +285,64 @@ class HermesEnrichment {
   final List<NoteActionSuggestion> actions;
 }
 
-class HermesClient {
-  const HermesClient();
+class ChatMessage {
+  const ChatMessage({required this.role, required this.text, required this.at});
 
-  Future<String?> apiKey() => _secureStorage.read(key: _hermesApiKey);
+  /// 'user' or 'assistant'.
+  final String role;
+  final String text;
+  final DateTime at;
+
+  Map<String, dynamic> toJson() => {
+    'role': role,
+    'text': text,
+    'at': at.toIso8601String(),
+  };
+
+  factory ChatMessage.fromJson(Map<String, dynamic> json) => ChatMessage(
+    role: json['role']?.toString() == 'user' ? 'user' : 'assistant',
+    text: json['text']?.toString() ?? '',
+    at: DateTime.tryParse(json['at']?.toString() ?? '') ?? DateTime.now(),
+  );
+}
+
+class AiClient {
+  const AiClient();
+
+  Future<String?> apiKey() => _secureStorage.read(key: _aiApiKey);
   Future<String> baseUrl() async {
-    final saved = (await _secureStorage.read(key: _hermesBaseUrlKey))?.trim();
-    return saved == null || saved.isEmpty ? _defaultHermesBaseUrl : saved;
+    final saved = (await _secureStorage.read(key: _aiBaseUrlKey))?.trim();
+    return saved == null || saved.isEmpty ? _defaultAiBaseUrl : saved;
   }
+
   Future<String> model() async =>
-      await _secureStorage.read(key: _hermesModelKey) ?? _defaultHermesModel;
+      await _secureStorage.read(key: _aiModelKey) ?? _defaultAiModel;
 
   Future<void> save({
     required String apiKey,
     required String baseUrl,
     required String model,
   }) async {
-    await _secureStorage.write(key: _hermesApiKey, value: apiKey.trim());
-    await _secureStorage.write(key: _hermesBaseUrlKey, value: baseUrl.trim());
+    await _secureStorage.write(key: _aiApiKey, value: apiKey.trim());
+    await _secureStorage.write(key: _aiBaseUrlKey, value: baseUrl.trim());
     await _secureStorage.write(
-      key: _hermesModelKey,
-      value: model.trim().isEmpty ? _defaultHermesModel : model.trim(),
+      key: _aiModelKey,
+      value: model.trim().isEmpty ? _defaultAiModel : model.trim(),
     );
   }
 
   Future<void> clear() async {
-    await _secureStorage.delete(key: _hermesApiKey);
-    await _secureStorage.delete(key: _hermesBaseUrlKey);
-    await _secureStorage.delete(key: _hermesModelKey);
+    await _secureStorage.delete(key: _aiApiKey);
+    await _secureStorage.delete(key: _aiBaseUrlKey);
+    await _secureStorage.delete(key: _aiModelKey);
   }
 
-  Future<Map<String, dynamic>> _completion(
-    List<Map<String, String>> messages,
-  ) async {
+  /// Sends a chat-completions request and returns the reply text.
+  Future<String> _send(
+    List<Map<String, String>> messages, {
+    required bool json,
+    double temperature = 0.2,
+  }) async {
     final key = await apiKey();
     if (key == null || key.trim().isEmpty)
       throw Exception('Add an AI service API key in Settings first.');
@@ -388,11 +358,11 @@ class HermesClient {
           body: jsonEncode({
             'model': await model(),
             'messages': messages,
-            'temperature': 0.2,
-            'response_format': {'type': 'json_object'},
+            'temperature': temperature,
+            if (json) 'response_format': {'type': 'json_object'},
           }),
         )
-        .timeout(const Duration(seconds: 45));
+        .timeout(const Duration(seconds: 60));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('AI service ${response.statusCode}: ${response.body}');
     }
@@ -406,6 +376,13 @@ class HermesClient {
     }
     if (content == null || content.trim().isEmpty)
       throw Exception('AI service returned no response.');
+    return content;
+  }
+
+  Future<Map<String, dynamic>> _completion(
+    List<Map<String, String>> messages,
+  ) async {
+    final content = await _send(messages, json: true);
     final start = content.indexOf('{');
     final end = content.lastIndexOf('}');
     if (start < 0 || end <= start)
@@ -414,17 +391,85 @@ class HermesClient {
         as Map<String, dynamic>;
   }
 
+  /// Answers a question about one note, using only that note as context.
+  Future<String> chatAboutNote(
+    CircuitNote note,
+    List<ChatMessage> history,
+  ) async {
+    final context = StringBuffer()
+      ..writeln('Title: ${note.title ?? 'Voice note'}')
+      ..writeln('Recorded: ${note.createdAt.toLocal()}');
+    if ((note.language ?? '').isNotEmpty) {
+      context.writeln('Language: ${note.language}');
+    }
+    if ((note.summary ?? '').isNotEmpty) {
+      context.writeln('Summary: ${note.summary}');
+    }
+    context
+      ..writeln('Transcript:')
+      ..writeln(note.transcript ?? '');
+    if ((note.englishTranslation ?? '').isNotEmpty &&
+        note.englishTranslation != note.transcript) {
+      context
+        ..writeln('English translation:')
+        ..writeln(note.englishTranslation);
+    }
+    final recent = history.length > 12
+        ? history.sublist(history.length - 12)
+        : history;
+    final reply = await _send(
+      [
+        {
+          'role': 'system',
+          'content':
+              'You answer questions about one private voice note. Use only the note below. If the answer is not in the note, say so plainly instead of guessing. Be brief. Reply in the language the user writes in. Plain text, no markdown headings.\n\n--- NOTE ---\n$context',
+        },
+        for (final message in recent)
+          {'role': message.role, 'content': message.text},
+      ],
+      json: false,
+      temperature: 0.3,
+    );
+    return reply.trim();
+  }
+
   Future<void> testConnection() async {
     await _completion([
       {'role': 'user', 'content': 'Reply as JSON only: {"ok":true}.'},
     ]);
   }
 
-  Future<HermesEnrichment> enrich(String transcript) async {
+  /// Looks for a reminder with a date and time in a voice note.
+  Future<ReminderDraft> extractReminder(String transcript) async {
     final response = await _completion([
       {
         'role': 'system',
-        'content': 'You analyse private voice-note transcripts. Return JSON only: {"title":"short heading in English","category":"primary category","categories":["primary category","optional secondary categories"],"tags":["short English searchable tags"],"summary":"one short English sentence","englishTranslation":"faithful English translation; if already English, repeat it","language":"language or mixed","actions":[{"type":"task|reminder|calendar_event","title":"action title in English","details":"brief detail in English","scheduledAt":"ISO-8601 local time or null"}]}. Categories may include note, idea, task, reminder, calendar_event, shopping, journal, project, meeting, reference. Translate Hindi/Gujarati faithfully but never alter the original transcript. Suggest actions only when clearly supported; never invent dates.',
+        'content': 'You detect reminders in private voice-note transcripts. Return JSON only: {"hasReminder":true|false,"title":"short title in English","scheduledAt":"ISO-8601 local date-time or null","details":"brief detail in English"}. Set scheduledAt only when the note clearly states a date or time; never invent one. Preserve the meaning of Hindi and Gujarati.',
+      },
+      {
+        'role': 'user',
+        'content':
+            'Today is ${DateTime.now().toIso8601String()}. Transcript:\n$transcript',
+      },
+    ]);
+    final when = response['scheduledAt']?.toString();
+    return ReminderDraft(
+      hasReminder: response['hasReminder'] == true,
+      title: (response['title']?.toString().trim().isNotEmpty ?? false)
+          ? response['title'].toString().trim()
+          : 'Reminder',
+      scheduledAt: when == null || when == 'null'
+          ? null
+          : DateTime.tryParse(when),
+      details: response['details']?.toString().trim() ?? transcript,
+    );
+  }
+
+  Future<AiEnrichment> enrich(String transcript) async {
+    final response = await _completion([
+      {
+        'role': 'system',
+        'content': 'You analyse private voice-note transcripts. Return JSON only: {"title":"short heading in English","category":"primary category","categories":["primary category","optional secondary categories"],"tags":["short English searchable tags"],"summary":"one short English sentence","englishTranslation":"faithful English translation; if already English, repeat it","language":"language or mixed","actions":[{"type":"task|reminder|calendar_event","title":"action title in English","details":"brief detail in English","scheduledAt":"ISO-8601 local time or null"}]}. Categories may include note, idea, task, reminder, calendar_event, shopping, journal, project, meeting, reference. Translate Hindi/Gujarati faithfully but never alter the original transcript. Suggest actions only when clearly supported; never invent dates. Use reminder or calendar_event only when the note states a date or time; otherwise the action type must be task.',
       },
       {
         'role': 'user',
@@ -466,7 +511,11 @@ class HermesClient {
             id:
                 DateTime.now().microsecondsSinceEpoch.toString() +
                 item.hashCode.toString(),
-            type: {'task', 'reminder', 'calendar_event'}.contains(item['type'])
+            // Anything without a usable date or time is a plain task.
+            type:
+                {'reminder', 'calendar_event'}.contains(item['type']) &&
+                    DateTime.tryParse(item['scheduledAt']?.toString() ?? '') !=
+                        null
                 ? item['type'].toString()
                 : 'task',
             title: item['title']?.toString().trim().isNotEmpty == true
@@ -479,7 +528,7 @@ class HermesClient {
           ),
         )
         .toList();
-    return HermesEnrichment(
+    return AiEnrichment(
       title: response['title']?.toString().trim().isNotEmpty == true
           ? response['title'].toString().trim()
           : 'Voice note',
@@ -487,14 +536,15 @@ class HermesClient {
       categories: categories,
       tags: tags,
       summary: response['summary']?.toString().trim() ?? '',
-      englishTranslation: response['englishTranslation']?.toString().trim() ?? transcript,
+      englishTranslation:
+          response['englishTranslation']?.toString().trim() ?? transcript,
       language: response['language']?.toString().trim() ?? '',
       actions: actions,
     );
   }
 }
 
-const _hermes = HermesClient();
+const _ai = AiClient();
 
 class GeminiTranscription {
   const GeminiTranscription({
@@ -599,6 +649,7 @@ class CircuitNote {
     String? language,
     String? enrichmentStatus,
     List<NoteActionSuggestion>? actionSuggestions,
+    int? boardId,
   }) => CircuitNote(
     id: id,
     createdAt: createdAt,
@@ -614,7 +665,7 @@ class CircuitNote {
     language: language ?? this.language,
     enrichmentStatus: enrichmentStatus ?? this.enrichmentStatus,
     actionSuggestions: actionSuggestions ?? this.actionSuggestions,
-    boardId: boardId,
+    boardId: boardId ?? this.boardId,
   );
 
   Map<String, dynamic> toJson() => {
@@ -648,6 +699,7 @@ void main() {
 enum _AppPage { home, notes, tasks, settings, circuit, wifi, hiddenWifi }
 
 const _tasksKey = 'circuit_tasks';
+const _boardDeletesKey = 'pending_board_deletes';
 const _autoTranscribeKey = 'auto_transcribe';
 const _displayNameKey = 'display_name';
 
@@ -710,6 +762,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   final _wifiSsidController = TextEditingController();
   final _wifiPasswordController = TextEditingController();
   final _noteSearchController = TextEditingController();
+  bool _noteSearchOpen = false;
   final Map<String, ScanResult> _circuits = {};
 
   StreamSubscription<List<ScanResult>>? _scanSubscription;
@@ -730,11 +783,17 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   List<CircuitTask> _tasks = [];
   bool _autoTranscribe = true;
   bool _geminiConnected = false;
-  bool _hermesConnected = false;
+  bool _aiConnected = false;
   String _displayName = 'Valay';
   DateTime? _recordingStartedAt;
   Timer? _clockTicker;
   bool _pruneRequested = false;
+  // Automatic retry of AI review: how often each note was tried, and when.
+  final Map<String, int> _enrichAttempts = {};
+  final Map<String, DateTime> _enrichLastAttempt = {};
+  // Notes deleted in the app whose copy on Circuit still has to be removed.
+  final Set<int> _pendingBoardDeletes = {};
+  DateTime? _lastBoardDeleteSent;
   String? _lastHomeCounts;
   DateTime? _lastHomeSentAt;
   // Sync health, shown to the user so a failed or stuck sync is never silent.
@@ -778,7 +837,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     unawaited(_relayChannel.invokeMethod<bool>('requestLocalNetwork'));
     _loadPreferences();
     _loadGeminiState();
-    _loadHermesState();
+    _loadAiState();
     _clockTicker = Timer.periodic(const Duration(seconds: 1), (_) {
       // Keeps the recording timer moving.
       if (mounted && _recordingAudio) setState(() {});
@@ -787,6 +846,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       _requestWifiStatus();
       _checkForLostNotes();
       _checkSyncHealth();
+      _processBoardDeletes();
+      _retryEnrichmentIfDue();
     });
     _clearAudioOnce();
     unawaited(
@@ -957,13 +1018,13 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         .map(
           (note) => note.id == id
               ? note.copyWith(
-                  status: _hermesConnected
+                  status: _aiConnected
                       ? 'Transcribed. Analysing…'
                       : 'Transcribed. Add an AI service for smart review.',
                   transcript: transcription.transcript,
                   title: transcription.title,
                   category: transcription.category,
-                  enrichmentStatus: _hermesConnected ? 'pending' : 'failed',
+                  enrichmentStatus: 'pending',
                 )
               : note,
         )
@@ -989,7 +1050,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         await File(path).readAsBytes(),
       );
       await _setNoteTranscript(id, transcription);
-      if (_hermesConnected) unawaited(_enrichNote(id));
+      if (_aiConnected) unawaited(_enrichNote(id));
       return transcription;
     } catch (error) {
       final message = error.toString().replaceFirst('Exception: ', '');
@@ -1007,10 +1068,37 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     }
   }
 
+  /// Tries again, in the background, for notes whose AI review failed or was
+  /// waiting for the service to be set up. Back-off: 1, 2, 4, 8, 16 minutes, then
+  /// it stops and leaves the manual "Retry AI review" button.
+  void _retryEnrichmentIfDue() {
+    if (!_aiConnected) return;
+    if (_notes.any((note) => note.enrichmentStatus == 'enriching')) return;
+    final now = DateTime.now();
+    for (final note in _notes) {
+      if ((note.transcript ?? '').trim().isEmpty) continue;
+      if (note.enrichmentStatus != 'failed' &&
+          note.enrichmentStatus != 'pending')
+        continue;
+      final attempts = _enrichAttempts[note.id] ?? 0;
+      if (attempts >= 5) continue;
+      final last = _enrichLastAttempt[note.id];
+      final wait = Duration(
+        minutes: attempts == 0 && note.enrichmentStatus == 'pending'
+            ? 0
+            : 1 << attempts,
+      );
+      if (last != null && now.difference(last) < wait) continue;
+      unawaited(_enrichNote(note.id));
+      return; // one at a time
+    }
+  }
+
   Future<void> _enrichNote(String id) async {
     final note = _notes.where((item) => item.id == id).firstOrNull;
     final transcript = note?.transcript;
     if (transcript == null || transcript.trim().isEmpty) return;
+    _enrichLastAttempt[id] = DateTime.now();
     await _updateNote(
       id,
       (item) => item.copyWith(
@@ -1019,13 +1107,27 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       ),
     );
     try {
-      final enrichment = await _hermes.enrich(transcript);
-      await _updateNote(
-        id,
-        (item) => item.copyWith(
-          status: enrichment.actions.isEmpty
-              ? 'Transcription ready'
-              : 'Ready for review',
+      final enrichment = await _ai.enrich(transcript);
+      _enrichAttempts.remove(id);
+      await _updateNote(id, (item) {
+        // Running the review again must not undo decisions already made: keep
+        // approved and dismissed suggestions, and only add ones not seen before.
+        final decided = item.actionSuggestions
+            .where((old) => old.state != 'pending')
+            .toList();
+        final fresh = enrichment.actions.where(
+          (action) => !decided.any(
+            (old) =>
+                old.type == action.type &&
+                old.title.trim().toLowerCase() ==
+                    action.title.trim().toLowerCase(),
+          ),
+        );
+        final merged = [...decided, ...fresh];
+        return item.copyWith(
+          status: merged.any((a) => a.state == 'pending')
+              ? 'Ready for review'
+              : 'Transcription ready',
           title: enrichment.title,
           category: enrichment.category,
           categories: enrichment.categories,
@@ -1034,10 +1136,11 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
           englishTranslation: enrichment.englishTranslation,
           language: enrichment.language,
           enrichmentStatus: 'ready',
-          actionSuggestions: enrichment.actions,
-        ),
-      );
+          actionSuggestions: merged,
+        );
+      });
     } catch (error) {
+      _enrichAttempts[id] = (_enrichAttempts[id] ?? 0) + 1;
       await _updateNote(
         id,
         (item) => item.copyWith(
@@ -1382,15 +1485,19 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       unawaited(_setNoteStatus(pendingNoteId, 'Sync queued…'));
       return;
     }
-    if (status.startsWith('Sync started') || status.startsWith('Sync in progress')) {
+    if (status.startsWith('Sync started') ||
+        status.startsWith('Sync in progress')) {
       setState(() {
         _syncActive = true;
         _syncError = null;
         _lastSyncActivity = DateTime.now();
       });
     }
-    if (status.startsWith('Sync failed') || status.startsWith('Sync interrupted')) {
-      _failSync(status.replaceFirst(RegExp(r'^Sync (failed|interrupted):?\s*'), ''));
+    if (status.startsWith('Sync failed') ||
+        status.startsWith('Sync interrupted')) {
+      _failSync(
+        status.replaceFirst(RegExp(r'^Sync (failed|interrupted):?\s*'), ''),
+      );
       return;
     }
     if ((_syncingNoteId == null) &&
@@ -1413,6 +1520,17 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       _lastSyncActivity = DateTime.now();
       _lastSyncOk = DateTime.now();
       unawaited(_attachSyncedFile(path, epoch, preferNoteId: syncingId));
+      return;
+    }
+    if (status.startsWith('Note deleted #')) {
+      final id = int.tryParse(
+        RegExp(r'#(\d+)').firstMatch(status)?.group(1) ?? '',
+      );
+      if (id != null && _pendingBoardDeletes.remove(id)) {
+        unawaited(_saveBoardDeletes());
+        _lastBoardDeleteSent = null;
+        _processBoardDeletes(); // next one, if any
+      }
       return;
     }
     if (status.startsWith('Sync: no new notes')) {
@@ -1442,7 +1560,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       final waitingNoteId = _syncingNoteId ?? _pendingSyncNoteId();
       setState(() {
         _syncActive = false;
-        _syncError = 'Circuit and this phone need to be on the same Wi-Fi to sync.';
+        _syncError =
+            'Circuit and this phone need to be on the same Wi-Fi to sync.';
         _audioBusy = false;
         _syncingNoteId = null;
         _syncProgress = null;
@@ -1479,20 +1598,23 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       _syncingNoteId = null;
       _syncProgress = null;
     });
-    if (noteId != null) unawaited(_setNoteStatus(noteId, 'Sync failed: $reason'));
+    if (noteId != null)
+      unawaited(_setNoteStatus(noteId, 'Sync failed: $reason'));
   }
 
   /// "@sync-status\nwaiting=N\nreset=R\nuptime=S" from Circuit.
   void _applySyncStatus(String message) {
     if (!mounted) return;
-    int? field(String name) =>
-        int.tryParse(RegExp('$name=(-?\\d+)').firstMatch(message)?.group(1) ?? '');
+    int? field(String name) => int.tryParse(
+      RegExp('$name=(-?\\d+)').firstMatch(message)?.group(1) ?? '',
+    );
     final waiting = field('waiting');
     final reset = field('reset');
     final uptime = field('uptime');
     setState(() {
       if (waiting != null) {
-        if (waiting > 0 && (_boardWaiting ?? 0) == 0) _waitingSince = DateTime.now();
+        if (waiting > 0 && (_boardWaiting ?? 0) == 0)
+          _waitingSince = DateTime.now();
         if (waiting == 0) {
           _waitingSince = null;
           if (!_syncActive) _syncError = null; // everything made it across
@@ -1504,7 +1626,10 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     });
     const abnormal = {4, 5, 6, 7, 9, 15};
     final code = _boardReset;
-    if (!_resetNoticeShown && code != null && abnormal.contains(code) && _boardUptime < 900) {
+    if (!_resetNoticeShown &&
+        code != null &&
+        abnormal.contains(code) &&
+        _boardUptime < 900) {
       _resetNoticeShown = true;
       _toast('Circuit restarted unexpectedly (${_resetReasonText(code)})');
     }
@@ -1645,6 +1770,14 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     final boardId = int.tryParse(
       RegExp(r'circuit-note-\d+-(\d+)\.wav$').firstMatch(path)?.group(1) ?? '',
     );
+    if (boardId != null && _pendingBoardDeletes.contains(boardId)) {
+      // Deleted in the app; Circuit's copy has not been removed yet. Do not let
+      // it come back as a new note.
+      try {
+        await File(path).delete();
+      } catch (_) {}
+      return;
+    }
     final recordedAt = epochSeconds != null && epochSeconds > 0
         ? DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000)
         : null;
@@ -1657,21 +1790,44 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
                     const Duration(minutes: 10);
             return n.boardId == boardId && near;
           }).firstOrNull;
-    if (byBoardId != null && byBoardId.audioPath != null)
-      return; // already attached
+    if (byBoardId != null && byBoardId.audioPath != null) {
+      // The same recording arrived twice (for example when an acknowledgement
+      // was lost and Circuit offered it again). Keep one copy.
+      try {
+        final existing = File(byBoardId.audioPath!);
+        final duplicate = File(path);
+        if (path != byBoardId.audioPath &&
+            await existing.exists() &&
+            await existing.length() == await duplicate.length()) {
+          await duplicate.delete();
+        }
+      } catch (_) {
+        // Leaving a spare copy is harmless; it will be retried next time.
+      }
+      return;
+    }
+    // A note that already carries a different Circuit number is some other
+    // recording; never hand this audio to it.
+    bool sameRecording(CircuitNote n) =>
+        boardId == null || n.boardId == null || n.boardId == boardId;
     final preferred = byBoardId != null && byBoardId.audioPath == null
         ? byBoardId
         : preferNoteId == null
         ? null
         : _notes
-              .where((n) => n.id == preferNoteId && n.audioPath == null)
+              .where(
+                (n) =>
+                    n.id == preferNoteId &&
+                    n.audioPath == null &&
+                    sameRecording(n),
+              )
               .firstOrNull;
     if (preferred != null) {
       noteId = preferred.id;
     } else if (epochSeconds != null && epochSeconds > 0) {
       final recorded = DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000);
       Duration? bestGap;
-      for (final note in _pendingNotes()) {
+      for (final note in _pendingNotes().where(sameRecording)) {
         final gap = note.createdAt.difference(recorded).abs();
         if (gap < const Duration(minutes: 10) &&
             (bestGap == null || gap < bestGap)) {
@@ -1680,7 +1836,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         }
       }
     } else {
-      noteId = _pendingSyncNoteId();
+      noteId = _pendingNotes().where(sameRecording).firstOrNull?.id;
     }
     if (noteId == null) {
       noteId = await _addPendingNote(
@@ -1694,7 +1850,39 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   /// Picks up notes the phone downloaded in the background while the app UI was
   /// not running.
+  /// Earlier versions could give a recording to the wrong waiting note. The audio
+  /// (and the transcript made from it) is what the note really is, so the note
+  /// takes the number in its audio file's name; the recording it was mistaken for
+  /// is then adopted as its own note.
+  Future<void> _repairBoardIds() async {
+    var changed = false;
+    final repaired = _notes.map((note) {
+      final path = note.audioPath;
+      final fileId = path == null
+          ? null
+          : int.tryParse(
+              RegExp(r'circuit-note-\d+-(\d+)\.wav$')
+                      .firstMatch(path)
+                      ?.group(1) ??
+                  '',
+            );
+      if (fileId != null && note.boardId != fileId) {
+        changed = true;
+        return note.copyWith(boardId: fileId);
+      }
+      return note;
+    }).toList();
+    if (!changed) return;
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(
+      _notesKey,
+      jsonEncode(repaired.map((item) => item.toJson()).toList()),
+    );
+    if (mounted) setState(() => _notes = repaired);
+  }
+
   Future<void> _reconcileSyncedNotes() async {
+    await _repairBoardIds();
     try {
       final files = await _relayChannel.invokeListMethod<String>('syncedNotes');
       for (final entry in files ?? const <String>[]) {
@@ -1704,8 +1892,9 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
           fields.length > 1 ? int.tryParse(fields[1]) : null,
         );
       }
-    } catch (_) {
+    } catch (error) {
       // Reconciliation is best-effort; the next sync status retries it.
+      debugPrint('Short-Circuit: reconcile failed: $error');
     }
   }
 
@@ -1763,8 +1952,84 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     );
   }
 
+  /// Circuit's number for a note: stored when it was recorded, or read from the
+  /// downloaded file's name (circuit-note-<epoch>-<number>.wav).
+  int? _boardIdOf(CircuitNote? note) {
+    if (note == null) return null;
+    if (note.boardId != null) return note.boardId;
+    final path = note.audioPath;
+    if (path == null) return null;
+    return int.tryParse(
+      RegExp(r'circuit-note-\d+-(\d+)\.wav$').firstMatch(path)?.group(1) ?? '',
+    );
+  }
+
+  Future<void> _saveBoardDeletes() async {
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setStringList(
+      _boardDeletesKey,
+      _pendingBoardDeletes.map((id) => '$id').toList(),
+    );
+  }
+
+  /// Asks Circuit to delete one queued note. Circuit confirms with
+  /// "Note deleted #N", which clears it from the queue; until then it is retried,
+  /// so a delete made while Circuit is away still happens later.
+  void _processBoardDeletes() {
+    if (_pendingBoardDeletes.isEmpty || !_circuitAvailable) return;
+    final last = _lastBoardDeleteSent;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(seconds: 8)) {
+      return;
+    }
+    _lastBoardDeleteSent = DateTime.now();
+    _writeCircuit('@note-delete\n${_pendingBoardDeletes.first}')
+        .catchError((Object _) {
+          _lastBoardDeleteSent = null;
+        });
+  }
+
+  Future<List<ChatMessage>> _loadNoteChat(String noteId) async {
+    final preferences = await SharedPreferences.getInstance();
+    final raw = preferences.getString('note_chat_$noteId');
+    if (raw == null) return [];
+    try {
+      return (jsonDecode(raw) as List<dynamic>)
+          .whereType<Map<String, dynamic>>()
+          .map(ChatMessage.fromJson)
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> _saveNoteChat(String noteId, List<ChatMessage> messages) async {
+    final preferences = await SharedPreferences.getInstance();
+    if (messages.isEmpty) {
+      await preferences.remove('note_chat_$noteId');
+    } else {
+      await preferences.setString(
+        'note_chat_$noteId',
+        jsonEncode(messages.map((m) => m.toJson()).toList()),
+      );
+    }
+  }
+
+  Future<String> _askAboutNote(String noteId, List<ChatMessage> history) {
+    final note = _notes.where((n) => n.id == noteId).firstOrNull;
+    if (note == null) throw Exception('This note no longer exists.');
+    return _ai.chatAboutNote(note, history);
+  }
+
   Future<void> _deleteNote(String id) async {
     final note = _notes.where((item) => item.id == id).firstOrNull;
+    final boardId = _boardIdOf(note);
+    if (boardId != null) {
+      _pendingBoardDeletes.add(boardId);
+      unawaited(_saveBoardDeletes());
+      _lastBoardDeleteSent = null;
+      _processBoardDeletes();
+    }
     if (note?.audioPath != null) {
       try {
         await File(note!.audioPath!).delete();
@@ -1774,6 +2039,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     }
     final notes = _notes.where((item) => item.id != id).toList();
     final preferences = await SharedPreferences.getInstance();
+    await preferences.remove('note_chat_$id');
     await preferences.setString(
       _notesKey,
       jsonEncode(notes.map((item) => item.toJson()).toList()),
@@ -1833,7 +2099,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   Future<ReminderDraft?> _extractReminder(String transcript) async {
     try {
-      return await _gemini.extractReminder(transcript);
+      return await _ai.extractReminder(transcript);
     } catch (error) {
       _setStatus('Reminder extraction failed: $error');
       return null;
@@ -2010,6 +2276,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Delete synced notes'),
           ),
@@ -2093,6 +2360,11 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   Future<void> _loadPreferences() async {
     final preferences = await SharedPreferences.getInstance();
+    _pendingBoardDeletes.addAll(
+      (preferences.getStringList(_boardDeletesKey) ?? const <String>[])
+          .map(int.tryParse)
+          .whereType<int>(),
+    );
     List<CircuitTask> tasks = [];
     final stored = preferences.getString(_tasksKey);
     if (stored != null) {
@@ -2119,10 +2391,9 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       setState(() => _geminiConnected = key != null && key.isNotEmpty);
   }
 
-  Future<void> _loadHermesState() async {
-    final key = await _hermes.apiKey();
-    if (mounted)
-      setState(() => _hermesConnected = key != null && key.isNotEmpty);
+  Future<void> _loadAiState() async {
+    final key = await _ai.apiKey();
+    if (mounted) setState(() => _aiConnected = key != null && key.isNotEmpty);
   }
 
   Future<void> _saveTasks() async {
