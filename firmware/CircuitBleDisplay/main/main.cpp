@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_sntp.h"
 #include "esp_vfs_fat.h"
 #include "esp_wifi.h"
@@ -120,6 +121,10 @@ volatile bool ble_encrypted = false;       // bonded phone, link encrypted
 volatile int64_t last_wifi_sync_end_ms = -600000;  // no cooldown at boot
 constexpr int64_t kWifiSyncCooldownMs = 45000;
 constexpr int64_t kWifiSyncMaxCooldownMs = 600000;
+int boot_reset_reason = -1;               // why the board last restarted (esp_reset_reason)
+char last_offer[kMaxTextBytes + 40] = "";   // kept so it can be re-sent until the phone answers
+int64_t last_offer_sent_ms = 0;
+constexpr int64_t kOfferResendMs = 15000;
 int wifi_sync_failures = 0;  // sessions in a row where the phone never connected
 constexpr TickType_t kSyncSupervisorInterval = pdMS_TO_TICKS(8000);
 bool sntp_started = false;
@@ -204,6 +209,11 @@ void show_device_screen(DeviceScreen screen);
 // supplied real values; until then they show dashes. The pairing screen
 // keeps its baked "PAIR CODE" header in place of the date.
 void apply_persistent_labels(DeviceScreen screen) {
+    // Moving objects to the foreground redraws the screen, so only do it when the
+    // screen actually changed.
+    static int applied = -1;
+    if (applied == static_cast<int>(screen)) return;
+    applied = static_cast<int>(screen);
     const bool show = true;
     const auto set_visible = [](lv_obj_t *label, bool visible) {
         if (visible) lv_obj_clear_flag(label, LV_OBJ_FLAG_HIDDEN);
@@ -296,16 +306,29 @@ void update_home_status(const char *value) {
     if (!clock_set && epoch != nullptr && offset != nullptr) {
         set_clock_from_phone(strtoll(epoch, nullptr, 10), atoi(offset));
     }
+    // The phone repeats this message often. Touching the labels redraws the whole
+    // e-paper, so do nothing when it matches what is already shown.
+    int hour = 0, minute = 0, pending = 0, done = 0;
+    const bool time_ok = sscanf(time, "%d:%d", &hour, &minute) == 2;
+    const bool counts_ok = sscanf(counts, "%d %*[^0-9]%d", &pending, &done) == 2;
+    static int shown_pending = -1, shown_done = -1, shown_clock = -1;
+    const int clock_key = hour * 60 + minute;
+    const bool same = home_status_received && counts_ok && pending == shown_pending && done == shown_done &&
+                      (clock_set || (time_ok && clock_key == shown_clock));
+    if (same) return;
     if (!Lvgl_lock(-1)) return;
     home_status_received = true;
-    int hour = 0, minute = 0;
     if (!clock_set) {
-        if (sscanf(time, "%d:%d", &hour, &minute) == 2) set_clock_labels(hour, minute);
+        if (time_ok) set_clock_labels(hour, minute);
         lv_label_set_text(idle_date_label, date);
+        shown_clock = clock_key;
     }
     // The phone sends "<pending> · <done>"; the separator is not drawn.
-    int pending = 0, done = 0;
-    if (sscanf(counts, "%d %*[^0-9]%d", &pending, &done) == 2) set_count_labels(pending, done);
+    if (counts_ok) {
+        set_count_labels(pending, done);
+        shown_pending = pending;
+        shown_done = done;
+    }
     ESP_LOGI(kTag, "Home status: counts=%d/%d clock_set=%d", pending, done, clock_set ? 1 : 0);
     apply_persistent_labels(active_screen);
     Lvgl_unlock();
@@ -824,6 +847,16 @@ void send_wifi_status() {
     send_relay_request(message);
 }
 
+// Tells the app how many notes are waiting and why the board last restarted, so
+// the app can show a sync that is stuck, and a crash, instead of guessing.
+void send_sync_status() {
+    char message[kMaxTextBytes + 1];
+    snprintf(message, sizeof(message), "@sync-status\nwaiting=%u\nreset=%d\nuptime=%lld",
+        static_cast<unsigned>(circuit_notes::count_unsynced()), boot_reset_reason,
+        static_cast<long long>(circuit_sync::now_ms() / 1000));
+    send_relay_request(message);
+}
+
 void set_wifi_ui(WifiUi state, const char *detail = "") {
     wifi_ui = state;
     snprintf(wifi_detail, sizeof(wifi_detail), "%s", detail);
@@ -870,30 +903,39 @@ void refresh_status_icons() {
     Lvgl_unlock();
 }
 
+void sync_ui_tick();
+
 void status_icon_task(void *) {
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(900));
         ++status_icon_frame;
         refresh_status_icons();
+        sync_ui_tick();
     }
 }
 
 // ---- Wi-Fi sync sessions -------------------------------------------------
 
-void wifi_sync_progress(uint32_t percent) {
-    static uint32_t last_shown = 101;
-    if (active_screen != DeviceScreen::Syncing) {
-        last_shown = 101;
-        show_device_screen(DeviceScreen::Syncing);
-    }
-    if (percent / 5 == last_shown / 5 && percent < 100) return;
-    last_shown = percent;
+// Called from the HTTPS server task for every chunk. It must never touch the
+// display: redrawing the e-paper takes a second or more, and waiting for it
+// stalls the download. It only records the figure; sync_ui_tick() draws it.
+volatile int32_t sync_ui_percent = -1;
+int32_t sync_ui_shown = -1;
+
+void wifi_sync_progress(uint32_t percent) { sync_ui_percent = static_cast<int32_t>(percent); }
+
+// Runs in the status icon task, at most once per tick.
+void sync_ui_tick() {
+    const int32_t percent = sync_ui_percent;
+    if (percent < 0 || percent == sync_ui_shown) return;
+    if (active_screen != DeviceScreen::Syncing) show_device_screen(DeviceScreen::Syncing);
     if (Lvgl_lock(-1)) {
-        char text[8];
-        snprintf(text, sizeof(text), "%u%%", static_cast<unsigned>(percent));
+        char text[16];
+        snprintf(text, sizeof(text), "%d%%", static_cast<int>(percent));
         lv_label_set_text(sync_progress_label, text);
         Lvgl_unlock();
     }
+    sync_ui_shown = percent;
 }
 
 bool can_offer_wifi_sync() {
@@ -911,10 +953,14 @@ bool offer_wifi_sync() {
     uint32_t count = 0, bytes = 0;
     if (!can_offer_wifi_sync() || !circuit_sync::wifi_ip(ip, sizeof(ip))) return false;
     circuit_sync::state.on_progress = wifi_sync_progress;
+    sync_ui_percent = -1;
+    sync_ui_shown = -1;
     if (!circuit_sync::open_session(&port, token, sizeof(token), &fingerprint, &count, &bytes)) return false;
     char offer[kMaxTextBytes + 40];
     snprintf(offer, sizeof(offer), "@sync-offer\n%s\n%u\n%s\n%s\n%lu\n%lu", ip, static_cast<unsigned>(port), token,
         fingerprint, static_cast<unsigned long>(count), static_cast<unsigned long>(bytes));
+    snprintf(last_offer, sizeof(last_offer), "%s", offer);
+    last_offer_sent_ms = circuit_sync::now_ms();
     send_relay_request(offer);
     ESP_LOGI(kTag, "Wi-Fi sync offered: %lu notes, %lu bytes", static_cast<unsigned long>(count),
         static_cast<unsigned long>(bytes));
@@ -934,7 +980,19 @@ void flash_sync_result(const char *text) {
 
 void end_wifi_sync() {
     const uint32_t served = circuit_sync::state.served_bytes;
+    const int64_t started = circuit_sync::state.session_started_ms;
+    const int64_t first = circuit_sync::state.first_request_ms;
+    const int64_t took = circuit_sync::now_ms() - (first ? first : started);
+    ESP_LOGW(kTag, "SYNCSTAT served=%lu bytes, session %lld ms, first request after %lld ms, transfer %lld ms (%lld KB/s)",
+        static_cast<unsigned long>(served), static_cast<long long>(circuit_sync::now_ms() - started),
+        static_cast<long long>(first ? first - started : -1), static_cast<long long>(took),
+        static_cast<long long>(took > 0 ? served * 1000LL / took / 1024 : 0));
+    ESP_LOGW(kTag, "Memory after sync: internal free %u, lowest ever %u, largest block %u",
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     circuit_sync::close_session();
+    sync_ui_percent = -1;
     last_wifi_sync_end_ms = circuit_sync::now_ms();
     if (served == 0) {  // the phone never connected: back off, and say so if the screen is showing sync
         if (wifi_sync_failures < 4) ++wifi_sync_failures;
@@ -967,7 +1025,16 @@ void sync_supervisor_task(void *) {
         }
         if (circuit_sync::is_open()) {
             const bool all_synced = circuit_sync::state.acked > 0 && circuit_notes::count_unsynced() == 0;
-            if (all_synced || circuit_sync::expired() || connection_id == UINT16_MAX) end_wifi_sync();
+            if (all_synced || circuit_sync::expired() || connection_id == UINT16_MAX) {
+                end_wifi_sync();
+            } else if (circuit_sync::state.client_ip == 0 && ble_encrypted &&
+                       circuit_sync::now_ms() - last_offer_sent_ms > kOfferResendMs) {
+                // An offer sent before the phone had subscribed to notifications is lost,
+                // so keep offering until the phone connects.
+                last_offer_sent_ms = circuit_sync::now_ms();
+                send_relay_request(last_offer);
+                ESP_LOGI(kTag, "Wi-Fi sync offer re-sent (phone has not connected yet)");
+            }
             continue;
         }
         int64_t cooldown = kWifiSyncCooldownMs << wifi_sync_failures;  // 45 s, 90 s, 3 min, ...
@@ -1314,6 +1381,7 @@ void text_display_task(void *) {
                 }
             } else if (strcmp(message.value, "@wifi-status") == 0) {
                 send_wifi_status();
+                send_sync_status();
             } else if (strcmp(message.value, "@wifi-forget") == 0) {
                 forget_wifi();
             } else if (strncmp(message.value, kHomeStatusCommand, strlen(kHomeStatusCommand)) == 0) {
@@ -1615,6 +1683,9 @@ void init_display() {
 }  // namespace
 
 extern "C" void app_main(void) {
+    boot_reset_reason = static_cast<int>(esp_reset_reason());
+    ESP_LOGW(kTag, "Reset reason: %d (1=power-on 3=software 4=panic 5=int-wdt 6=task-wdt 7=wdt 9=brownout 15=brownout)",
+        static_cast<int>(esp_reset_reason()));
     esp_err_t nvs_status = nvs_flash_init();
     if (nvs_status == ESP_ERR_NVS_NO_FREE_PAGES || nvs_status == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

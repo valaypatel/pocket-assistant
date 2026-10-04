@@ -28,6 +28,7 @@
 #include "esp_https_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_wifi.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "mbedtls/ctr_drbg.h"
@@ -60,6 +61,8 @@ struct State {
     uint32_t client_ip = 0;  // first authenticated client; others are refused
     int bad_attempts = 0;
     int64_t last_activity_ms = 0;
+    int64_t session_started_ms = 0;
+    int64_t first_request_ms = 0;
     int64_t lockout_until_ms = 0;
     uint32_t total_bytes = 0;
     uint32_t served_bytes = 0;
@@ -200,6 +203,7 @@ inline bool authorize(httpd_req_t *req) {
     }
     s.client_ip = ip;
     s.last_activity_ms = now_ms();
+    if (s.first_request_ms == 0) s.first_request_ms = s.last_activity_ms;
     return true;
 }
 
@@ -367,6 +371,8 @@ inline bool open_session(uint16_t *port, char *token, size_t token_size, const c
     httpd_register_err_handler(s.server, HTTPD_405_METHOD_NOT_ALLOWED, not_found_handler);
 
     s.last_activity_ms = now_ms();
+    s.session_started_ms = s.last_activity_ms;
+    s.first_request_ms = 0;
     *port = s.port;
     snprintf(token, token_size, "%s", s.token);
     *fingerprint = s.fingerprint;
