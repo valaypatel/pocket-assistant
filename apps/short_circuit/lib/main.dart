@@ -1029,8 +1029,9 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       final fields = status.split('|');
       final path = fields.length > 1 ? fields[1] : null;
       final epoch = fields.length > 2 ? int.tryParse(fields[2]) : null;
+      final syncingId = _syncingNoteId;
       _syncingNoteId = null;
-      unawaited(_attachSyncedFile(path, epoch));
+      unawaited(_attachSyncedFile(path, epoch, preferNoteId: syncingId));
       return;
     }
     if (status.startsWith('Sync: no new notes')) {
@@ -1088,6 +1089,9 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     (note) =>
         note.audioPath == null &&
         (note.status.startsWith('Recording saved on Circuit') ||
+            note.status.startsWith('Sync queued') ||
+            note.status.startsWith('Sync started') ||
+            note.status.startsWith('Sync in progress') ||
             note.status.startsWith('Sync interrupted') ||
             note.status.startsWith('Waiting for Wi-Fi') ||
             note.status.startsWith('Sync failed')),
@@ -1146,14 +1150,23 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   /// A synced file belongs to the oldest note still waiting for audio; if the
   /// recording happened while the app was closed there is none, so make one.
-  Future<void> _attachSyncedFile(String? path, int? epochSeconds) async {
+  Future<void> _attachSyncedFile(
+    String? path,
+    int? epochSeconds, {
+    String? preferNoteId,
+  }) async {
     if (path == null || path.isEmpty) return;
     if (_notes.any((note) => note.audioPath == path)) return;
     // Match the recording to the pending note made when Circuit reported it,
     // using the time it was recorded. Taking the oldest pending note would hand
     // the audio to a stale note whose own recording no longer exists.
     String? noteId;
-    if (epochSeconds != null && epochSeconds > 0) {
+    final preferred = preferNoteId == null
+        ? null
+        : _notes.where((n) => n.id == preferNoteId && n.audioPath == null).firstOrNull;
+    if (preferred != null) {
+      noteId = preferred.id;
+    } else if (epochSeconds != null && epochSeconds > 0) {
       final recorded = DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000);
       Duration? bestGap;
       for (final note in _pendingNotes()) {
