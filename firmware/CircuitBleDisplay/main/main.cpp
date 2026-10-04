@@ -21,6 +21,7 @@
 
 #include "lwip/inet.h"
 #include "ping/ping_sock.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "sdmmc_cmd.h"
 #include "driver/gpio.h"
@@ -116,6 +117,10 @@ lv_obj_t *icon_storage_obj;
 uint8_t status_icon_frame = 0;
 bool wifi_internet_online = false;
 bool home_status_received = false;
+// True from power-up until the first real screen (home, pairing code, or a state
+// such as recording) replaces the boot splash. While it is up, nothing else is
+// drawn over the wordmark.
+volatile bool boot_splash = true;
 volatile bool clock_set = false;
 volatile bool ble_encrypted = false;       // bonded phone, link encrypted
 volatile int64_t last_wifi_sync_end_ms = -600000;  // no cooldown at boot
@@ -209,6 +214,7 @@ void show_device_screen(DeviceScreen screen);
 // supplied real values; until then they show dashes. The pairing screen
 // keeps its baked "PAIR CODE" header in place of the date.
 void apply_persistent_labels(DeviceScreen screen) {
+    if (boot_splash) return;
     // Moving objects to the foreground redraws the screen, so only do it when the
     // screen actually changed.
     static int applied = -1;
@@ -238,15 +244,20 @@ void apply_persistent_labels(DeviceScreen screen) {
     lv_obj_move_foreground(idle_check_icon);
 }
 
-// Sets the system clock once. The phone's UTC offset becomes the local zone.
-void set_clock_from_phone(time_t epoch, int offset_minutes) {
-    if (epoch < kMinValidEpoch) return;
+// Makes local time follow the phone's UTC offset.
+void apply_utc_offset(int offset_minutes) {
     char tz[24];
     const int east = offset_minutes < 0 ? -offset_minutes : offset_minutes;
     // POSIX TZ offsets are inverted: UTC+5:30 is written "UTC-5:30".
     snprintf(tz, sizeof(tz), "UTC%c%d:%02d", offset_minutes >= 0 ? '-' : '+', east / 60, east % 60);
     setenv("TZ", tz, 1);
     tzset();
+}
+
+// Sets the system clock once. The phone's UTC offset becomes the local zone.
+void set_clock_from_phone(time_t epoch, int offset_minutes) {
+    if (epoch < kMinValidEpoch) return;
+    apply_utc_offset(offset_minutes);
     timeval tv = {.tv_sec = epoch, .tv_usec = 0};
     settimeofday(&tv, nullptr);
     clock_set = true;
@@ -290,6 +301,72 @@ void set_count_labels(int pending, int done) {
     layout_count_labels();
 }
 
+// Draws the current local time and date on the home screen. Requires the LVGL lock.
+void show_local_time(time_t now) {
+    tm local = {};
+    localtime_r(&now, &local);
+    char date_text[16];
+    strftime(date_text, sizeof(date_text), "%a %d %b", &local);
+    for (char *c = date_text; *c; ++c) *c = toupper(static_cast<unsigned char>(*c));
+    set_clock_labels(local.tm_hour, local.tm_min);
+    lv_label_set_text(idle_date_label, date_text);
+}
+
+// The last values the phone sent, kept in flash so the home screen is complete
+// straight after power-up instead of showing dashes until the phone reconnects.
+struct SavedHome {
+    int32_t pending;
+    int32_t done;
+    int32_t offset_minutes;
+};
+constexpr char kHomeNamespace[] = "home";
+constexpr char kHomeKey[] = "last";
+SavedHome saved_home = {-1, -1, 0};
+
+bool load_home_snapshot(SavedHome *home) {
+    nvs_handle_t handle;
+    if (nvs_open(kHomeNamespace, NVS_READONLY, &handle) != ESP_OK) return false;
+    size_t size = sizeof(*home);
+    const bool ok = nvs_get_blob(handle, kHomeKey, home, &size) == ESP_OK && size == sizeof(*home) &&
+                    home->pending >= 0 && home->done >= 0;
+    nvs_close(handle);
+    return ok;
+}
+
+// Only writes when something changed, so flash wear stays negligible.
+void save_home_snapshot(const SavedHome &home) {
+    if (home.pending == saved_home.pending && home.done == saved_home.done &&
+        home.offset_minutes == saved_home.offset_minutes) {
+        return;
+    }
+    nvs_handle_t handle;
+    if (nvs_open(kHomeNamespace, NVS_READWRITE, &handle) != ESP_OK) return;
+    if (nvs_set_blob(handle, kHomeKey, &home, sizeof(home)) == ESP_OK && nvs_commit(handle) == ESP_OK) {
+        saved_home = home;
+    }
+    nvs_close(handle);
+}
+
+// Fills the home screen from what the board already knows, before it is first
+// drawn: the saved note counts and time zone, and the clock when it kept running
+// through a restart. Anything unknown stays as a dash until the phone connects.
+void restore_home_screen() {
+    SavedHome home = {};
+    const bool have_saved = load_home_snapshot(&home);
+    if (have_saved) {
+        saved_home = home;
+        apply_utc_offset(home.offset_minutes);
+    }
+    const time_t now = time(nullptr);
+    const bool clock_kept = now >= kMinValidEpoch;  // lost only when power is cut
+    if (clock_kept) clock_set = true;
+    if (!Lvgl_lock(-1)) return;
+    if (have_saved) set_count_labels(home.pending, home.done);
+    if (clock_kept) show_local_time(now);
+    Lvgl_unlock();
+    ESP_LOGI(kTag, "Home restored: counts=%s clock=%s", have_saved ? "saved" : "none", clock_kept ? "kept" : "unknown");
+}
+
 void update_home_status(const char *value) {
     char buffer[kMaxTextBytes + 1];
     strncpy(buffer, value, sizeof(buffer) - 1);
@@ -313,6 +390,9 @@ void update_home_status(const char *value) {
     const bool counts_ok = sscanf(counts, "%d %*[^0-9]%d", &pending, &done) == 2;
     static int shown_pending = -1, shown_done = -1, shown_clock = -1;
     const int clock_key = hour * 60 + minute;
+    if (counts_ok && offset != nullptr) {
+        save_home_snapshot({pending, done, atoi(offset)});
+    }
     const bool same = home_status_received && counts_ok && pending == shown_pending && done == shown_done &&
                       (clock_set || (time_ok && clock_key == shown_clock));
     if (same) return;
@@ -371,6 +451,7 @@ void show_device_screen(DeviceScreen screen) {
         return;
     }
     active_screen = screen;
+    boot_splash = false;
     if (screen == DeviceScreen::Recording) {
         recording_started_at = xTaskGetTickCount();
     }
@@ -445,6 +526,7 @@ void show_pairing_code() {
     const unsigned long passkey = static_cast<unsigned long>(pairing_passkey % 1000000);
     snprintf(code, sizeof(code), "%03lu %03lu", passkey / 1000, passkey % 1000);
     active_screen = DeviceScreen::Pairing;
+    boot_splash = false;
     lv_obj_add_flag(connection_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(message_label, LV_OBJ_FLAG_HIDDEN);
     lv_img_set_src(wordmark_image, &circuit_pair_screen);
@@ -455,10 +537,6 @@ void show_pairing_code() {
     apply_persistent_labels(DeviceScreen::Pairing);
     lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
     Lvgl_unlock();
-}
-
-void show_securely_paired() {
-    show_device_screen(DeviceScreen::Idle);
 }
 
 void update_connection_status(const char *status) {
@@ -868,6 +946,7 @@ void set_wifi_ui(WifiUi state, const char *detail = "") {
 // for things that are available: Wi-Fi once configured (animated while it is
 // connecting, crossed out if it failed), the phone while bonded, the SD card.
 void refresh_status_icons() {
+    if (boot_splash) return;
     static const lv_image_dsc_t *const connecting[] = {
         &circuit_icon_wifi_zero, &circuit_icon_wifi_low, &circuit_icon_wifi_high, &circuit_icon_wifi};
     static const lv_image_dsc_t *shown_wifi = nullptr;
@@ -1196,14 +1275,8 @@ void local_clock_task(void *) {
         vTaskDelay(pdMS_TO_TICKS(10000));
         const time_t now = time(nullptr);
         if (!clock_set || now < kMinValidEpoch) continue;
-        tm local = {};
-        localtime_r(&now, &local);
-        char date_text[16];
-        strftime(date_text, sizeof(date_text), "%a %d %b", &local);
-        for (char *c = date_text; *c; ++c) *c = toupper(static_cast<unsigned char>(*c));
         if (!Lvgl_lock(-1)) continue;
-        set_clock_labels(local.tm_hour, local.tm_min);
-        lv_label_set_text(idle_date_label, date_text);
+        show_local_time(now);
         Lvgl_unlock();
     }
 }
@@ -1618,6 +1691,7 @@ void init_display() {
         lv_obj_set_style_text_font(connection_label, &lv_font_montserrat_14, 0);
         lv_label_set_text(connection_label, "Wi-Fi: not configured\nInternet: offline\nPhone relay: unavailable");
         lv_obj_align(connection_label, LV_ALIGN_TOP_MID, 0, 10);
+        lv_obj_add_flag(connection_label, LV_OBJ_FLAG_HIDDEN);  // the splash is the boot screen
 
         message_label = lv_label_create(lv_screen_active());
         lv_obj_set_width(message_label, 176);
@@ -1626,11 +1700,11 @@ void init_display() {
         lv_label_set_long_mode(message_label, LV_LABEL_LONG_WRAP);
         lv_label_set_text(message_label, "Circuit\nStarting…");
         lv_obj_align(message_label, LV_ALIGN_BOTTOM_MID, 0, -12);
+        lv_obj_add_flag(message_label, LV_OBJ_FLAG_HIDDEN);
 
         wordmark_image = lv_img_create(lv_screen_active());
-        lv_img_set_src(wordmark_image, &circuit_idle_screen);
+        lv_img_set_src(wordmark_image, &circuit_splash_screen);
         lv_obj_center(wordmark_image);
-        lv_obj_add_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
 
         // Header icons: positioned and shown by refresh_status_icons().
         icon_wifi_obj = lv_img_create(lv_screen_active());
@@ -1713,23 +1787,31 @@ extern "C" void app_main(void) {
     configASSERT(text_queue);
     pairing_passkey = esp_random() % 1000000;
     init_display();
+    // Until the phone supplies its UTC offset, SNTP time is shown as IST.
+    setenv("TZ", "IST-5:30", 1);
+    tzset();
+    // The "circuit" splash is already on screen. Get the home screen's values
+    // ready behind it (saved counts, time zone, a clock that kept running) so it
+    // is complete the moment it replaces the splash.
+    restore_home_screen();
     init_sd_card();
     Codec_StartInit();
     audio_ready = true;
     init_record_button();
     xTaskCreate(demo_animation_task, "demo_animation", 3072, nullptr, 2, nullptr);
     xTaskCreate(text_display_task, "text_display", 4096, nullptr, 4, nullptr);
-    // Until the phone supplies its UTC offset, SNTP time is shown as IST.
-    setenv("TZ", "IST-5:30", 1);
-    tzset();
     xTaskCreate(status_icon_task, "status_icons", 3072, nullptr, 2, nullptr);
     xTaskCreate(sync_supervisor_task, "sync_supervisor", 10240, nullptr, 3, nullptr);
     xTaskCreate(local_clock_task, "local_clock", 3072, nullptr, 2, nullptr);
     start_wifi();
     start_ble();
+    // Start-up is done: leave the splash for the pairing code, or for home. If
+    // something has already taken over (a recording started with the button),
+    // leave that alone.
+    ESP_LOGI(kTag, "Start-up done, leaving the splash");
     if (esp_ble_get_bond_device_num() == 0) {
         show_pairing_code();
-    } else {
-        show_securely_paired();
+    } else if (boot_splash) {
+        show_device_screen(DeviceScreen::Idle);
     }
 }
