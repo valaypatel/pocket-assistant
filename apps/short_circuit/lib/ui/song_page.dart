@@ -10,6 +10,7 @@ class SongPage extends StatefulWidget {
     required this.onPlay,
     required this.onDelete,
     required this.onOpenSettings,
+    required this.onUseAsNote,
     this.openLink,
   });
 
@@ -19,6 +20,9 @@ class SongPage extends StatefulWidget {
   final Future<void> Function(String? path) onPlay;
   final Future<void> Function(String id) onDelete;
   final VoidCallback onOpenSettings;
+
+  /// Turns a clip wrongly taken for a song back into a voice note.
+  final Future<void> Function(String id) onUseAsNote;
 
   /// Opens the provider page; defaults to the phone's browser.
   final Future<bool> Function(Uri uri)? openLink;
@@ -51,6 +55,16 @@ class _SongPageState extends State<SongPage> {
     if (!confirmed || !mounted) return;
     await widget.onDelete(widget.noteId);
     if (mounted) Navigator.pop(context);
+  }
+
+  void _useAsNote() {
+    unawaited(widget.onUseAsNote(widget.noteId));
+    Navigator.pop(context);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(content: Text('Transcribing as a voice note…')),
+      );
   }
 
   Future<bool> _open(Uri uri) async {
@@ -274,6 +288,13 @@ class _SongPageState extends State<SongPage> {
                     tooltip: 'Open the track page in your browser',
                     caption: 'Page',
                     onPressed: () => _openProvider(provider),
+                  ),
+                if (hasAudio && !busy && !song.matched)
+                  ScIconButton(
+                    icon: LucideIcons.mic,
+                    tooltip: 'This is a voice note, not a song. Transcribe it',
+                    caption: 'Note',
+                    onPressed: _useAsNote,
                   ),
                 if (song.state == 'failed')
                   ScIconButton(

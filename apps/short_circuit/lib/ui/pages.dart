@@ -398,6 +398,7 @@ extension _ScPages on _CircuitHomePageState {
             onPlay: _playSyncedNote,
             onDelete: _deleteNote,
             onOpenSettings: _openMusicSettings,
+            onUseAsNote: (id) => _transcribeNote(id, asSpeech: true),
           ),
         ),
       );

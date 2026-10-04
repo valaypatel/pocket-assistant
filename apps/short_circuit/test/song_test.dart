@@ -340,6 +340,7 @@ void main() {
       CircuitNote? note, {
       void Function(String)? onIdentify,
       VoidCallback? onSettings,
+      void Function(String)? onUseAsNote,
       Future<bool> Function(Uri)? openLink,
     }) => MaterialApp(
       theme: buildScTheme(),
@@ -350,6 +351,7 @@ void main() {
         onPlay: (_) async {},
         onDelete: (_) async {},
         onOpenSettings: onSettings ?? () {},
+        onUseAsNote: (id) async => onUseAsNote?.call(id),
         openLink: openLink,
       ),
     );
@@ -492,6 +494,62 @@ void main() {
       await tester.tap(find.byTooltip('Open in Spotify'));
       await tester.pump();
       expect(tried, ['spotify:track:abc']);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a clip taken for a song can be turned into a voice note', (
+      tester,
+    ) async {
+      String? converted;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildScTheme(),
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => SongPage(
+                      noteId: 'n1',
+                      noteById: (_) =>
+                          note(const SongResult(state: 'no_match')),
+                      onIdentify: (_) async {},
+                      onPlay: (_) async {},
+                      onDelete: (_) async {},
+                      onOpenSettings: () {},
+                      onUseAsNote: (id) async => converted = id,
+                    ),
+                  ),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byTooltip('This is a voice note, not a song. Transcribe it'),
+      );
+      await tester.pumpAndSettle();
+      expect(converted, 'n1');
+      expect(find.text('open'), findsOneWidget); // page closed
+      expect(find.text('Transcribing as a voice note…'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a matched song offers no voice-note conversion', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        page(note(const SongResult(state: 'matched', title: 'T', artist: 'A'))),
+      );
+      await tester.pump();
+      expect(
+        find.byTooltip('This is a voice note, not a song. Transcribe it'),
+        findsNothing,
+      );
       await tester.pumpWidget(const SizedBox());
     });
 

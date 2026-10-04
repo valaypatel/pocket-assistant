@@ -96,12 +96,40 @@ void main() {
       }
     });
 
+    test('without the music check a music marker means no speech', () {
+      expect(
+        () =>
+            GeminiClient.parseTranscriptionText('[[MUSIC]]', allowMusic: false),
+        throwsA(predicate((e) => e.toString().contains('No speech'))),
+      );
+    });
+
     test('a note that merely mentions music is not a song', () {
       final result = GeminiClient.parseTranscriptionText(
         'Buy tickets for the music festival.',
       );
       expect(result.isMusic, isFalse);
     });
+  });
+
+  test('copyWith can clear the song to make it a voice note again', () {
+    final song = CircuitNote(
+      id: '1',
+      createdAt: DateTime(2026),
+      status: 'x',
+      kind: 'song',
+      song: const SongResult(state: 'no_match'),
+    );
+    final back = song.copyWith(kind: 'voice', clearSong: true);
+    expect(back.isSong, isFalse);
+    expect(back.song, isNull);
+    expect(back.toJson().containsKey('song'), isFalse);
+  });
+
+  test('a WAV that is not plain PCM is left alone', () {
+    final float = _wav(60);
+    ByteData.sublistView(float).setUint16(20, 3, Endian.little); // IEEE float
+    expect(identical(wavSample(float), float), isTrue);
   });
 
   test('copyWith can turn a voice note into a song note', () {

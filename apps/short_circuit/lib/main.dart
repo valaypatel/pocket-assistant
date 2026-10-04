@@ -92,7 +92,10 @@ class GeminiClient {
     }
   }
 
-  Future<GeminiTranscription> transcribeWav(Uint8List wavBytes) async {
+  Future<GeminiTranscription> transcribeWav(
+    Uint8List wavBytes, {
+    bool detectMusic = true,
+  }) async {
     final key = await apiKey();
     if (key == null || key.trim().isEmpty) {
       throw Exception('Add a Gemini API key in Settings first.');
@@ -112,9 +115,9 @@ class GeminiClient {
                 'parts': [
                   {
                     'text':
-                        'Transcribe this voice note exactly. Preserve Gujarati script, English, and mixed Gujarati-English. Return the complete transcription only. Do not summarise, classify, translate, or add a title. '
-                        'Exception: if the recording is mainly music or a song playing, with no one speaking to record a note, reply with exactly [[MUSIC]] and nothing else. '
-                        'If it is only silence or background noise, reply with exactly [[NOISE]].',
+                        'Transcribe this voice note exactly. Preserve Gujarati script, English, and mixed Gujarati-English. Return the complete transcription only. Do not summarise, classify, translate, or add a title.'
+                        '${detectMusic ? ' Exception: if the recording is mainly music or a song playing, with no one speaking to record a note, reply with exactly [[MUSIC]] and nothing else.' : ''}'
+                        ' If it is only silence or background noise, reply with exactly [[NOISE]].',
                   },
                   {
                     'inline_data': {
@@ -145,14 +148,19 @@ class GeminiClient {
         .whereType<String>()
         .join()
         .trim();
-    return parseTranscriptionText(result);
+    return parseTranscriptionText(result, allowMusic: detectMusic);
   }
 
   /// Turns Gemini's plain-text answer into a transcription. A recording of
   /// music comes back as the [[MUSIC]] marker and silence as [[NOISE]].
-  static GeminiTranscription parseTranscriptionText(String? answer) {
+  static GeminiTranscription parseTranscriptionText(
+    String? answer, {
+    bool allowMusic = true,
+  }) {
     final result = answer?.trim() ?? '';
-    if (result.isEmpty || result.startsWith('[[NOISE]]')) {
+    if (result.isEmpty ||
+        result.startsWith('[[NOISE]]') ||
+        (!allowMusic && result.startsWith('[[MUSIC]]'))) {
       throw Exception('No speech detected.');
     }
     if (result.startsWith('[[MUSIC]]')) {
@@ -695,6 +703,7 @@ class CircuitNote {
     int? boardId,
     SongResult? song,
     String? kind,
+    bool clearSong = false,
   }) => CircuitNote(
     id: id,
     createdAt: createdAt,
@@ -712,7 +721,7 @@ class CircuitNote {
     actionSuggestions: actionSuggestions ?? this.actionSuggestions,
     boardId: boardId ?? this.boardId,
     kind: kind ?? this.kind,
-    song: song ?? this.song,
+    song: clearSong ? null : (song ?? this.song),
   );
 
   Map<String, dynamic> toJson() => {
@@ -837,7 +846,19 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   /// True from tapping Identify song until Circuit reports that clip saved, so
   /// the new recording is kept as a song rather than a voice note.
-  bool _songClipArmed = false;
+  /// It lapses on its own, so a refused or lost request cannot turn the next
+  /// ordinary recording into a song.
+  DateTime? _songArmedAt;
+  bool get _songClipArmed {
+    final armedAt = _songArmedAt;
+    return armedAt != null &&
+        DateTime.now().difference(armedAt) <
+            Duration(seconds: _songClipSeconds + 30);
+  }
+
+  set _songClipArmed(bool armed) =>
+      _songArmedAt = armed ? DateTime.now() : null;
+
   final Set<String> _identifyingSongs = {};
   String _displayName = '';
   DateTime? _recordingStartedAt;
@@ -1100,16 +1121,25 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     unawaited(_sendHomeStatus());
   }
 
-  Future<GeminiTranscription?> _transcribeNote(String id) async {
+  /// With [asSpeech], a clip wrongly taken for a song is turned back into a
+  /// voice note and transcribed without the music check.
+  Future<GeminiTranscription?> _transcribeNote(
+    String id, {
+    bool asSpeech = false,
+  }) async {
     if (_transcribingNoteId != null) return null;
     final note = _notes.where((item) => item.id == id).firstOrNull;
     final path = note?.audioPath;
-    if (path == null || (note?.isSong ?? false)) return null;
+    if (path == null || ((note?.isSong ?? false) && !asSpeech)) return null;
+    if (asSpeech && (note?.isSong ?? false)) {
+      await _updateNote(id, (n) => n.copyWith(kind: 'voice', clearSong: true));
+    }
     setState(() => _transcribingNoteId = id);
     await _setNoteStatus(id, 'Transcribing with Gemini…');
     try {
       final transcription = await _gemini.transcribeWav(
         await File(path).readAsBytes(),
+        detectMusic: !asSpeech,
       );
       if (transcription.isMusic) {
         // Not a spoken note: keep the clip, drop the transcript, and look it up.
@@ -1534,6 +1564,10 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
           status.startsWith('Recording failed')) {
         _recordingAudio = false;
         if (status.startsWith('Recording failed')) _songClipArmed = false;
+      }
+      if (status.startsWith('Audio is busy')) {
+        // Circuit refused the request, so no song clip is coming.
+        _songClipArmed = false;
       }
     });
     if (status.startsWith('Recording saved') ||

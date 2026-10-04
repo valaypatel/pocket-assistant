@@ -233,11 +233,12 @@ Uint8List wavSample(Uint8List wav, {int seconds = 12}) {
       at + 4 <= wav.length && String.fromCharCodes(wav, at, at + 4) == text;
 
   if (wav.length < 44 || !tag(0, 'RIFF') || !tag(8, 'WAVE')) return wav;
-  int? channels, rate, bits, dataAt, dataSize;
+  int? format, channels, rate, bits, dataAt, dataSize;
   var at = 12;
   while (at + 8 <= wav.length) {
     final size = u32(at + 4);
     if (tag(at, 'fmt ') && at + 24 <= wav.length) {
+      format = u16(at + 8);
       channels = u16(at + 10);
       rate = u32(at + 12);
       bits = u16(at + 22);
@@ -248,7 +249,12 @@ Uint8List wavSample(Uint8List wav, {int seconds = 12}) {
     }
     at += 8 + size + (size.isOdd ? 1 : 0);
   }
-  if (channels == null || rate == null || bits == null || dataAt == null) {
+  // Only plain PCM can be sliced by byte offset.
+  if (format != 1 ||
+      channels == null ||
+      rate == null ||
+      bits == null ||
+      dataAt == null) {
     return wav;
   }
   final frame = channels * bits ~/ 8;
