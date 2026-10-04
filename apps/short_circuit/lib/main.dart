@@ -784,7 +784,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   bool _autoTranscribe = true;
   bool _geminiConnected = false;
   bool _aiConnected = false;
-  String _displayName = 'Valay';
+  String _displayName = '';
   DateTime? _recordingStartedAt;
   Timer? _clockTicker;
   bool _pruneRequested = false;

@@ -9,3 +9,6 @@ vendor/
 .DS_Store
 .idea/
 .vscode/
+
+# ESP-IDF / clangd index cache
+.cache/

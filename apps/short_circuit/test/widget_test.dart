@@ -29,7 +29,7 @@ void main() {
     await tester.pumpWidget(const ShortCircuitApp());
     await tester.pump(const Duration(seconds: 1));
 
-    expect(find.textContaining('Hey,'), findsOneWidget);
+    expect(find.text('Hello.'), findsOneWidget);
     expect(find.text('YOUR DAY AT A GLANCE'), findsOneWidget);
     expect(find.text('Circuit'), findsWidgets);
     for (final label in ['Home', 'Notes', 'Tasks', 'Settings']) {
