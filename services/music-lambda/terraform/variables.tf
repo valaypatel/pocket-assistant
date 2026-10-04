@@ -42,3 +42,17 @@ variable "allowed_origin" {
   type        = string
   default     = "https://localhost"
 }
+
+variable "spotify_client_id" {
+  description = "Client ID of a Spotify developer app. Leave empty to skip the exact-track lookup."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "spotify_client_secret" {
+  description = "Client secret of that Spotify app. Kept in Terraform state and the function's environment."
+  type        = string
+  default     = ""
+  sensitive   = true
+}

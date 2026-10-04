@@ -244,6 +244,39 @@ void main() {
       },
     );
 
+    test('the exact track comes before any search link', () {
+      const song = SongResult(
+        state: 'matched',
+        title: 'Tum Hi Ho',
+        artist: 'Arijit Singh',
+        spotifyTrackUri: 'spotify:track:3GYlZ8cmRBzJ',
+        spotifyTrackUrl: 'https://open.spotify.com/track/3GYlZ8cmRBzJ',
+        spotifyUri: 'spotify:search:Tum%20Hi%20Ho',
+        spotifyUrl: 'https://open.spotify.com/search/Tum%20Hi%20Ho',
+      );
+      final tried = spotifyCandidates(song).map((u) => u.toString()).toList();
+      expect(tried.first, 'spotify:track:3GYlZ8cmRBzJ');
+      expect(tried[1], 'https://open.spotify.com/track/3GYlZ8cmRBzJ');
+      expect(tried.indexOf('spotify:search:Tum%20Hi%20Ho'), greaterThan(1));
+      // Round-trips through storage, so an old note keeps working too.
+      final restored = SongResult.fromJson(song.toJson());
+      expect(restored.spotifyTrackUri, 'spotify:track:3GYlZ8cmRBzJ');
+      expect(SongResult.fromJson({'state': 'matched'}).spotifyTrackUri, isNull);
+    });
+
+    test('the exact track links are read from the service answer', () async {
+      final client = await _client(
+        (_) async => _json(200, {
+          ..._matched,
+          'spotifyTrackUri': 'spotify:track:abc',
+          'spotifyTrackUrl': 'https://open.spotify.com/track/abc',
+        }),
+      );
+      final result = await client.identify(_wav);
+      expect(result.spotifyTrackUri, 'spotify:track:abc');
+      expect(result.spotifyTrackUrl, 'https://open.spotify.com/track/abc');
+    });
+
     test('only spotify and https links are ever opened', () {
       const song = SongResult(
         state: 'matched',
@@ -433,6 +466,32 @@ void main() {
       await tester.tap(find.byTooltip('Open in Spotify'));
       await tester.pump();
       expect(find.text('Could not open the link.'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('Open in Spotify opens the exact track first', (tester) async {
+      final tried = <String>[];
+      await tester.pumpWidget(
+        page(
+          note(
+            const SongResult(
+              state: 'matched',
+              title: 'T',
+              artist: 'A',
+              spotifyTrackUri: 'spotify:track:abc',
+              spotifyUri: 'spotify:search:T',
+            ),
+          ),
+          openLink: (uri) async {
+            tried.add(uri.toString());
+            return true;
+          },
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Open in Spotify'));
+      await tester.pump();
+      expect(tried, ['spotify:track:abc']);
       await tester.pumpWidget(const SizedBox());
     });
 

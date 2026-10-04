@@ -14,6 +14,8 @@ class SongResult {
     this.providerUrl,
     this.spotifyUri,
     this.spotifyUrl,
+    this.spotifyTrackUri,
+    this.spotifyTrackUrl,
     this.recognizedAt,
     this.error,
   });
@@ -31,6 +33,11 @@ class SongResult {
   /// versions of the service, in which case the app builds its own search.
   final String? spotifyUri;
   final String? spotifyUrl;
+
+  /// The exact Spotify track, when the service has Spotify credentials and found
+  /// it. Opens the song itself, not a search.
+  final String? spotifyTrackUri;
+  final String? spotifyTrackUrl;
   final DateTime? recognizedAt;
 
   /// A short, safe message for the user; never raw server output.
@@ -48,6 +55,8 @@ class SongResult {
     providerUrl: providerUrl,
     spotifyUri: spotifyUri,
     spotifyUrl: spotifyUrl,
+    spotifyTrackUri: spotifyTrackUri,
+    spotifyTrackUrl: spotifyTrackUrl,
     recognizedAt: recognizedAt,
     error: error,
   );
@@ -61,6 +70,8 @@ class SongResult {
     providerUrl: json['providerUrl'] as String?,
     spotifyUri: json['spotifyUri'] as String?,
     spotifyUrl: json['spotifyUrl'] as String?,
+    spotifyTrackUri: json['spotifyTrackUri'] as String?,
+    spotifyTrackUrl: json['spotifyTrackUrl'] as String?,
     recognizedAt: DateTime.tryParse(json['recognizedAt']?.toString() ?? ''),
     error: json['error'] as String?,
   );
@@ -74,6 +85,8 @@ class SongResult {
     'providerUrl': ?providerUrl,
     'spotifyUri': ?spotifyUri,
     'spotifyUrl': ?spotifyUrl,
+    'spotifyTrackUri': ?spotifyTrackUri,
+    'spotifyTrackUrl': ?spotifyTrackUrl,
     'recognizedAt': ?recognizedAt?.toIso8601String(),
     'error': ?error,
   };
@@ -175,6 +188,8 @@ class MusicClient {
       providerUrl: text('providerUrl'),
       spotifyUri: text('spotifyUri'),
       spotifyUrl: text('spotifyUrl'),
+      spotifyTrackUri: text('spotifyTrackUri'),
+      spotifyTrackUrl: text('spotifyTrackUrl'),
       recognizedAt: DateTime.now(),
     );
   }
@@ -288,13 +303,19 @@ Uint8List wavSample(Uint8List wav, {int seconds = 12}) {
 }
 
 /// Every address worth trying to open a matched song in Spotify, best first:
-/// what the service sent, then a search the app builds itself. Only
-/// `spotify:` and `https://` addresses are accepted.
+/// the exact track if the service found it, then the search links it sent, then
+/// a search the app builds itself. Only `spotify:` and `https://` addresses are
+/// accepted.
 List<Uri> spotifyCandidates(SongResult song) {
   final built = spotifyLinks(song.title, song.artist);
   final seen = <String>{};
   final out = <Uri>[];
-  for (final text in [song.spotifyUri, song.spotifyUrl]) {
+  for (final text in [
+    song.spotifyTrackUri,
+    song.spotifyTrackUrl,
+    song.spotifyUri,
+    song.spotifyUrl,
+  ]) {
     final uri = text == null ? null : Uri.tryParse(text);
     if (uri == null) continue;
     final ok =

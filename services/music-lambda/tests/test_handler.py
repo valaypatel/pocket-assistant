@@ -46,6 +46,9 @@ class Ctx:
 @pytest.fixture(autouse=True)
 def configured(monkeypatch):
     monkeypatch.setenv("SERVICE_KEY", KEY)
+    monkeypatch.delenv("SPOTIFY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("SPOTIFY_CLIENT_SECRET", raising=False)
+    handler._spotify_token.update(value=None, expires_at=0.0)
 
 
 def stub_shazam(monkeypatch, result=None, error=None):
@@ -107,6 +110,8 @@ def test_matched_track_is_normalised(monkeypatch):
         "providerUrl": "https://www.shazam.com/track/1",
         "spotifyUri": "spotify:search:Tum%20Hi%20Ho",
         "spotifyUrl": "https://open.spotify.com/search/Tum%20Hi%20Ho",
+        "spotifyTrackUri": None,
+        "spotifyTrackUrl": None,
     }
     assert seen["audio"][:4] == b"RIFF"
 
@@ -203,3 +208,134 @@ def test_request_writes_nothing_to_disk(monkeypatch):
     before = {p.name for p in tmp.iterdir()}
     handler.lambda_handler(event(), Ctx())
     assert {p.name for p in tmp.iterdir()} == before
+
+
+# ---- exact Spotify track lookup -------------------------------------------------
+
+import urllib.error  # noqa: E402
+import urllib.parse  # noqa: E402
+
+
+def with_isrc(isrc="USRC17607839", title="Tum Hi Ho", artist="Arijit Singh"):
+    return {"track": {"title": title, "subtitle": artist, "isrc": isrc}}
+
+
+class FakeSpotify:
+    """Stands in for accounts.spotify.com and api.spotify.com."""
+
+    def __init__(self, monkeypatch, searches):
+        self.calls = []
+        self.searches = list(searches)  # one answer per search call
+        monkeypatch.setenv("SPOTIFY_CLIENT_ID", "id123")
+        monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "secret456")
+        monkeypatch.setattr(handler, "_http_json", self)
+
+    def __call__(self, request):
+        self.calls.append(request)
+        if request.full_url == handler.SPOTIFY_TOKEN_URL:
+            return {"access_token": "tok", "expires_in": 3600}
+        answer = self.searches.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    def queries(self):
+        out = []
+        for request in self.calls:
+            if request.full_url.startswith(handler.SPOTIFY_SEARCH_URL):
+                out.append(urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query)["q"][0])
+        return out
+
+
+def found(track_id, name="Tum Hi Ho"):
+    return {"tracks": {"items": [{"id": track_id, "name": name}]}}
+
+
+NOTHING = {"tracks": {"items": []}}
+
+
+def test_exact_track_is_found_by_isrc(monkeypatch):
+    stub_shazam(monkeypatch, with_isrc())
+    spotify = FakeSpotify(monkeypatch, [found("3GYlZ8cmRBzJ")])
+    result = body(handler.lambda_handler(event(), Ctx()))
+    assert result["spotifyTrackUri"] == "spotify:track:3GYlZ8cmRBzJ"
+    assert result["spotifyTrackUrl"] == "https://open.spotify.com/track/3GYlZ8cmRBzJ"
+    assert spotify.queries() == ["isrc:USRC17607839"]
+    token_request = spotify.calls[0]
+    assert token_request.get_header("Authorization").startswith("Basic ")
+    assert spotify.calls[1].get_header("Authorization") == "Bearer tok"
+
+
+def test_falls_back_to_title_and_artist_when_the_isrc_finds_nothing(monkeypatch):
+    stub_shazam(monkeypatch, with_isrc())
+    spotify = FakeSpotify(monkeypatch, [NOTHING, found("abc")])
+    result = body(handler.lambda_handler(event(), Ctx()))
+    assert result["spotifyTrackUri"] == "spotify:track:abc"
+    assert spotify.queries() == ['isrc:USRC17607839', 'track:"Tum Hi Ho" artist:"Arijit Singh"']
+
+
+def test_without_an_isrc_it_searches_by_text(monkeypatch):
+    stub_shazam(monkeypatch, with_isrc(isrc=None))
+    spotify = FakeSpotify(monkeypatch, [found("abc")])
+    assert body(handler.lambda_handler(event(), Ctx()))["spotifyTrackUri"] == "spotify:track:abc"
+    assert spotify.queries() == ['track:"Tum Hi Ho" artist:"Arijit Singh"']
+
+
+def test_a_different_song_is_never_accepted_from_a_text_search(monkeypatch):
+    stub_shazam(monkeypatch, with_isrc(isrc=None))
+    FakeSpotify(monkeypatch, [found("zzz", name="Completely Other Song")])
+    result = body(handler.lambda_handler(event(), Ctx()))
+    assert result["matched"] is True
+    assert result["spotifyTrackUri"] is None
+
+
+def test_quotes_in_a_title_cannot_break_the_search(monkeypatch):
+    stub_shazam(monkeypatch, with_isrc(isrc=None, title='Say "Hello"'))
+    spotify = FakeSpotify(monkeypatch, [NOTHING])
+    handler.lambda_handler(event(), Ctx())
+    assert '"Hello"' not in spotify.queries()[0].split("track:", 1)[1].strip('"')
+
+
+def test_no_spotify_credentials_means_no_spotify_calls(monkeypatch):
+    stub_shazam(monkeypatch, with_isrc())
+    calls = []
+    monkeypatch.setattr(handler, "_http_json", lambda request: calls.append(request))
+    result = body(handler.lambda_handler(event(), Ctx()))
+    assert calls == []
+    assert result["matched"] is True and result["spotifyTrackUri"] is None
+
+
+def test_a_spotify_outage_never_loses_the_match(monkeypatch, caplog):
+    stub_shazam(monkeypatch, with_isrc())
+    FakeSpotify(monkeypatch, [urllib.error.URLError("down")])
+    with caplog.at_level("INFO"):
+        response = handler.lambda_handler(event(), Ctx())
+    assert response["statusCode"] == 200
+    result = body(response)
+    assert result["matched"] is True and result["title"] == "Tum Hi Ho"
+    assert result["spotifyTrackUri"] is None
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "spotify_lookup_failed" in logged and "URLError" in logged
+    assert "Tum Hi Ho" not in logged and "USRC17607839" not in logged
+
+
+def test_the_token_is_reused_between_requests(monkeypatch):
+    stub_shazam(monkeypatch, with_isrc())
+    spotify = FakeSpotify(monkeypatch, [found("a"), found("b")])
+    handler.lambda_handler(event(), Ctx())
+    handler.lambda_handler(event(), Ctx())
+    token_calls = [c for c in spotify.calls if c.full_url == handler.SPOTIFY_TOKEN_URL]
+    assert len(token_calls) == 1
+
+
+def test_no_match_makes_no_spotify_calls(monkeypatch):
+    stub_shazam(monkeypatch, {"matches": []})
+    spotify = FakeSpotify(monkeypatch, [])
+    assert body(handler.lambda_handler(event(), Ctx()))["matched"] is False
+    assert spotify.calls == []
+
+
+def test_the_isrc_is_not_returned_to_the_app(monkeypatch):
+    stub_shazam(monkeypatch, with_isrc())
+    FakeSpotify(monkeypatch, [found("a")])
+    assert "_isrc" not in body(handler.lambda_handler(event(), Ctx()))

@@ -48,6 +48,9 @@ resource "aws_lambda_function" "music" {
     variables = {
       SERVICE_KEY     = random_password.service_key.result
       MAX_AUDIO_BYTES = tostring(var.max_audio_bytes)
+      # Optional: lets the service find the exact Spotify track. Empty disables it.
+      SPOTIFY_CLIENT_ID     = var.spotify_client_id
+      SPOTIFY_CLIENT_SECRET = var.spotify_client_secret
     }
   }
 

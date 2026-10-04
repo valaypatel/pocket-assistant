@@ -16,12 +16,12 @@ and the logs hold only the request id, route and outcome.
 
 | Route | Body | Result |
 |---|---|---|
-| `POST /music/identify` | raw WAV bytes (`content-type: audio/wav`) | `{matched, title, artist, album, artworkUrl, providerUrl, spotifyUri, spotifyUrl}` |
+| `POST /music/identify` | raw WAV bytes (`content-type: audio/wav`) | `{matched, title, artist, album, artworkUrl, providerUrl, spotifyUri, spotifyUrl, spotifyTrackUri, spotifyTrackUrl}` |
 | `GET /music/health` | none | `{"ok": true}` when the key is accepted |
 
 Every request needs `Authorization: Bearer <service key>`.
 
-The two Spotify fields are the links Shazam attaches to the track, or `null`. They are usually a Spotify search for the song, not one exact track. `matched: false` (with the other fields `null`) means no match. It is a normal
+`spotifyUri` and `spotifyUrl` are the links Shazam attaches to the track, or `null`. They are a Spotify *search* for the song, not the song. `spotifyTrackUri` and `spotifyTrackUrl` are the exact Spotify track, and are only filled in when the service has Spotify credentials (see below). `matched: false` (with the other fields `null`) means no match. It is a normal
 200 answer, not an error.
 
 | Status | Meaning |
@@ -75,6 +75,34 @@ Notes:
 - The Function URL is public on the internet and protected only by the bearer
   key. CORS only restricts browsers; the Android app is not a browser.
 - Remove everything with `terraform destroy`.
+
+## Opening the exact song in Spotify (optional)
+
+Shazam only gives Spotify *search* links, so without this step Spotify opens a
+search page. With a free Spotify developer app the service looks the track up in
+Spotify's catalogue (by its ISRC, then by title and artist) and returns the exact
+track. Only text is sent to Spotify, never audio. If the lookup fails or finds
+nothing, the match is still returned and the app falls back to the search.
+
+1. Go to <https://developer.spotify.com/dashboard> and create an app. Any name
+   works and it needs Web API access only. Spotify makes you enter a redirect URI
+   even though this service never uses one; `http://127.0.0.1:3000/callback` is
+   accepted (Spotify no longer allows `localhost` itself, and may change this).
+2. Copy its **Client ID** and **Client secret**.
+3. Put them in `terraform/terraform.tfvars` (git-ignored), then apply:
+
+   ```hcl
+   spotify_client_id     = "..."
+   spotify_client_secret = "..."
+   ```
+
+   ```bash
+   cd terraform && terraform apply
+   ```
+
+The secret is stored in Terraform state and in the function's environment, like
+the service key. Spotify can change the rules for its Web API, so check their
+current terms.
 
 ## Test
 
