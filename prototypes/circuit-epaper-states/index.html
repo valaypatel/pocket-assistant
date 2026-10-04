@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Circuit e-paper state prototype</title>
+  <style>
+    :root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color:#1b2222; background:#e9edeb; }
+    * { box-sizing:border-box; } body { margin:0; min-height:100vh; display:grid; place-items:center; }
+    .stage { min-height:100vh; width:100%; display:grid; place-items:center; padding:32px 20px 96px; }
+    .frame { width:min(100%,520px); display:grid; place-items:center; gap:22px; }
+    .caption { text-align:center; max-width:430px; color:#657171; font-size:13px; line-height:1.45; }
+    .caption strong { display:block; color:#1b2222; font-size:17px; margin-bottom:6px; }
+    .device { width:min(82vw,420px); aspect-ratio:1; padding:16px; border-radius:30px; background:#ffffff; box-shadow:0 20px 60px rgba(22,40,38,.17),0 0 0 1px rgba(22,40,38,.08); }
+    .paper { width:100%; height:100%; padding:13px; background:#f8f8f2; border:1px solid #c9cbc4; box-shadow:inset 0 0 0 1px #fff; color:#111; }
+    .epd { width:100%; height:100%; display:flex; flex-direction:column; }
+    .top { height:16%; display:flex; align-items:flex-start; justify-content:space-between; border-bottom:2px solid #111; padding-top:2px; }
+    .status-label { font-size:12px; font-weight:900; letter-spacing:1px; }
+    .tiny-icons { display:flex; align-items:center; gap:8px; }
+    .tiny-icons span { display:inline-flex; width:20px; height:20px; justify-content:center; }
+    .tiny-icons svg, .sub-icons svg { width:20px; height:20px; stroke:#111; fill:none; stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
+    .persistent-info { height:27%; display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding-top:12px; }
+    .main { flex:1; display:grid; place-items:center; text-align:center; padding:8px 4px; }
+    .idle-main { width:100%; display:grid; grid-template-columns:1.28fr .72fr; align-items:center; gap:12px; }
+    .clock-block { text-align:left; }
+    .clock { font-size:53px; letter-spacing:-3px; font-weight:900; line-height:1; }
+    .clock small { font-size:15px; letter-spacing:1px; margin-left:6px; font-weight:900; vertical-align:baseline; }
+    .date { display:none; }
+    .notes-summary { text-align:right; }
+    .note-count { display:flex; align-items:center; gap:10px; white-space:nowrap; font-size:29px; line-height:.95; font-weight:900; }
+    .note-pair { display:inline-flex; align-items:center; gap:4px; }
+    .note-pair svg { width:20px; height:20px; stroke:#111; fill:none; stroke-width:2.8; stroke-linecap:round; stroke-linejoin:round; }
+    .note-label { display:none; }
+    .note-split { display:none; }
+    .sub-icons { display:none; }
+    .sub-icons span { display:flex; align-items:center; gap:3px; }
+    .takeover { width:100%; height:100%; display:grid; place-items:center; align-content:center; gap:10px; }
+    .giant { width:88px; height:88px; display:grid; place-items:center; border:4px solid #111; border-radius:50%; font-size:48px; font-weight:900; }
+    .state-number { font-size:35px; font-weight:900; letter-spacing:2px; }
+    .state-symbol { font-size:64px; line-height:1; font-weight:900; }
+    .sync-row { display:flex; align-items:center; justify-content:center; gap:18px; }
+    .sync-art { width:64px; height:64px; display:grid; place-items:center; }
+    .sync-art svg { width:64px; height:64px; stroke:#111; fill:none; stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
+    .sync-art svg { animation:sync-spin 1.8s linear infinite; }
+    @keyframes sync-spin { to { transform:rotate(360deg); } }
+    .record-row { display:flex; align-items:center; justify-content:center; gap:28px; }
+    .record-row .giant { width:98px; height:98px; font-size:54px; }
+    .record-row .state-number { font-size:32px; letter-spacing:1px; }
+    .pair-card { width:100%; display:grid; justify-items:center; gap:12px; }
+    .pair-head { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:900; letter-spacing:1.5px; }
+    .pair-head svg { width:22px; height:22px; stroke:#111; fill:none; stroke-width:2.6; stroke-linecap:round; stroke-linejoin:round; }
+    .code-box { border:3px solid #111; border-radius:12px; padding:10px 18px; font-size:46px; font-weight:900; letter-spacing:3px; line-height:1; }
+    .code-box i { display:inline-block; width:14px; }
+    .pair-hint { font-size:12px; font-weight:800; letter-spacing:.5px; }
+    .state-caption { font-size:13px; font-weight:900; letter-spacing:1.5px; text-transform:uppercase; }
+    .wordmark { font-family:"Marker Felt","Chalkboard SE","Comic Sans MS",cursive; font-size:58px; font-weight:700; letter-spacing:-2px; line-height:.86; transform:rotate(-3deg); }
+    .wordmark span { display:inline-block; border-bottom:3px solid #111; padding:0 7px 11px 2px; }
+    .ready-icon { width:82px; height:82px; }
+    .ready-icon svg { width:100%; height:100%; stroke:#111; fill:none; stroke-width:2.4; stroke-linecap:round; stroke-linejoin:round; }
+    .ready-icon .face-fill { fill:#111; stroke:none; }
+    .progress { width:76%; height:12px; border:2px solid #111; padding:2px; }
+    .progress i { display:block; height:100%; width:42%; background:#111; }
+    .recording .giant { position:relative; }
+    .recording .giant::after { content:''; position:absolute; inset:-4px; border:3px solid #111; border-radius:50%; animation:ring 1.8s steps(3,end) infinite; }
+    .recording .state-symbol { animation:breathe 1.8s steps(3,end) infinite; }
+    @keyframes ring { 0% { transform:scale(1); opacity:1; } 70% { transform:scale(1.22); opacity:1; } 100% { transform:scale(1.22); opacity:0; } }
+    @keyframes breathe { 0%,100% { transform:scale(1); } 50% { transform:scale(.72); } }
+    @keyframes pulse { 0%,100% { transform:scale(.92); } 50% { transform:scale(1.04); } }
+    @keyframes blink { from { opacity:.35; } to { opacity:1; } }
+    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important; } }
+
+    /* Picker chrome — copied from the prototype skill. */
+    .proto-picker { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); z-index:2147483647; display:flex; align-items:center; gap:2px; padding:4px; border-radius:999px; background:rgba(10,10,10,.82); -webkit-backdrop-filter:blur(12px) saturate(1.4); backdrop-filter:blur(12px) saturate(1.4); box-shadow:0 0 0 1px rgba(255,255,255,.08) inset,0 8px 24px rgba(0,0,0,.24),0 2px 6px rgba(0,0,0,.12); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; font-size:13px; line-height:1; -webkit-font-smoothing:antialiased; user-select:none; -webkit-user-select:none; }
+    .proto-picker-highlight { position:absolute; top:4px; left:0; height:28px; border-radius:999px; background:rgba(255,255,255,.12); will-change:transform; }
+    .proto-picker[data-ready] .proto-picker-highlight { transition:transform 250ms cubic-bezier(.23,1,.32,1),width 250ms cubic-bezier(.23,1,.32,1); }
+    @media (prefers-reduced-motion:reduce) { .proto-picker[data-ready] .proto-picker-highlight { transition:none; } }
+    .proto-picker-item { position:relative; display:flex; align-items:center; height:28px; padding:0 12px; border:0; border-radius:999px; background:transparent; color:rgba(255,255,255,.55); font:inherit; cursor:pointer; transition:color 150ms ease-out; }
+    .proto-picker-item:hover { color:rgba(255,255,255,.85); } .proto-picker-item:active { transform:scale(.97); } .proto-picker-item:focus-visible { outline:2px solid rgba(255,255,255,.4); outline-offset:2px; } .proto-picker-item[data-active] { color:#fff; } .proto-picker-divider { width:1px; height:16px; margin:0 4px; background:rgba(255,255,255,.12); } .proto-picker-replay { padding:0 10px; font-size:14px; }
+  </style>
+</head>
+<body>
+  <div id="stage"></div>
+  <nav class="proto-picker" aria-label="Prototype states">
+    <span class="proto-picker-highlight" aria-hidden="true"></span>
+    <button class="proto-picker-item" data-active aria-current="true">Idle</button>
+    <button class="proto-picker-item">Record</button>
+    <button class="proto-picker-item">Saved</button>
+    <button class="proto-picker-item">Sync</button>
+    <button class="proto-picker-item">Pair</button>
+    <span class="proto-picker-divider" aria-hidden="true"></span>
+    <button class="proto-picker-item proto-picker-replay" aria-label="Replay animation (R)">↻</button>
+  </nav>
+  <script>
+    const icon = (name) => ({
+      phone:'<svg viewBox="0 0 24 24"><path d="M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384"/></svg>',
+      wifi:'<svg viewBox="0 0 24 24"><path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.86a10 10 0 0 1 14 0"/><path d="M8.5 16.43a5 5 0 0 1 7 0"/></svg>',
+      battery:'<svg viewBox="0 0 24 24"><rect x="3" y="6" width="17" height="12" rx="2"/><path d="M21 10v4M6 9v6"/></svg>',
+      sd:'<svg viewBox="0 0 24 24"><path d="M22 12H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M6 16h.01"/><path d="M10 16h.01"/></svg>',
+      bluetooth:'<svg viewBox="0 0 24 24"><path d="m7 7 10 10-5 5V2l5 5L7 17"/></svg>',
+      sync:'<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>',
+      clock:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+      check:'<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
+      pair:'<svg viewBox="0 0 24 24"><path d="m8 12 4-4a3 3 0 0 1 4.2 4.2l-2.1 2.1M16 12l-4 4a3 3 0 0 1-4.2-4.2l2.1-2.1"/></svg>'
+    }[name] || '');
+    // Only show capabilities that are currently available. Unavailable services disappear.
+    const statusTop = ({label='FRI 04 OCT', phone=true, wifi=true, sd=true} = {}) => `<div class="top"><div class="status-label">${label}</div><div class="tiny-icons">${wifi ? `<span title="Wi-Fi">${icon('wifi')}</span>` : ''}${phone ? `<span title="Phone relay">${icon('phone')}</span>` : ''}${sd ? `<span title="SD card">${icon('sd')}</span>` : ''}</div></div>`;
+    const persistentInfo = () => `<div class="persistent-info"><div class="clock-block"><div class="clock">9:42<small>AM</small></div></div><div class="notes-summary"><div class="note-count"><span class="note-pair" title="Pending">${icon('clock')}<b>3</b></span><span class="note-pair" title="Synced">${icon('check')}<b>9</b></span></div></div></div>`;
+    const shell = (body, extra='', opts={}) => `<div class="epd ${extra}">${statusTop(opts)}${persistentInfo()}<div class="main">${body}</div></div>`;
+    const idle = () => shell(`<div class="takeover"><div class="wordmark d"><span>circuit</span></div></div>`);
+    const record = () => shell(`<div class="takeover"><div class="record-row"><div class="giant"><span class="state-symbol">●</span></div><div class="state-number">00:18</div></div></div>`, 'recording');
+    const saved = () => shell(`<div class="takeover"><div class="giant">✓</div></div>`);
+    const sync = () => shell(`<div class="takeover"><div class="sync-row"><div class="sync-art">${icon('sync')}</div><div class="state-number">42%</div></div></div>`);
+    const pair = () => `<div class="epd">${statusTop({label:'PAIRING'})}<div class="main"><div class="pair-card"><div class="pair-head">${icon('bluetooth')}PAIR WITH PHONE</div><div class="code-box">123<i></i>456</div><div class="pair-hint">Enter this code in the app</div></div></div></div>`;
+    const variants = [idle,record,saved,sync,pair];
+    const captions = ['Persistent top status row, larger clock/date, and compact note totals.','Persistent context remains visible while recording takes over the lower screen.','Persistent context remains visible while the save confirmation takes over the lower screen.','Persistent context remains visible while sync progress takes over the lower screen.','Dedicated pairing screen: Bluetooth cue, grouped code in a box, and a one-line instruction.'];
+    const stage=document.getElementById('stage'); const picker=document.querySelector('.proto-picker'); const highlight=picker.querySelector('.proto-picker-highlight'); const items=[...picker.querySelectorAll('.proto-picker-item:not(.proto-picker-replay)')]; const replay=picker.querySelector('.proto-picker-replay'); let current=0;
+    function moveHighlight(){const el=items[current];highlight.style.width=el.offsetWidth+'px';highlight.style.transform=`translateX(${el.offsetLeft}px)`;}
+    function mount(i){stage.innerHTML='';requestAnimationFrame(()=>{stage.innerHTML=`<div class="frame"><div class="device">${variants[i]()}</div><div class="caption"><strong>${['Idle','Recording','Saved','Syncing','Pairing'][i]}</strong>${captions[i]}</div></div>`;});}
+    function setActive(i){if(i<0||i>=variants.length)return;current=i;items.forEach((el,j)=>{el.toggleAttribute('data-active',j===i);if(j===i)el.setAttribute('aria-current','true');else el.removeAttribute('aria-current');});moveHighlight();const url=new URL(location);url.searchParams.set('v',i+1);history.replaceState(null,'',url);mount(i);}
+    items.forEach((el,i)=>el.addEventListener('click',()=>setActive(i))); replay.addEventListener('click',()=>mount(current)); window.addEventListener('resize',moveHighlight); document.addEventListener('keydown',e=>{if(/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)||e.target.isContentEditable||e.metaKey||e.ctrlKey||e.altKey)return;const n=parseInt(e.key,10);if(n>=1&&n<=variants.length)setActive(n-1);else if(e.key==='ArrowRight')setActive((current+1)%variants.length);else if(e.key==='ArrowLeft')setActive((current-1+variants.length)%variants.length);else if(e.key==='r'||e.key==='R')mount(current);});
+    setActive((parseInt(new URLSearchParams(location.search).get('v'),10)||1)-1);requestAnimationFrame(()=>requestAnimationFrame(()=>picker.setAttribute('data-ready','')));
+  </script>
+</body>
+</html>

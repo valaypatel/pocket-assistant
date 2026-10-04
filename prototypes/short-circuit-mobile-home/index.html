@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Short-Circuit home explorations</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #efebe5; color: #15171b; }
+    #stage { min-height: 100vh; display: grid; place-items: center; padding: 28px 20px 96px; }
+    .phone { width: min(100%, 390px); min-height: 780px; overflow: hidden; border-radius: 34px; background: #f7f7f5; box-shadow: 0 24px 70px #252b351c, 0 2px 10px #252b3518; position: relative; }
+    .safe { padding: 22px 20px 100px; }
+    .top { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 25px; }
+    .eyebrow { color: #73767e; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 4px 0 0; font-size: 30px; line-height: 1; letter-spacing: -.06em; }
+    h2 { margin: 0; font-size: 18px; letter-spacing: -.03em; }
+    p { margin: 0; }
+    .device { display: inline-flex; align-items: center; gap: 8px; border: 0; padding: 9px 11px; border-radius: 14px; color: #30333a; background: #e8e9e6; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+    .device i { width: 8px; height: 8px; border-radius: 50%; background: #3b9a68; box-shadow: 0 0 0 4px #3b9a6820; }
+    .device.off i { background: #a6a9af; box-shadow: none; }
+    .device .icon { width: 14px; height: 14px; stroke-width: 2.4; }
+    .device .wifi-icon { color: #299b68; }
+    .device .relay-icon { color: #e58a37; }
+    .battery { position: relative; display: inline-flex; align-items: center; width: 20px; height: 11px; padding: 2px; border: 1.7px solid currentColor; border-radius: 3px; }
+    .battery::after { content: ""; position: absolute; top: 3px; right: -4px; width: 2px; height: 4px; border-radius: 0 2px 2px 0; background: currentColor; }
+    .battery-fill { display: block; width: 75%; height: 100%; border-radius: 1px; background: currentColor; }
+    .summary { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 25px; }
+    .stat { min-height: 92px; padding: 15px; border-radius: 20px; background: #e9ebe7; }
+    .stat strong { display: block; margin-top: 14px; font-size: 27px; letter-spacing: -.06em; }
+    .stat small { color: #777a80; font-size: 12px; font-weight: 650; }
+    .section-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+    .link { border: 0; background: none; color: #6b55d9; font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; }
+    .note-list { display: grid; gap: 10px; }
+    .note { display: grid; grid-template-columns: 40px 1fr auto; align-items: center; gap: 12px; padding: 13px; border: 1px solid #e6e7e4; border-radius: 18px; background: #fff; }
+    .note-icon { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 13px; background: #ece8ff; color: #6956d7; font-size: 18px; }
+    .note h3 { margin: 0 0 3px; font-size: 14px; letter-spacing: -.02em; }
+    .note p { color: #85878d; font-size: 11px; line-height: 1.35; }
+    .play { width: 31px; height: 31px; border: 0; border-radius: 50%; background: #181a1d; color: #fff; cursor: pointer; }
+    .play.active { background: #6b55d9; }
+    .bottom { position: absolute; right: 18px; bottom: 18px; left: 18px; display: flex; align-items: center; justify-content: space-between; padding: 8px 9px 8px 14px; border-radius: 22px; background: #17191d; color: #fff; }
+    .bottom span { font-size: 12px; font-weight: 700; }
+    .record { display: flex; align-items: center; gap: 8px; border: 0; border-radius: 15px; padding: 10px 13px; background: #e8ddff; color: #3d2a9a; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; }
+    .record b { width: 9px; height: 9px; border-radius: 50%; background: #7058eb; }
+    .app-nav { position: absolute; right: 18px; bottom: 18px; left: 18px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; padding: 5px; border-radius: 17px; background: #fff; box-shadow: 0 8px 24px #252b3512; }
+    .app-nav button { border: 0; border-radius: 12px; padding: 9px 3px; background: transparent; color: #92939a; font: inherit; font-size: 10px; font-weight: 750; cursor: pointer; }
+    .app-nav .icon { width: 15px; height: 15px; vertical-align: middle; stroke-width: 2.2; }
+    .app-nav button.active { background: #f0edf9; color: #6b55d9; }
+    .dense .app-nav { background: #1b1e24; box-shadow: none; }
+    .dense .app-nav button.active { background: #353946; color: #fff; }
+    .dense .app-nav button { color: #8e929d; }
+    .assistant .app-nav button.active { background: #fff0e8; color: #d85b3a; }
+    .circuit-record-panel { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 22px; padding: 12px 13px 12px 15px; border-radius: 18px; background: #17191d; color: #fff; }
+    .circuit-record-panel strong { font-size: 13px; }
+    .app-page h1 { margin: 8px 0 8px; }
+    .app-page .page-intro { color: #827970; font-size: 12px; line-height: 1.45; margin-bottom: 20px; }
+    .app-page .note { cursor: pointer; }
+    .todo { display: flex; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid #ebe5de; }
+    .todo input { width: 19px; height: 19px; accent-color: #f05b3d; }
+    .todo strong { display: block; font-size: 14px; }
+    .todo small { display: block; margin-top: 3px; color: #8e857e; font-size: 11px; }
+    .record-page { text-align: center; padding-top: 74px; }
+    .record-orb { width: 132px; height: 132px; display: grid; place-items: center; margin: 0 auto 24px; border: 1px solid #f05b3d; border-radius: 50%; box-shadow: 0 0 0 16px #f05b3d12, 0 0 0 32px #f05b3d08; color: #f05b3d; font-size: 38px; }
+    .record-page h1 { margin-bottom: 9px; }
+    .record-page p { color: #827970; font-size: 12px; }
+    .stop-record { margin-top: 32px; border: 0; border-radius: 15px; padding: 13px 24px; background: #f05b3d; color: #fff; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; }
+    .toast { position: fixed; top: 20px; left: 50%; z-index: 4; transform: translateX(-50%); display: none; padding: 10px 14px; border-radius: 99px; background: #17191d; color: #fff; font-size: 12px; font-weight: 700; }
+    .toast.show { display: block; animation: pop .22s ease-out; }
+    @keyframes pop { from { opacity: 0; transform: translate(-50%, -6px); } to { opacity: 1; transform: translate(-50%, 0); } }
+    @media (prefers-reduced-motion: reduce) { .toast.show { animation: none; } }
+
+    /* Dense */
+    .dense { background: #101217; color: #f6f7f8; }
+    .dense .safe { padding-top: 24px; }
+    .dense .eyebrow, .dense .stat small, .dense .note p { color: #8e929d; }
+    .dense .device { color: #f6f7f8; background: #252830; }
+    .dense .summary { grid-template-columns: repeat(3, 1fr); gap: 7px; }
+    .dense .stat { min-height: 80px; padding: 12px; background: #1d2027; }
+    .dense .stat strong { margin-top: 12px; font-size: 23px; }
+    .dense .note { border-color: #2b2f38; background: #1b1e24; }
+    .dense .note-icon { background: #2a273e; }
+    .dense .play { background: #eaecef; color: #17191d; }
+    .dense .bottom { background: #f1f2f4; color: #181a1d; }
+    .dense .record { background: #d8f26b; color: #263000; }
+    .dense .record b { background: #263000; }
+    .tabs { display: flex; gap: 5px; padding: 4px; margin-bottom: 18px; border-radius: 13px; background: #1c1f26; }
+    .tabs button { flex: 1; border: 0; border-radius: 10px; padding: 9px; background: none; color: #8e929d; font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; }
+    .tabs button.active { background: #353946; color: #fff; }
+
+    /* Assistant */
+    .assistant { background: #fffdf9; }
+    .assistant .hero { padding: 19px; border-radius: 24px; margin-bottom: 22px; background: #f4e8d9; }
+    .assistant .hero strong { display: block; margin: 9px 0 5px; font-size: 25px; letter-spacing: -.06em; }
+    .assistant .hero p { color: #7e7167; font-size: 12px; line-height: 1.45; }
+    .assistant .summary { grid-template-columns: 1fr 1fr 1fr; }
+    .assistant .stat { min-height: 77px; padding: 12px; background: #f2f0eb; }
+    .assistant .stat strong { margin-top: 10px; font-size: 22px; }
+    .assistant .note-icon { background: #ffe8d7; color: #d46a36; }
+    .assistant .record { background: #f05b3d; color: #fff; }
+    .assistant .record b { background: #fff; }
+    .assistant .device { background: #e8e9e6; }
+    .settings-link { display: flex; align-items: center; justify-content: space-between; width: 100%; margin-top: 12px; padding: 11px 0 0; border: 0; border-top: 1px solid #decfbe; background: none; color: #6e5e50; font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; }
+    .settings-link span:last-child { font-size: 17px; }
+    .settings-view h1 { margin-bottom: 7px; }
+    .settings-subtitle { color: #827970; font-size: 12px; line-height: 1.4; margin-bottom: 23px; }
+    .settings-group { margin-bottom: 20px; }
+    .settings-label { display: block; margin-bottom: 8px; color: #77716c; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 0; border-bottom: 1px solid #ebe5de; font-size: 14px; }
+    button.setting-row { width: 100%; border: 0; border-bottom: 1px solid #ebe5de; border-radius: 0; background: transparent; color: #15171b; font: inherit; text-align: left; cursor: pointer; appearance: none; }
+    button.setting-row:hover { background: #faf8f5; }
+    .setting-row small { display: block; margin-top: 3px; color: #8e857e; font-size: 11px; }
+    .chevron { color: #9f968d; font-size: 20px; }
+    .provider { display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 18px; background: #f4eee7; }
+    .provider-mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 11px; background: #fff; color: #db5b37; font-weight: 900; }
+    .provider strong { display: block; font-size: 14px; }
+    .provider small { color: #8e857d; font-size: 11px; }
+    .switch { width: 38px; height: 23px; padding: 3px; border: 0; border-radius: 99px; background: #f05b3d; cursor: pointer; }
+    .switch i { display: block; width: 17px; height: 17px; border-radius: 50%; background: #fff; transform: translateX(15px); transition: transform 180ms ease-out; }
+    .switch.off { background: #d4cec7; }
+    .switch.off i { transform: translateX(0); }
+    .back { border: 0; padding: 0; background: none; color: #6b55d9; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; }
+    .circuit-card { display: flex; align-items: center; gap: 13px; margin: 8px 0 24px; padding: 17px; border-radius: 21px; background: #e8f0e9; }
+    .circuit-mark { width: 43px; height: 43px; display: grid; place-items: center; border-radius: 14px; background: #26342a; color: #e5f5bc; font-size: 20px; font-weight: 900; }
+    .circuit-card strong { display: block; font-size: 17px; letter-spacing: -.03em; }
+    .circuit-card small { color: #6e7d72; font-size: 11px; }
+    .device-row { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 12px; padding: 14px 0; border: 0; border-bottom: 1px solid #e7e1da; background: none; color: #332d28; font: inherit; font-size: 14px; text-align: left; }
+    .device-row small { display: block; margin-top: 3px; color: #8e857e; font-size: 11px; }
+    .device-row .value { color: #6d5e51; font-size: 12px; font-weight: 750; text-align: right; }
+    .device-action { width: 100%; margin-top: 20px; border: 0; border-radius: 14px; padding: 13px; background: #eee9e3; color: #604f42; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; }
+    .device-action.danger { color: #b34732; background: #fff0eb; }
+    .wifi-list { display: grid; gap: 8px; margin-bottom: 18px; }
+    .wifi-network { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 13px; border: 1px solid #ebe5de; border-radius: 15px; background: #fff; color: #332d28; font: inherit; text-align: left; cursor: pointer; }
+    .wifi-network.selected { border-color: #f05b3d; box-shadow: 0 0 0 2px #f05b3d18; }
+    .wifi-network span { display: block; color: #8e857e; font-size: 11px; margin-top: 3px; }
+    .wifi-signal { color: #6e5e50; font-size: 15px; }
+    .field { width: 100%; margin: 8px 0 13px; padding: 13px; border: 1px solid #e4ddd5; border-radius: 13px; background: #fff; color: #332d28; font: inherit; font-size: 13px; outline: none; }
+    .field:focus { border-color: #f05b3d; box-shadow: 0 0 0 3px #f05b3d18; }
+    .check-row { display: flex; align-items: center; gap: 9px; color: #6e6259; font-size: 12px; }
+    .check-row input { accent-color: #f05b3d; }
+
+    /* Picker: fixed prototype chrome */
+    .proto-picker { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 2147483647; display: flex; align-items: center; gap: 2px; padding: 4px; border-radius: 999px; background: rgba(10, 10, 10, 0.82); -webkit-backdrop-filter: blur(12px) saturate(1.4); backdrop-filter: blur(12px) saturate(1.4); box-shadow: 0 0 0 1px rgba(255,255,255,.08) inset, 0 8px 24px rgba(0,0,0,.24), 0 2px 6px rgba(0,0,0,.12); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; line-height: 1; -webkit-font-smoothing: antialiased; user-select: none; -webkit-user-select: none; }
+    .proto-picker-highlight { position: absolute; top: 4px; left: 0; height: 28px; border-radius: 999px; background: rgba(255,255,255,.12); will-change: transform; }
+    .proto-picker[data-ready] .proto-picker-highlight { transition: transform 250ms cubic-bezier(.23,1,.32,1), width 250ms cubic-bezier(.23,1,.32,1); }
+    .proto-picker-item { position: relative; display: flex; align-items: center; height: 28px; padding: 0 12px; border: 0; border-radius: 999px; background: transparent; color: rgba(255,255,255,.55); font: inherit; cursor: pointer; transition: color 150ms ease-out; }
+    .proto-picker-item:hover { color: rgba(255,255,255,.85); }
+    .proto-picker-item:active { transform: scale(.97); }
+    .proto-picker-item:focus-visible { outline: 2px solid rgba(255,255,255,.4); outline-offset: 2px; }
+    .proto-picker-item[data-active] { color: #fff; }
+    .proto-picker-divider { width: 1px; height: 16px; margin: 0 4px; background: rgba(255,255,255,.12); }
+    .proto-picker-replay { padding: 0 10px; font-size: 14px; }
+    @media (prefers-reduced-motion: reduce) { .proto-picker[data-ready] .proto-picker-highlight { transition: none; } }
+  </style>
+</head>
+<body>
+  <div id="stage"></div><div class="toast" id="toast"></div>
+  <nav class="proto-picker" aria-label="Prototype variants">
+    <span class="proto-picker-highlight" aria-hidden="true"></span>
+    <button class="proto-picker-item" data-active aria-current="true">Notes-first</button>
+    <button class="proto-picker-item">Dense</button>
+    <button class="proto-picker-item">Assistant</button>
+    <span class="proto-picker-divider" aria-hidden="true"></span>
+    <button class="proto-picker-item proto-picker-replay" aria-label="Replay animation (R)">↻</button>
+  </nav>
+  <script>
+    const toast = document.getElementById('toast');
+    const icons = {
+      home: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>',
+      notes: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v6h6M8 13h8M8 17h6"/></svg>',
+      tasks: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m8 12 2 2 4-4"/></svg>',
+      settings: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>',
+      wifi: '<svg class="icon wifi-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13a10 10 0 0 1 14 0M2 8.5a15 15 0 0 1 20 0M8.5 17a5 5 0 0 1 7 0M12 21h.01"/></svg>',
+      phone: '<svg class="icon relay-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="20" x="5" y="2" rx="2"/><path d="M12 18h.01"/></svg>',
+      bot: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>',
+    };
+    function deviceChip() { return `<button class="device" data-action="device" title="Open Circuit settings">${icons.wifi}${icons.phone}<span class="battery"><span class="battery-fill"></span></span><span>Circuit</span></button>`; }
+    let toastTimer;
+    function notify(message) { toast.textContent = message; toast.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove('show'), 1300); }
+    function common(kind, inner) { return `<main class="phone ${kind}"><div class="safe">${inner}</div><nav class="app-nav"><button class="active" data-action="home">${icons.home}<br>Home</button><button data-action="notes">${icons.notes}<br>Notes</button><button data-action="tasks">${icons.tasks}<br>Tasks</button><button data-action="settings">${icons.settings}<br>Settings</button></nav></main>`; }
+    const variants = [
+      () => common('', `<header class="top"><div><div class="eyebrow">Friday · 4 October</div><h1>Good morning.</h1></div>${deviceChip()}</header><section class="summary"><div class="stat"><small>Notes</small><strong>12</strong></div><div class="stat"><small>To do</small><strong>3</strong></div></section><div class="section-row"><h2>Recent notes</h2><button class="link" data-action="notes">See all</button></div><section class="note-list"><article class="note" data-action="note"><div class="note-icon">◒</div><div><h3>Ideas for the weekend</h3><p>Today · 02:14 · Transcribed</p></div><button class="play" data-action="play">▶</button></article><article class="note" data-action="note"><div class="note-icon">✓</div><div><h3>Call the dentist</h3><p>Yesterday · Reminder created</p></div><button class="play" data-action="play">▶</button></article><article class="note" data-action="note"><div class="note-icon">✦</div><div><h3>Project Circuit</h3><p>Yesterday · Needs review</p></div><button class="play" data-action="play">▶</button></article></section>`),
+      () => common('dense', `<header class="top"><div><div class="eyebrow">Short-Circuit</div><h1>Inbox</h1></div>${deviceChip()}</header><nav class="tabs"><button class="active">All 12</button><button data-action="tasks">To do 3</button><button>Saved 9</button></nav><section class="summary"><div class="stat"><small>New</small><strong>04</strong></div><div class="stat"><small>Todo</small><strong>03</strong></div><div class="stat"><small>AI</small><strong>09</strong></div></section><div class="section-row"><h2>Today</h2><button class="link" data-action="notes">All notes</button></div><section class="note-list"><article class="note" data-action="note"><div class="note-icon">●</div><div><h3>Ideas for the weekend</h3><p>02:14 · Ready to review</p></div><button class="play" data-action="play">▶</button></article><article class="note" data-action="note"><div class="note-icon">□</div><div><h3>Call the dentist</h3><p>Reminder · Tomorrow 10:00</p></div><button class="play" data-action="play">▶</button></article><article class="note" data-action="note"><div class="note-icon">↗</div><div><h3>Project Circuit</h3><p>Synced · 18:42 yesterday</p></div><button class="play" data-action="play">▶</button></article></section>`),
+      () => common('assistant', `<header class="top"><div><div class="eyebrow">Friday · 4 October</div><h1>Hey, Valay.</h1></div>${deviceChip()}</header><section class="hero"><div class="eyebrow">Your day at a glance</div><strong>3 things need you.</strong><p>Two notes are ready to review and one reminder is due tomorrow.</p></section><section class="summary"><div class="stat"><small>Notes</small><strong>12</strong></div><div class="stat"><small>To do</small><strong>3</strong></div><div class="stat"><small>Synced</small><strong>9</strong></div></section><div class="section-row"><h2>Worth a look</h2><button class="link" data-action="notes">Open inbox</button></div><section class="note-list"><article class="note" data-action="note"><div class="note-icon">✦</div><div><h3>Ideas for the weekend</h3><p>I found a possible action in this note.</p></div><button class="play" data-action="play">▶</button></article><article class="note" data-action="note"><div class="note-icon">✓</div><div><h3>Call the dentist</h3><p>Reminder · Tomorrow at 10:00</p></div><button class="play" data-action="play">▶</button></article></section>`)
+    ];
+    const stage = document.getElementById('stage'); const picker = document.querySelector('.proto-picker'); const highlight = picker.querySelector('.proto-picker-highlight'); const items = [...picker.querySelectorAll('.proto-picker-item:not(.proto-picker-replay)')]; const replay = picker.querySelector('.proto-picker-replay'); let current = 0;
+    function moveHighlight() { const el = items[current]; highlight.style.width = el.offsetWidth + 'px'; highlight.style.transform = `translateX(${el.offsetLeft}px)`; }
+    function settingsMarkup() { return `<div class="settings-view"><div class="section-row"><button class="back" data-action="back">‹ Home</button><span class="eyebrow">App settings</span></div><h1>AI settings</h1><p class="settings-subtitle">Choose how Short-Circuit transcribes notes and turns them into useful actions.</p><div class="settings-group"><span class="settings-label">AI provider</span><div class="provider"><div class="provider-mark">${icons.bot}</div><div><strong>Google Gemini</strong><small>Connected · API key saved</small></div><span class="chevron">›</span></div></div><div class="settings-group"><span class="settings-label">Gemini configuration</span><button class="setting-row" data-action="model"><div>Model<small>gemini-3.5-flash-lite</small></div><span class="chevron">›</span></button><button class="setting-row" data-action="api-key"><div>API key<small>••••••••••••••••••••</small></div><span class="chevron">›</span></button></div><div class="settings-group"><span class="settings-label">What AI can do</span><div class="setting-row"><div>Transcribe new notes<small>Start automatically after sync</small></div><button class="switch" data-action="toggle"><i></i></button></div><div class="setting-row"><div>Detect reminders & tasks<small>Create suggestions from transcripts</small></div><button class="switch" data-action="toggle"><i></i></button></div></div></div>`; }
+    function modelMarkup() { return `<div class="settings-view"><div class="section-row"><button class="back" data-action="settings-back">‹ AI settings</button><span class="eyebrow">Gemini</span></div><h1>Choose model</h1><p class="settings-subtitle">Use the lightweight model for fast, affordable note processing.</p><div class="wifi-list"><button class="wifi-network selected" data-action="model-select"><div><strong>gemini-3.5-flash-lite</strong><span>Recommended · Fast transcription and categorisation</span></div><b class="value">✓</b></button><button class="wifi-network" data-action="model-select"><div><strong>gemini-3.5-pro</strong><span>More capable · Slower and higher usage</span></div><b class="chevron">›</b></button></div></div>`; }
+    function apiKeyMarkup() { return `<div class="settings-view"><div class="section-row"><button class="back" data-action="settings-back">‹ AI settings</button><span class="eyebrow">Gemini</span></div><h1>API key</h1><p class="settings-subtitle">Your key is stored locally in the app configuration and is only used for Gemini requests.</p><label class="settings-label" for="api-key">Gemini API key</label><input class="field" id="api-key" type="text" value="AI••••••••••••••••9xYz" aria-label="Gemini API key"><button class="device-action" data-action="save-api">Save API key</button></div>`; }
+    function notesMarkup() { return `<div class="app-page"><div class="section-row"><button class="back" data-action="home">‹ Home</button><span class="eyebrow">Library</span></div><h1>All notes</h1><p class="page-intro">Your recordings, transcriptions, and saved ideas in one place.</p><div class="note-list"><article class="note" data-action="note"><div class="note-icon">◒</div><div><h3>Ideas for the weekend</h3><p>Today · Transcribed · Synced</p></div><button class="play" data-action="play">▶</button></article><article class="note" data-action="note"><div class="note-icon">✓</div><div><h3>Call the dentist</h3><p>Yesterday · Reminder created</p></div><button class="play" data-action="play">▶</button></article><article class="note" data-action="note"><div class="note-icon">✦</div><div><h3>Project Circuit</h3><p>Yesterday · Needs review</p></div><button class="play" data-action="play">▶</button></article><article class="note" data-action="note"><div class="note-icon">◌</div><div><h3>Voice memo 04</h3><p>30 Sep · Not transcribed</p></div><button class="play" data-action="play">▶</button></article></div></div>`; }
+    function tasksMarkup() { return `<div class="app-page"><div class="section-row"><button class="back" data-action="home">‹ Home</button><span class="eyebrow">Actions</span></div><h1>Tasks</h1><p class="page-intro">Reminders detected from your notes. Check them off as you go.</p><div class="settings-group"><span class="settings-label">Today</span><label class="todo"><input type="checkbox"><span><strong>Call the dentist</strong><small>Tomorrow · 10:00</small></span></label><label class="todo"><input type="checkbox"><span><strong>Buy a microSD card</strong><small>From “Circuit upgrades”</small></span></label><label class="todo"><input type="checkbox" checked><span><strong>Test Gemini transcription</strong><small>Completed today</small></span></label></div><button class="device-action" data-action="add-task">+ Add task</button></div>`; }
+    function noteMarkup() { return `<div class="app-page"><div class="section-row"><button class="back" data-action="notes">‹ Notes</button><span class="eyebrow">Today · 02:14</span></div><h1>Ideas for the weekend</h1><p class="page-intro">Transcribed by Gemini · Synced from Circuit</p><div class="settings-group"><span class="settings-label">Transcript</span><div class="provider"><div><strong>“Plan a relaxed weekend. Look for a short hike, then book dinner somewhere new.”</strong><small>English · 00:34 audio</small></div></div></div><div class="settings-group"><span class="settings-label">Detected action</span><div class="device-row"><div>Plan a short hike<small>Suggested reminder</small></div><span class="value">Add task</span></div></div><button class="device-action" data-action="play-note">▶ Play recording</button><button class="device-action danger" data-action="delete-note">Delete note</button></div>`; }
+    function recordingMarkup() { return `<div class="record-page"><button class="back" data-action="home">‹ Cancel</button><div class="record-orb">●</div><h1>Recording on Circuit</h1><p>Speak naturally. Press stop when you’re done.</p><button class="stop-record" data-action="stop-record">Stop recording</button></div>`; }
+    function circuitMarkup() { return `<div class="settings-view"><div class="section-row"><button class="back" data-action="back">‹ Home</button><span class="eyebrow">Device settings</span></div><div class="circuit-card"><div class="circuit-mark">C</div><div><strong>Circuit</strong><small>Connected via Short-Circuit</small></div></div><div class="settings-group"><span class="settings-label">Device status</span><div class="device-row"><div>Connection<small>Bluetooth relay</small></div><span class="value">Online</span></div><div class="device-row"><div>Battery<small>Last reported by Circuit</small></div><span class="value">82%</span></div><div class="device-row"><div>Storage<small>MicroSD card</small></div><span class="value">Available</span></div></div><div class="settings-group"><span class="settings-label">Connectivity</span><button class="device-row" data-action="wifi"><div>Wi‑Fi<small>Saved networks and setup</small></div><span class="chevron">›</span></button><div class="device-row"><div>Phone relay<small>Background connection</small></div><span class="value">On</span></div></div><div class="settings-group"><span class="settings-label">About Circuit</span><div class="device-row"><div>Firmware<small>Installed version</small></div><span class="value">0.1.0</span></div><div class="device-row"><div>Device ID<small>ESP32-S3</small></div><span class="value">70:04:1D…</span></div></div><div class="circuit-record-panel"><strong>Short-Circuit</strong><button class="record" data-action="record"><b></b> Record</button></div><button class="device-action" data-action="rename">Rename Circuit</button><button class="device-action danger" data-action="forget">Forget this Circuit</button></div>`; }
+    function wifiMarkup() { return `<div class="settings-view"><div class="section-row"><button class="back" data-action="device-back">‹ Circuit</button><span class="eyebrow">Wi‑Fi setup</span></div><h1>Connect Circuit</h1><p class="settings-subtitle">Choose a saved network or scan for nearby Wi‑Fi. Circuit will prefer Wi‑Fi when it is available.</p><div class="section-row"><span class="settings-label" style="margin:0">Nearby networks</span><button class="link" data-action="scan">Scan again</button></div><div class="wifi-list"><button class="wifi-network selected" data-action="network"><div><strong>Home Wi‑Fi</strong><span>Connected · WPA2</span></div><b class="wifi-signal">)))</b></button><button class="wifi-network" data-action="network"><div><strong>Studio-5G</strong><span>Strong signal · WPA2</span></div><b class="wifi-signal">)))</b></button><button class="wifi-network" data-action="network"><div><strong>Pixel hotspot</strong><span>Medium signal · WPA3</span></div><b class="wifi-signal">))</b></button></div><button class="device-action" data-action="hidden-wifi">+ Add hidden network</button><label class="settings-label" for="wifi-password">Password</label><input class="field" id="wifi-password" type="password" value="••••••••" aria-label="Wi-Fi password"><button class="device-action" data-action="save-wifi">Save Wi‑Fi</button></div>`; }
+    function hiddenWifiMarkup() { return `<div class="settings-view"><div class="section-row"><button class="back" data-action="wifi-back">‹ Wi‑Fi</button><span class="eyebrow">Hidden network</span></div><h1>Add hidden Wi‑Fi</h1><p class="settings-subtitle">Enter the network name exactly as configured on your router.</p><label class="settings-label" for="wifi-name">Network name (SSID)</label><input class="field" id="wifi-name" value="My hidden network" aria-label="Network name"><label class="settings-label" for="hidden-password">Password</label><input class="field" id="hidden-password" type="password" value="••••••••" aria-label="Hidden Wi-Fi password"><label class="check-row"><input type="checkbox" checked> Hidden network</label><button class="device-action" data-action="save-wifi">Save hidden Wi‑Fi</button></div>`; }
+    function setNavActive(name) { const buttons = stage.querySelectorAll('.app-nav button'); buttons.forEach(button => button.classList.toggle('active', button.dataset.action === name)); }
+    function showPage(html, nav = null) { stage.querySelector('.safe').innerHTML = html; if (nav) setNavActive(nav); else stage.querySelectorAll('.app-nav button').forEach(button => button.classList.remove('active')); wire(); }
+    function wire() { stage.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', event => { const action = el.dataset.action; if (action === 'play') event.stopPropagation(); if (action === 'home') { mount(current); } else if (action === 'notes') { showPage(notesMarkup(), 'notes'); } else if (action === 'tasks') { showPage(tasksMarkup(), 'tasks'); } else if (action === 'note') { showPage(noteMarkup()); } else if (action === 'record') { showPage(recordingMarkup()); } else if (action === 'stop-record') { notify('Note saved to Circuit'); setTimeout(() => mount(current), 900); } else if (action === 'settings') { showPage(settingsMarkup(), 'settings'); } else if (action === 'model') { showPage(modelMarkup()); } else if (action === 'api-key') { showPage(apiKeyMarkup()); } else if (action === 'settings-back') { showPage(settingsMarkup(), 'settings'); } else if (action === 'model-select') { notify('Model selected'); } else if (action === 'save-api') { notify('API key saved'); } else if (action === 'device') { showPage(circuitMarkup()); } else if (action === 'wifi') { showPage(wifiMarkup()); } else if (action === 'hidden-wifi') { showPage(hiddenWifiMarkup()); } else if (action === 'wifi-back') { showPage(wifiMarkup()); } else if (action === 'device-back') { showPage(circuitMarkup()); } else if (action === 'back') { mount(current); } else if (action === 'network') { stage.querySelectorAll('.wifi-network').forEach(item => item.classList.remove('selected')); el.classList.add('selected'); notify('Network selected'); } else if (action === 'scan') notify('Scanning for Wi‑Fi…'); else if (action === 'save-wifi') notify('Wi‑Fi saved to Circuit'); else if (action === 'toggle') { el.classList.toggle('off'); notify(el.classList.contains('off') ? 'Setting disabled' : 'Setting enabled'); } else if (action === 'play-note') notify('Playing recording'); else if (action === 'delete-note') { notify('Note deleted'); setTimeout(() => showPage(notesMarkup(), 'notes'), 650); } else if (action === 'add-task') notify('New task composer'); else if (action === 'play') { el.classList.toggle('active'); el.textContent = el.classList.contains('active') ? '❚❚' : '▶'; notify(el.classList.contains('active') ? 'Playing note' : 'Playback paused'); } else if (action === 'rename') notify('Rename Circuit'); else if (action === 'forget') notify('Forget requires confirmation'); else notify(action === 'all' ? 'Opening all notes' : 'Filter ready'); })); }
+    function mount(i) { stage.innerHTML = ''; requestAnimationFrame(() => { stage.innerHTML = variants[i](); wire(); }); }
+    function setActive(i) { if (i < 0 || i >= variants.length) return; current = i; items.forEach((el,j) => { el.toggleAttribute('data-active', j === i); if (j === i) el.setAttribute('aria-current','true'); else el.removeAttribute('aria-current'); }); moveHighlight(); const url = new URL(location); url.searchParams.set('v', i + 1); history.replaceState(null,'',url); mount(i); }
+    items.forEach((el,i) => el.addEventListener('click', () => setActive(i))); replay.addEventListener('click', () => mount(current)); window.addEventListener('resize', moveHighlight);
+    document.addEventListener('keydown', e => { if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable || e.metaKey || e.ctrlKey || e.altKey) return; const n = parseInt(e.key,10); if (n >= 1 && n <= variants.length) setActive(n-1); else if (e.key === 'ArrowRight') setActive((current+1)%variants.length); else if (e.key === 'ArrowLeft') setActive((current-1+variants.length)%variants.length); else if (e.key === 'r' || e.key === 'R') mount(current); });
+    setActive((parseInt(new URLSearchParams(location.search).get('v'),10) || 1)-1); requestAnimationFrame(() => requestAnimationFrame(() => picker.setAttribute('data-ready','')));
+  </script>
+</body>
+</html>
