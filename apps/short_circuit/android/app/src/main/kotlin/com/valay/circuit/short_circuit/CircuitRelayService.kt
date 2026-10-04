@@ -17,15 +17,34 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
+import java.io.File
+import java.io.IOException
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
+import javax.net.ssl.HostnameVerifier
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.X509TrustManager
+import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
+import org.json.JSONArray
 import java.util.concurrent.Executors
 
 class CircuitRelayService : Service() {
@@ -43,7 +62,26 @@ class CircuitRelayService : Service() {
         @Volatile private var activeService: CircuitRelayService? = null
         @Volatile var wifiNetworks: List<String> = emptyList()
         @Volatile var audioStatus: String? = null
+        @Volatile var wifiStatus: String? = null
+        @Volatile private var latestSyncedFile: String? = null
+        @Volatile private var audioStatusListener: ((String) -> Unit)? = null
         fun writeToCircuit(value: String): Boolean = activeService?.writeCommand(value) ?: false
+        fun playSyncedRecording(path: String): Boolean = activeService?.playRecording(path) ?: false
+        fun playLatestSyncedRecording(): Boolean = latestSyncedFile?.let(::playSyncedRecording) ?: false
+        fun clearAudio(): Boolean = activeService?.clearAudioFiles() ?: false
+        /** Synced note files as "path|epochSeconds", oldest first. */
+        fun syncedNotes(context: Context): List<String> = context.filesDir.listFiles()
+            ?.filter { it.name.startsWith("circuit-note-") && it.name.endsWith(".wav") }
+            ?.sortedBy { it.name }
+            ?.map { "${it.absolutePath}|${it.name.removePrefix("circuit-note-").substringBefore('-').toLongOrNull() ?: 0}" }
+            ?: emptyList()
+        fun setAudioStatusListener(listener: ((String) -> Unit)?) {
+            audioStatusListener = listener
+        }
+        private fun publishAudioStatus(status: String) {
+            audioStatus = status
+            audioStatusListener?.invoke(status)
+        }
     }
 
     private val executor = Executors.newSingleThreadExecutor()
@@ -54,6 +92,17 @@ class CircuitRelayService : Service() {
     private var gatt: BluetoothGatt? = null
     private var command: BluetoothGattCharacteristic? = null
     private var relayReady = false
+    private val homeStatusRunnable = object : Runnable {
+        override fun run() {
+            if (relayReady) sendHomeStatus()
+            reconnectHandler.postDelayed(this, 30_000)
+        }
+    }
+    private var syncOutput: FileOutputStream? = null
+    private var syncFile: File? = null
+    private var syncExpectedBytes = 0L
+    private var syncReceivedBytes = 0L
+    private var syncCompleteStatus: String? = null
     private val reconnectRunnable = Runnable { circuitAddress?.let(::connect) }
     private val setupTimeout = Runnable {
         gatt?.let { failConnection(it, "Circuit setup timed out") }
@@ -98,10 +147,12 @@ class CircuitRelayService : Service() {
         shouldReconnect = false
         reconnectHandler.removeCallbacks(reconnectRunnable)
         reconnectHandler.removeCallbacks(setupTimeout)
+        reconnectHandler.removeCallbacks(homeStatusRunnable)
         unregisterReceiver(bondReceiver)
         if (activeService === this) activeService = null
         relayStatus = "Stopped"
         gatt?.close()
+        abandonAudioSync()
         executor.shutdownNow()
         super.onDestroy()
     }
@@ -169,10 +220,16 @@ class CircuitRelayService : Service() {
                 reconnectDelayMs = 1000L
                 gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
                 setRelayStatus("Preparing secure Circuit relay…")
-                if (!gatt.discoverServices()) failConnection(gatt, "Could not discover Circuit services")
+                if (!gatt.requestMtu(185) && !gatt.discoverServices()) {
+                    failConnection(gatt, "Could not discover Circuit services")
+                }
             } else {
                 failConnection(gatt, "Circuit disconnected")
             }
+        }
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (this@CircuitRelayService.gatt !== gatt) return
+            if (!gatt.discoverServices()) failConnection(gatt, "Could not discover Circuit services")
         }
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
@@ -199,7 +256,9 @@ class CircuitRelayService : Service() {
                 failConnection(gatt, "Circuit notification descriptor was not found")
                 return
             }
-            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            // Status uses notifications and the binary audio stream uses
+            // confirmed indications, so retain both subscriptions.
+            descriptor.value = byteArrayOf(0x03, 0x00)
             if (!gatt.writeDescriptor(descriptor)) failConnection(gatt, "Could not subscribe to Circuit")
         }
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
@@ -208,17 +267,46 @@ class CircuitRelayService : Service() {
                 failConnection(gatt, "Circuit notification subscription failed")
                 return
             }
+            if (descriptor.characteristic.uuid != relayUuid) return
             reconnectHandler.removeCallbacks(setupTimeout)
             relayReady = true
             setRelayStatus("Circuit relay ready")
             writeCommand("@relay-test")
+            // The display's clock and note counts must not depend on the app
+            // screen being open, so the service sends them itself.
+            reconnectHandler.removeCallbacks(homeStatusRunnable)
+            reconnectHandler.postDelayed(homeStatusRunnable, 2500)
         }
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            handleRelayRequest(characteristic.value?.toString(Charsets.UTF_8).orEmpty())
+            handleCharacteristic(characteristic.value ?: byteArrayOf())
         }
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-            handleRelayRequest(value.toString(Charsets.UTF_8))
+            handleCharacteristic(value)
         }
+    }
+
+    private fun handleCharacteristic(value: ByteArray) {
+        if (value.size >= 2 && value[0] == 0xA5.toByte() && value[1] == 0x5A.toByte()) {
+            syncOutput?.let { output ->
+                val remaining = syncExpectedBytes - syncReceivedBytes
+                val packetBytes = value.size - 2
+                // Android can surface a duplicate final indication. Never
+                // write beyond the WAV length announced by Circuit.
+                val bytesToWrite = minOf(packetBytes, remaining.toInt())
+                if (bytesToWrite <= 0) return
+                output.write(value, 2, bytesToWrite)
+                syncReceivedBytes += bytesToWrite
+                // The final status notification can arrive behind the last
+                // indication. The byte count is authoritative, so complete
+                // locally as soon as the entire expected file is present.
+                if (syncExpectedBytes > 0 && syncReceivedBytes == syncExpectedBytes) {
+                    syncCompleteStatus = syncCompleteStatus ?: "Sync complete: ready on phone"
+                }
+                maybeFinishAudioSync()
+            }
+            return
+        }
+        handleRelayRequest(value.toString(Charsets.UTF_8))
     }
 
     private fun handleRelayRequest(request: String) {
@@ -226,8 +314,41 @@ class CircuitRelayService : Service() {
             wifiNetworks = request.lines().drop(1).map { it.trim() }.filter { it.isNotEmpty() }.distinct().sorted()
             return
         }
+        if (request.startsWith("@wifi-status\n")) {
+            // Delivered to Dart on the same channel as audio status, but cached
+            // separately so it never overwrites the audio state.
+            wifiStatus = request
+            audioStatusListener?.invoke(request)
+            return
+        }
+        if (request.startsWith("@sync-offer\n")) {
+            handleSyncOffer(request)
+            return
+        }
         if (request.startsWith("@audio-status\n")) {
-            audioStatus = request.substringAfter("@audio-status\n")
+            val status = request.substringAfter("@audio-status\n")
+            when {
+                status.startsWith("Sync started\n") -> beginAudioSync(status.substringAfter('\n').substringBefore(' ').toLongOrNull() ?: 0)
+                status.startsWith("Sync complete") -> {
+                    syncCompleteStatus = status
+                    maybeFinishAudioSync()
+                    reconnectHandler.postDelayed({
+                        if (syncCompleteStatus != null) {
+                            if (syncReceivedBytes == syncExpectedBytes) {
+                                maybeFinishAudioSync()
+                            } else {
+                                val received = syncReceivedBytes
+                                val expected = syncExpectedBytes
+                                abandonAudioSync()
+                                publishAudioStatus("Sync failed: incomplete transfer ($received/$expected bytes)")
+                            }
+                        }
+                    }, 1500)
+                    return
+                }
+                status.startsWith("Sync failed") -> abandonAudioSync()
+            }
+            publishAudioStatus(status)
             return
         }
         if (request != "@relay\nCHECK") return
@@ -251,6 +372,225 @@ class CircuitRelayService : Service() {
             gatt?.writeCharacteristic(characteristic) ?: false
         }
     }
+
+    private fun beginAudioSync(expectedBytes: Long) {
+        abandonAudioSync()
+        syncExpectedBytes = expectedBytes
+        syncReceivedBytes = 0
+        syncCompleteStatus = null
+        syncFile = File(filesDir, "circuit-note-${System.currentTimeMillis()}.wav")
+        syncOutput = FileOutputStream(syncFile)
+    }
+
+    private fun maybeFinishAudioSync() {
+        val status = syncCompleteStatus ?: return
+        if (syncReceivedBytes != syncExpectedBytes) return
+        val output = syncOutput ?: return
+        output.flush()
+        output.close()
+        syncOutput = null
+        val file = syncFile
+        if (file != null && syncExpectedBytes > 0 && syncReceivedBytes == syncExpectedBytes) {
+            latestSyncedFile = file.absolutePath
+            publishAudioStatus("$status|${file.absolutePath}")
+        } else {
+            file?.delete()
+            publishAudioStatus("Sync failed: incomplete transfer")
+        }
+        syncCompleteStatus = null
+    }
+
+    private fun abandonAudioSync() {
+        syncOutput?.close()
+        syncOutput = null
+        syncFile?.delete()
+        syncFile = null
+        syncExpectedBytes = 0
+        syncReceivedBytes = 0
+        syncCompleteStatus = null
+    }
+
+    /** Time, date and note counts for the display, in the format the app screen also uses. */
+    private fun sendHomeStatus() {
+        val now = java.util.Calendar.getInstance()
+        val time = "%02d:%02d".format(now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE))
+        val date = java.text.SimpleDateFormat("EEE dd MMM", Locale.ENGLISH).format(now.time).uppercase(Locale.ENGLISH)
+        var pending = 0
+        var synced = 0
+        val known = HashSet<String>()
+        try {
+            val stored = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                .getString("flutter.circuit_notes", null)
+            if (stored != null) {
+                val notes = JSONArray(stored)
+                for (i in 0 until notes.length()) {
+                    val path = notes.getJSONObject(i).optString("audioPath", "")
+                    if (path.isEmpty()) pending++ else { synced++; known.add(path) }
+                }
+            }
+        } catch (_: Exception) { /* counts stay at what we could read */ }
+        // Notes downloaded in the background that the app screen has not adopted yet.
+        filesDir.listFiles()?.filter { it.name.startsWith("circuit-note-") && it.name.endsWith(".wav") }
+            ?.forEach { if (it.absolutePath !in known) synced++ }
+        val offsetMinutes = TimeZone.getDefault().getOffset(now.timeInMillis) / 60_000
+        writeCommand("@home\n$time\n$date\n$pending · $synced\n${now.timeInMillis / 1000}\n$offsetMinutes")
+    }
+
+    // ---- Wi-Fi sync ------------------------------------------------------
+    // Circuit offers a session over the bonded BLE link: address, port, a
+    // one-time token and its certificate fingerprint. We only ever talk to the
+    // certificate with that fingerprint, and only over the phone's Wi-Fi.
+
+    private fun handleSyncOffer(request: String) {
+        val parts = request.lines()
+        Log.i("CircuitSync", "Offer received: host=${parts.getOrNull(1)} port=${parts.getOrNull(2)} notes=${parts.getOrNull(5)}")
+        val port = parts.getOrNull(2)?.toIntOrNull() ?: return
+        val host = parts.getOrNull(1) ?: return
+        val token = parts.getOrNull(3) ?: return
+        val fingerprint = parts.getOrNull(4) ?: return
+        executor.execute { runWifiSync(host, port, token, fingerprint) }
+    }
+
+    private fun wifiNetwork(): Network? {
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return null
+        return manager.allNetworks.firstOrNull {
+            manager.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        }
+    }
+
+    private fun pinnedSocketFactory(fingerprint: String): SSLSocketFactory {
+        val trust = object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) =
+                throw CertificateException("Client certificates are not used")
+            override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+                val digest = MessageDigest.getInstance("SHA-256").digest(chain[0].encoded)
+                val actual = digest.joinToString("") { "%02x".format(it) }
+                if (!MessageDigest.isEqual(actual.toByteArray(), fingerprint.lowercase().toByteArray())) {
+                    throw CertificateException("Certificate does not match the paired Circuit")
+                }
+            }
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+        }
+        return SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), SecureRandom()) }.socketFactory
+    }
+
+    private fun runWifiSync(host: String, port: Int, token: String, fingerprint: String) {
+        val network = wifiNetwork()
+        Log.i("CircuitSync", "Wi-Fi network available: ${network != null}")
+        if (network == null) {
+            publishAudioStatus("Sync needs Wi-Fi: connect your phone to the same network as Circuit")
+            return
+        }
+        val factory = pinnedSocketFactory(fingerprint)
+        fun open(path: String, method: String = "GET", from: Long = 0): HttpsURLConnection =
+            (network.openConnection(URL("https://$host:$port$path")) as HttpsURLConnection).apply {
+                sslSocketFactory = factory
+                hostnameVerifier = HostnameVerifier { _, _ -> true }  // identity is the pinned fingerprint
+                requestMethod = method
+                connectTimeout = 6000
+                readTimeout = 15000
+                setRequestProperty("X-Circuit-Token", token)
+                if (from > 0) setRequestProperty("Range", "bytes=$from-")
+                if (method == "POST") { doOutput = true; setFixedLengthStreamingMode(0) }
+            }
+        try {
+            val listing = open("/notes").run {
+                if (responseCode != 200) throw IOException("Circuit refused the sync (HTTP $responseCode)")
+                inputStream.bufferedReader().use { it.readText() }
+            }
+            val notes = listing.lines().filter { it.isNotBlank() }.mapNotNull { line ->
+                val f = line.split(',')
+                if (f.size < 3) null else Triple(f[0].toLongOrNull() ?: return@mapNotNull null,
+                    f[1].toLongOrNull() ?: return@mapNotNull null, f[2].toLongOrNull() ?: 0L)
+            }
+            if (notes.isEmpty()) {
+                publishAudioStatus("Sync complete: no new notes")
+                return
+            }
+            val totalBytes = notes.sumOf { it.second }
+            var doneBytes = 0L
+            var lastPercent = -1
+            Log.i("CircuitSync", "Listing ok: ${notes.size} notes, $totalBytes bytes")
+            publishAudioStatus("Sync started\n$totalBytes bytes")
+            for ((id, bytes, epoch) in notes) {
+                val target = File(filesDir, "circuit-note-$epoch-$id.wav")
+                val partial = File(filesDir, "circuit-note-$epoch-$id.part")
+                if (!(target.exists() && target.length() == bytes)) {
+                    var attempts = 0
+                    while (partial.length() < bytes) {
+                        if (++attempts > 4) throw IOException("Connection to Circuit kept dropping")
+                        try {
+                            val have = partial.length()
+                            val connection = open("/notes/$id", from = have)
+                            if (connection.responseCode != 200 && connection.responseCode != 206) {
+                                throw IOException("Circuit refused the download (HTTP ${connection.responseCode})")
+                            }
+                            // A 200 means the server ignored the range: start over.
+                            val append = connection.responseCode == 206 && have > 0
+                            if (!append) partial.delete()
+                            FileOutputStream(partial, append).use { out ->
+                                connection.inputStream.use { input ->
+                                    val buffer = ByteArray(16 * 1024)
+                                    while (true) {
+                                        val n = input.read(buffer)
+                                        if (n < 0) break
+                                        out.write(buffer, 0, n)
+                                        val percent = ((doneBytes + partial.length()) * 100 / totalBytes).toInt().coerceIn(0, 99)
+                                        if (percent != lastPercent && percent % 2 == 0) {
+                                            lastPercent = percent
+                                            publishAudioStatus("Sync in progress: $percent%")
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (error: IOException) {
+                            Log.w("CircuitSync", "Download attempt $attempts for note $id failed", error)
+                            if (error is javax.net.ssl.SSLException && partial.length() == 0L) throw error
+                        }
+                    }
+                    if (partial.length() != bytes || !partial.renameTo(target)) {
+                        partial.delete()
+                        throw IOException("Note $id arrived incomplete")
+                    }
+                }
+                doneBytes += bytes
+                val ack = open("/ack/$id", "POST")
+                if (ack.responseCode != 200) throw IOException("Could not confirm note $id")
+                latestSyncedFile = target.absolutePath
+                publishAudioStatus("Sync complete: ready on phone|${target.absolutePath}|$epoch")
+            }
+            publishAudioStatus("Sync complete: all notes saved")
+        } catch (error: Exception) {
+            Log.e("CircuitSync", "Wi-Fi sync failed", error)
+            val reason = when (error) {
+                is javax.net.ssl.SSLException -> "Circuit's certificate did not match this phone"
+                is java.net.SocketTimeoutException, is java.net.ConnectException, is java.net.NoRouteToHostException ->
+                    "Circuit is not reachable on this Wi-Fi. Check both are on the same network and that Short-Circuit has Local network access in Android settings"
+                else -> "${error.javaClass.simpleName}: ${error.message ?: "no details"}"
+            }
+            publishAudioStatus("Sync failed: $reason (${error.javaClass.simpleName})")
+        }
+    }
+
+    private fun clearAudioFiles(): Boolean {
+        latestSyncedFile = null
+        filesDir.listFiles()
+            ?.filter { it.name.startsWith("circuit-note-") && it.name.endsWith(".wav") }
+            ?.forEach { it.delete() }
+        return writeCommand("@audio-clear")
+    }
+
+    private fun playRecording(path: String): Boolean = try {
+        val file = File(path)
+        if (!file.exists()) return false
+        android.media.MediaPlayer().apply {
+            setDataSource(file.absolutePath)
+            setOnCompletionListener { release() }
+            prepare()
+            start()
+        }
+        true
+    } catch (_: Exception) { false }
 
     private fun hasBluetoothPermission() = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
         ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
