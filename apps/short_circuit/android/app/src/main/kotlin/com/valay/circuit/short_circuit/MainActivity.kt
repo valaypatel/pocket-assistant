@@ -14,6 +14,11 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private var audioStatusEvents: EventChannel.EventSink? = null
 
+    override fun onPause() {
+        CircuitRelayService.stopPlayback()
+        super.onPause()
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, "circuit/audio_status")
@@ -62,6 +67,10 @@ class MainActivity : FlutterActivity() {
                     "playSyncedRecording" -> {
                         val path = call.argument<String>("path")
                         result.success(path != null && CircuitRelayService.playSyncedRecording(path))
+                    }
+                    "stopPlayback" -> {
+                        CircuitRelayService.stopPlayback()
+                        result.success(null)
                     }
                     "clearAudio" -> result.success(CircuitRelayService.clearAudio())
                     "syncedNotes" -> result.success(CircuitRelayService.syncedNotes(this))

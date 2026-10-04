@@ -67,6 +67,7 @@ class CircuitRelayService : Service() {
         @Volatile private var audioStatusListener: ((String) -> Unit)? = null
         fun writeToCircuit(value: String): Boolean = activeService?.writeCommand(value) ?: false
         fun playSyncedRecording(path: String): Boolean = activeService?.playRecording(path) ?: false
+        fun stopPlayback() { activeService?.stopPlayback() }
         fun playLatestSyncedRecording(): Boolean = latestSyncedFile?.let(::playSyncedRecording) ?: false
         fun clearAudio(): Boolean = activeService?.clearAudioFiles() ?: false
         /** Synced note files as "path|epochSeconds", oldest first. */
@@ -85,6 +86,10 @@ class CircuitRelayService : Service() {
     }
 
     private val executor = Executors.newSingleThreadExecutor()
+    // Sync runs on its own thread so a stalled download can never block the relay,
+    // and a newer offer cancels an older attempt instead of queueing behind it.
+    private val syncExecutor = Executors.newSingleThreadExecutor()
+    @Volatile private var syncGeneration = 0
     private val reconnectHandler = Handler(Looper.getMainLooper())
     private var reconnectDelayMs = 1000L
     private var shouldReconnect = false
@@ -103,6 +108,7 @@ class CircuitRelayService : Service() {
     private var syncExpectedBytes = 0L
     private var syncReceivedBytes = 0L
     private var syncCompleteStatus: String? = null
+    private var mediaPlayer: android.media.MediaPlayer? = null
     private val reconnectRunnable = Runnable { circuitAddress?.let(::connect) }
     private val setupTimeout = Runnable {
         gatt?.let { failConnection(it, "Circuit setup timed out") }
@@ -153,6 +159,8 @@ class CircuitRelayService : Service() {
         relayStatus = "Stopped"
         gatt?.close()
         abandonAudioSync()
+        syncGeneration++
+        syncExecutor.shutdownNow()
         executor.shutdownNow()
         super.onDestroy()
     }
@@ -448,7 +456,8 @@ class CircuitRelayService : Service() {
         val host = parts.getOrNull(1) ?: return
         val token = parts.getOrNull(3) ?: return
         val fingerprint = parts.getOrNull(4) ?: return
-        executor.execute { runWifiSync(host, port, token, fingerprint) }
+        val generation = ++syncGeneration
+        syncExecutor.execute { runWifiSync(host, port, token, fingerprint, generation) }
     }
 
     private fun wifiNetwork(): Network? {
@@ -474,7 +483,8 @@ class CircuitRelayService : Service() {
         return SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), SecureRandom()) }.socketFactory
     }
 
-    private fun runWifiSync(host: String, port: Int, token: String, fingerprint: String) {
+    private fun runWifiSync(host: String, port: Int, token: String, fingerprint: String, generation: Int) {
+        fun superseded() = generation != syncGeneration
         val network = wifiNetwork()
         Log.i("CircuitSync", "Wi-Fi network available: ${network != null}")
         if (network == null) {
@@ -488,7 +498,7 @@ class CircuitRelayService : Service() {
                 hostnameVerifier = HostnameVerifier { _, _ -> true }  // identity is the pinned fingerprint
                 requestMethod = method
                 connectTimeout = 6000
-                readTimeout = 15000
+                readTimeout = 10000
                 setRequestProperty("X-Circuit-Token", token)
                 if (from > 0) setRequestProperty("Range", "bytes=$from-")
                 if (method == "POST") { doOutput = true; setFixedLengthStreamingMode(0) }
@@ -513,6 +523,7 @@ class CircuitRelayService : Service() {
             Log.i("CircuitSync", "Listing ok: ${notes.size} notes, $totalBytes bytes")
             publishAudioStatus("Sync started\n$totalBytes bytes")
             for ((id, bytes, epoch) in notes) {
+                if (superseded()) return
                 val target = File(filesDir, "circuit-note-$epoch-$id.wav")
                 val partial = File(filesDir, "circuit-note-$epoch-$id.part")
                 if (!(target.exists() && target.length() == bytes)) {
@@ -532,6 +543,7 @@ class CircuitRelayService : Service() {
                                 connection.inputStream.use { input ->
                                     val buffer = ByteArray(16 * 1024)
                                     while (true) {
+                                        if (superseded()) return
                                         val n = input.read(buffer)
                                         if (n < 0) break
                                         out.write(buffer, 0, n)
@@ -583,14 +595,26 @@ class CircuitRelayService : Service() {
     private fun playRecording(path: String): Boolean = try {
         val file = File(path)
         if (!file.exists()) return false
-        android.media.MediaPlayer().apply {
+        stopPlayback()
+        mediaPlayer = android.media.MediaPlayer().apply {
             setDataSource(file.absolutePath)
-            setOnCompletionListener { release() }
+            setOnCompletionListener {
+                release()
+                if (mediaPlayer === this) mediaPlayer = null
+            }
             prepare()
             start()
         }
         true
     } catch (_: Exception) { false }
+
+    private fun stopPlayback() {
+        mediaPlayer?.let {
+            try { it.stop() } catch (_: Exception) { }
+            it.release()
+        }
+        mediaPlayer = null
+    }
 
     private fun hasBluetoothPermission() = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
         ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
