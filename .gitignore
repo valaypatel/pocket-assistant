@@ -15,3 +15,23 @@ vendor/
 
 # ESP-IDF regenerates this on every build and writes absolute local paths into it
 firmware/CircuitBleDisplay/dependencies.lock
+
+# Python / AWS SAM build output
+.venv/
+__pycache__/
+.pytest_cache/
+.aws-sam/
+
+# Terraform: state holds the service key, so it must never be committed
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfvars
+terraform/crash.log
+# Lambda package output
+services/music-lambda/build/
+services/music-lambda/terraform/tfplan
+services/music-lambda/terraform/.terraform/
+services/music-lambda/terraform/*.tfstate*
+services/music-lambda/terraform/*.tfvars
+services/music-lambda/terraform/.terraform.lock.hcl.bak
