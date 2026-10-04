@@ -545,7 +545,8 @@ void record_audio_task(void *argument) {
     show_device_screen(DeviceScreen::Recording);
 
     char note_path[48];
-    circuit_notes::path_for(circuit_notes::next_id(), "WAV", note_path, sizeof(note_path));
+    const uint32_t note_id = circuit_notes::allocate_id();
+    circuit_notes::path_for(note_id, "WAV", note_path, sizeof(note_path));
     FILE *file = fopen(note_path, "wb");
     if (file == nullptr) {
         update_storage_status("Audio record failed\nCannot create WAV file");
@@ -599,9 +600,11 @@ void record_audio_task(void *argument) {
     update_storage_status(completed
         ? "Recording saved\nReady to play"
         : "Recording stopped\nReady to play");
-    report_audio_status(completed
-        ? "Recording saved: ready to play"
-        : "Recording stopped: ready to play");
+    // The note number lets the phone recognise this recording exactly once.
+    char saved_status[64];
+    snprintf(saved_status, sizeof(saved_status), "%s: ready to play #%lu",
+        completed ? "Recording saved" : "Recording stopped", static_cast<unsigned long>(note_id));
+    report_audio_status(saved_status);
     finish_audio_task();
 }
 

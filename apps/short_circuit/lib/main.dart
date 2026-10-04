@@ -328,6 +328,7 @@ class CircuitNote {
     this.transcript,
     this.title,
     this.category,
+    this.boardId,
   });
 
   final String id;
@@ -337,6 +338,8 @@ class CircuitNote {
   final String? transcript;
   final String? title;
   final String? category;
+  /// Number Circuit gave the recording; identifies it exactly once.
+  final int? boardId;
 
   factory CircuitNote.fromJson(Map<String, dynamic> json) => CircuitNote(
     id: json['id'] as String,
@@ -346,6 +349,7 @@ class CircuitNote {
     transcript: json['transcript'] as String?,
     title: json['title'] as String?,
     category: json['category'] as String?,
+    boardId: int.tryParse(json['boardId']?.toString() ?? ''),
   );
 
   Map<String, String> toJson() => {
@@ -356,6 +360,7 @@ class CircuitNote {
     if (transcript != null) 'transcript': transcript!,
     if (title != null) 'title': title!,
     if (category != null) 'category': category!,
+    if (boardId != null) 'boardId': boardId.toString(),
   };
 }
 
@@ -570,6 +575,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
               transcript: parsed['transcript'] as String,
               title: (parsed['title'] as String?)?.trim(),
               category: (parsed['category'] as String?)?.trim(),
+              boardId: note.boardId,
             );
           }
         }
@@ -587,6 +593,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
             transcript: note.transcript,
             title: note.title,
             category: note.category,
+            boardId: note.boardId,
           );
         }
         return note;
@@ -606,11 +613,16 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     }
   }
 
-  Future<String> _addPendingNote(String status, {DateTime? createdAt}) async {
+  Future<String> _addPendingNote(
+    String status, {
+    DateTime? createdAt,
+    int? boardId,
+  }) async {
     final note = CircuitNote(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       createdAt: createdAt ?? DateTime.now(),
       status: status,
+      boardId: boardId,
     );
     final notes = [note, ..._notes];
     final preferences = await SharedPreferences.getInstance();
@@ -639,6 +651,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
                   transcript: note.transcript,
                   title: note.title,
                   category: note.category,
+                  boardId: note.boardId,
                 )
               : note,
         )
@@ -667,6 +680,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
                   transcript: transcription.transcript,
                   title: transcription.title,
                   category: transcription.category,
+                  boardId: note.boardId,
                 )
               : note,
         )
@@ -998,8 +1012,15 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     });
     if (status.startsWith('Recording saved') ||
         status.startsWith('Recording stopped')) {
+      final boardId = int.tryParse(
+        RegExp(r'#(\d+)').firstMatch(status)?.group(1) ?? '',
+      );
+      // Circuit's last status is replayed whenever the app screen reopens, so
+      // the same recording can be reported again. Its number says it is known.
+      if (boardId != null && _knownBoardNote(boardId, DateTime.now())) return;
       _addPendingNote(
         'Recording saved on Circuit. It syncs automatically when Circuit and this phone are on the same Wi-Fi.',
+        boardId: boardId,
       );
       return;
     }
@@ -1150,6 +1171,14 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   /// A synced file belongs to the oldest note still waiting for audio; if the
   /// recording happened while the app was closed there is none, so make one.
+  /// True if a note for this Circuit recording already exists. Numbers restart
+  /// if Circuit is reset, so only a note from the last ten minutes counts.
+  bool _knownBoardNote(int boardId, DateTime around) => _notes.any(
+    (note) =>
+        note.boardId == boardId &&
+        note.createdAt.difference(around).abs() < const Duration(minutes: 10),
+  );
+
   Future<void> _attachSyncedFile(
     String? path,
     int? epochSeconds, {
@@ -1161,7 +1190,24 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     // using the time it was recorded. Taking the oldest pending note would hand
     // the audio to a stale note whose own recording no longer exists.
     String? noteId;
-    final preferred = preferNoteId == null
+    // circuit-note-<epoch>-<number>.wav: the number names the exact recording.
+    final boardId = int.tryParse(
+      RegExp(r'circuit-note-\d+-(\d+)\.wav$').firstMatch(path)?.group(1) ?? '',
+    );
+    final recordedAt = epochSeconds != null && epochSeconds > 0
+        ? DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000)
+        : null;
+    final byBoardId = boardId == null
+        ? null
+        : _notes.where((n) {
+            final near = recordedAt == null ||
+                n.createdAt.difference(recordedAt).abs() < const Duration(minutes: 10);
+            return n.boardId == boardId && near;
+          }).firstOrNull;
+    if (byBoardId != null && byBoardId.audioPath != null) return; // already attached
+    final preferred = byBoardId != null && byBoardId.audioPath == null
+        ? byBoardId
+        : preferNoteId == null
         ? null
         : _notes.where((n) => n.id == preferNoteId && n.audioPath == null).firstOrNull;
     if (preferred != null) {
@@ -1182,9 +1228,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     if (noteId == null) {
       noteId = await _addPendingNote(
         'Synced. Transcription starting…',
-        createdAt: epochSeconds != null && epochSeconds > 0
-            ? DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000)
-            : null,
+        createdAt: recordedAt,
+        boardId: boardId,
       );
     }
     await _transcribeAfterSync(noteId, path);

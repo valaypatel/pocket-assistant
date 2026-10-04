@@ -18,6 +18,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "nvs.h"
+
 namespace circuit_notes {
 
 constexpr char kDir[] = "/sdcard/NOTES";
@@ -98,7 +100,22 @@ inline void init() {
 }
 
 // Path for the next note. Ids only ever grow, so a name is never reused.
-inline uint32_t next_id() { return newest_id() + 1; }
+// Hands out the next note number. The last number is kept in NVS as well, so
+// numbers keep growing even after every note has been cleaned off the card and
+// the phone can use a number to recognise a recording.
+inline uint32_t allocate_id() {
+    uint32_t next = newest_id() + 1;
+    nvs_handle_t handle;
+    if (nvs_open("circuit_notes", NVS_READWRITE, &handle) == ESP_OK) {
+        uint32_t last = 0;
+        nvs_get_u32(handle, "last_id", &last);
+        if (last + 1 > next) next = last + 1;
+        nvs_set_u32(handle, "last_id", next);
+        nvs_commit(handle);
+        nvs_close(handle);
+    }
+    return next;
+}
 
 inline bool describe(uint32_t id, Note *note) {
     char path[48];
