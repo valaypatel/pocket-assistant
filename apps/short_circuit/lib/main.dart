@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,10 +11,14 @@ import 'package:http/http.dart' as http;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+part 'music.dart';
 part 'ui/chat_page.dart';
 part 'ui/detail_pages.dart';
 part 'ui/pages.dart';
+part 'ui/recording_view.dart';
+part 'ui/song_page.dart';
 part 'ui/theme.dart';
 
 const _circuitName = 'Circuit';
@@ -87,7 +92,10 @@ class GeminiClient {
     }
   }
 
-  Future<GeminiTranscription> transcribeWav(Uint8List wavBytes) async {
+  Future<GeminiTranscription> transcribeWav(
+    Uint8List wavBytes, {
+    bool detectMusic = true,
+  }) async {
     final key = await apiKey();
     if (key == null || key.trim().isEmpty) {
       throw Exception('Add a Gemini API key in Settings first.');
@@ -106,7 +114,10 @@ class GeminiClient {
               {
                 'parts': [
                   {
-                    'text': 'Transcribe this voice note exactly. Preserve Gujarati script, English, and mixed Gujarati-English. Return the complete transcription only. Do not summarise, classify, translate, or add a title.',
+                    'text':
+                        'Transcribe this voice note exactly. Preserve Gujarati script, English, and mixed Gujarati-English. Return the complete transcription only. Do not summarise, classify, translate, or add a title.'
+                        '${detectMusic ? ' Exception: if the recording is mainly music or a song playing, with no one speaking to record a note, reply with exactly [[MUSIC]] and nothing else.' : ''}'
+                        ' If it is only silence or background noise, reply with exactly [[NOISE]].',
                   },
                   {
                     'inline_data': {
@@ -137,12 +148,32 @@ class GeminiClient {
         .whereType<String>()
         .join()
         .trim();
-    if (result == null || result.isEmpty) {
+    return parseTranscriptionText(result, allowMusic: detectMusic);
+  }
+
+  /// Turns Gemini's plain-text answer into a transcription. A recording of
+  /// music comes back as the [[MUSIC]] marker and silence as [[NOISE]].
+  static GeminiTranscription parseTranscriptionText(
+    String? answer, {
+    bool allowMusic = true,
+  }) {
+    final result = answer?.trim() ?? '';
+    if (result.isEmpty ||
+        result.startsWith('[[NOISE]]') ||
+        (!allowMusic && result.startsWith('[[MUSIC]]'))) {
       throw Exception('No speech detected.');
+    }
+    if (result.startsWith('[[MUSIC]]')) {
+      return const GeminiTranscription(
+        category: 'music',
+        title: 'Song',
+        transcript: '',
+        audioType: 'music',
+      );
     }
     return GeminiTranscription(
       category: 'note',
-      title: _fallbackHeading(result),
+      title: const GeminiClient()._fallbackHeading(result),
       transcript: result,
     );
   }
@@ -545,17 +576,25 @@ class AiClient {
 }
 
 const _ai = AiClient();
+const _songClipSeconds = 12;
+final _music = MusicClient();
 
 class GeminiTranscription {
   const GeminiTranscription({
     required this.category,
     required this.title,
     required this.transcript,
+    this.audioType = 'speech',
   });
 
   final String category;
   final String title;
   final String transcript;
+
+  /// 'speech', or 'music' when the recording is a song rather than a note.
+  final String audioType;
+
+  bool get isMusic => audioType == 'music';
 }
 
 class ReminderDraft {
@@ -589,6 +628,8 @@ class CircuitNote {
     this.enrichmentStatus = 'pending',
     this.actionSuggestions = const [],
     this.boardId,
+    this.kind = 'voice',
+    this.song,
   });
 
   final String id;
@@ -610,6 +651,12 @@ class CircuitNote {
 
   /// Number Circuit gave the recording; identifies it exactly once.
   final int? boardId;
+
+  /// 'voice' for a spoken note, 'song' for a clip sent to song recognition.
+  final String kind;
+  final SongResult? song;
+
+  bool get isSong => kind == 'song';
 
   factory CircuitNote.fromJson(Map<String, dynamic> json) => CircuitNote(
     id: json['id'] as String,
@@ -634,6 +681,10 @@ class CircuitNote {
         .map(NoteActionSuggestion.fromJson)
         .toList(),
     boardId: int.tryParse(json['boardId']?.toString() ?? ''),
+    kind: json['kind']?.toString() == 'song' ? 'song' : 'voice',
+    song: json['song'] is Map<String, dynamic>
+        ? SongResult.fromJson(json['song'] as Map<String, dynamic>)
+        : null,
   );
 
   CircuitNote copyWith({
@@ -650,6 +701,9 @@ class CircuitNote {
     String? enrichmentStatus,
     List<NoteActionSuggestion>? actionSuggestions,
     int? boardId,
+    SongResult? song,
+    String? kind,
+    bool clearSong = false,
   }) => CircuitNote(
     id: id,
     createdAt: createdAt,
@@ -666,6 +720,8 @@ class CircuitNote {
     enrichmentStatus: enrichmentStatus ?? this.enrichmentStatus,
     actionSuggestions: actionSuggestions ?? this.actionSuggestions,
     boardId: boardId ?? this.boardId,
+    kind: kind ?? this.kind,
+    song: clearSong ? null : (song ?? this.song),
   );
 
   Map<String, dynamic> toJson() => {
@@ -687,6 +743,8 @@ class CircuitNote {
           .map((item) => item.toJson())
           .toList(),
     if (boardId != null) 'boardId': boardId.toString(),
+    if (isSong) 'kind': kind,
+    if (song != null) 'song': song!.toJson(),
   };
 }
 
@@ -784,6 +842,24 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   bool _autoTranscribe = true;
   bool _geminiConnected = false;
   bool _aiConnected = false;
+  bool _musicConnected = false;
+
+  /// True from tapping Identify song until Circuit reports that clip saved, so
+  /// the new recording is kept as a song rather than a voice note.
+  /// It lapses on its own, so a refused or lost request cannot turn the next
+  /// ordinary recording into a song.
+  DateTime? _songArmedAt;
+  bool get _songClipArmed {
+    final armedAt = _songArmedAt;
+    return armedAt != null &&
+        DateTime.now().difference(armedAt) <
+            Duration(seconds: _songClipSeconds + 30);
+  }
+
+  set _songClipArmed(bool armed) =>
+      _songArmedAt = armed ? DateTime.now() : null;
+
+  final Set<String> _identifyingSongs = {};
   String _displayName = '';
   DateTime? _recordingStartedAt;
   Timer? _clockTicker;
@@ -838,6 +914,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     _loadPreferences();
     _loadGeminiState();
     _loadAiState();
+    _loadMusicState();
     _clockTicker = Timer.periodic(const Duration(seconds: 1), (_) {
       // Keeps the recording timer moving.
       if (mounted && _recordingAudio) setState(() {});
@@ -939,15 +1016,18 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
             note.status.startsWith('Sync in progress') ||
             note.status.startsWith('Recording saved on Circuit')) {
           changed = true;
-          return CircuitNote(
-            id: note.id,
-            createdAt: note.createdAt,
-            status: 'Sync interrupted. Tap Sync to retry.',
-            audioPath: note.audioPath,
-            transcript: note.transcript,
-            title: note.title,
-            category: note.category,
-            boardId: note.boardId,
+          return note.copyWith(status: 'Sync interrupted. Tap Sync to retry.');
+        }
+        // Identification cannot still be running after a restart.
+        if (note.isSong &&
+            (note.song?.busy ?? false) &&
+            note.audioPath != null) {
+          changed = true;
+          return note.copyWith(
+            song: note.song!.withState(
+              'failed',
+              error: 'Identification was interrupted. Try again.',
+            ),
           );
         }
         return note;
@@ -971,12 +1051,15 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     String status, {
     DateTime? createdAt,
     int? boardId,
+    bool song = false,
   }) async {
     final note = CircuitNote(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       createdAt: createdAt ?? DateTime.now(),
       status: status,
       boardId: boardId,
+      kind: song ? 'song' : 'voice',
+      song: song ? const SongResult() : null,
     );
     final notes = [note, ..._notes];
     final preferences = await SharedPreferences.getInstance();
@@ -1038,17 +1121,39 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     unawaited(_sendHomeStatus());
   }
 
-  Future<GeminiTranscription?> _transcribeNote(String id) async {
+  /// With [asSpeech], a clip wrongly taken for a song is turned back into a
+  /// voice note and transcribed without the music check.
+  Future<GeminiTranscription?> _transcribeNote(
+    String id, {
+    bool asSpeech = false,
+  }) async {
     if (_transcribingNoteId != null) return null;
     final note = _notes.where((item) => item.id == id).firstOrNull;
     final path = note?.audioPath;
-    if (path == null) return null;
+    if (path == null || ((note?.isSong ?? false) && !asSpeech)) return null;
+    if (asSpeech && (note?.isSong ?? false)) {
+      await _updateNote(id, (n) => n.copyWith(kind: 'voice', clearSong: true));
+    }
     setState(() => _transcribingNoteId = id);
     await _setNoteStatus(id, 'Transcribing with Gemini…');
     try {
       final transcription = await _gemini.transcribeWav(
         await File(path).readAsBytes(),
+        detectMusic: !asSpeech,
       );
+      if (transcription.isMusic) {
+        // Not a spoken note: keep the clip, drop the transcript, and look it up.
+        await _updateNote(
+          id,
+          (n) => n.copyWith(
+            kind: 'song',
+            status: 'Sounds like music. Identifying…',
+            song: const SongResult(),
+          ),
+        );
+        unawaited(_identifySongNote(id));
+        return transcription;
+      }
       await _setNoteTranscript(id, transcription);
       if (_aiConnected) unawaited(_enrichNote(id));
       return transcription;
@@ -1458,6 +1563,11 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
           status.startsWith('Recording stopped') ||
           status.startsWith('Recording failed')) {
         _recordingAudio = false;
+        if (status.startsWith('Recording failed')) _songClipArmed = false;
+      }
+      if (status.startsWith('Audio is busy')) {
+        // Circuit refused the request, so no song clip is coming.
+        _songClipArmed = false;
       }
     });
     if (status.startsWith('Recording saved') ||
@@ -1468,9 +1578,12 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       // Circuit's last status is replayed whenever the app screen reopens, so
       // the same recording can be reported again. Its number says it is known.
       if (boardId != null && _knownBoardNote(boardId, DateTime.now())) return;
+      final isSong = _songClipArmed;
+      _songClipArmed = false;
       _addPendingNote(
         'Recording saved on Circuit. It syncs automatically when Circuit and this phone are on the same Wi-Fi.',
         boardId: boardId,
+        song: isSong,
       );
       return;
     }
@@ -1899,6 +2012,15 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   }
 
   Future<void> _transcribeAfterSync(String noteId, String? audioPath) async {
+    if (_notes.where((n) => n.id == noteId).firstOrNull?.isSong ?? false) {
+      await _setNoteStatus(
+        noteId,
+        'Synced. Identifying song…',
+        audioPath: audioPath,
+      );
+      await _identifySongNote(noteId);
+      return;
+    }
     await _setNoteStatus(
       noteId,
       'Synced. Transcription starting…',
@@ -2259,6 +2381,70 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     }
   }
 
+  /// Records a short clip on Circuit; once it syncs it is sent for recognition.
+  Future<void> _identifySong() async {
+    if (_audioBusy || _recordingAudio) return;
+    setState(() {
+      _audioBusy = true;
+      _recordingAudio = true;
+      _recordingStartedAt = DateTime.now();
+      _songClipArmed = true;
+    });
+    try {
+      await _writeCircuit('@audio-record\n$_songClipSeconds');
+      _setStatus('Listening for $_songClipSeconds seconds…');
+    } catch (error) {
+      _songClipArmed = false;
+      _setStatus('Could not start listening: $error');
+      if (mounted) setState(() => _recordingAudio = false);
+    } finally {
+      if (mounted) setState(() => _audioBusy = false);
+    }
+  }
+
+  /// Sends the note's clip for recognition. The recording is kept whatever the
+  /// outcome, so a failure can simply be retried.
+  Future<void> _identifySongNote(String id) async {
+    if (!_identifyingSongs.add(id)) return;
+    try {
+      final path = _notes.where((n) => n.id == id).firstOrNull?.audioPath;
+      if (path == null) return;
+      await _updateNote(
+        id,
+        (n) => n.copyWith(
+          status: 'Identifying song…',
+          song: (n.song ?? const SongResult()).withState('identifying'),
+        ),
+      );
+      try {
+        final result = await _music.identify(
+          wavSample(await File(path).readAsBytes(), seconds: _songClipSeconds),
+        );
+        await _updateNote(
+          id,
+          (n) => n.copyWith(
+            status: result.matched ? 'Song identified' : 'No match found',
+            song: result,
+          ),
+        );
+      } catch (error) {
+        final message = error.toString().replaceFirst('Exception: ', '');
+        await _updateNote(
+          id,
+          (n) => n.copyWith(
+            status: 'Song identification failed',
+            song: (n.song ?? const SongResult()).withState(
+              'failed',
+              error: message,
+            ),
+          ),
+        );
+      }
+    } finally {
+      _identifyingSongs.remove(id);
+    }
+  }
+
   /// Removes notes from Circuit's SD card that this phone has already saved.
   /// Notes still waiting to sync are never deleted.
   Future<void> _cleanCircuitNotes() async {
@@ -2389,6 +2575,11 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     final key = await _gemini.apiKey();
     if (mounted)
       setState(() => _geminiConnected = key != null && key.isNotEmpty);
+  }
+
+  Future<void> _loadMusicState() async {
+    final configured = await _music.isConfigured();
+    if (mounted) setState(() => _musicConnected = configured);
   }
 
   Future<void> _loadAiState() async {

@@ -109,6 +109,8 @@ class ScEyebrow extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Text(
     text.toUpperCase(),
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
     style: const TextStyle(
       color: Color(0xff73767e),
       fontSize: 12,
@@ -209,7 +211,13 @@ class ScBackRow extends StatelessWidget {
           tooltip: 'Back to $label',
           onPressed: onBack,
         ),
-        if (eyebrow != null) ScEyebrow(eyebrow!),
+        if (eyebrow != null)
+          Flexible(
+            child: Padding(
+              padding: const EdgeInsets.only(left: 12),
+              child: ScEyebrow(eyebrow!),
+            ),
+          ),
       ],
     ),
   );

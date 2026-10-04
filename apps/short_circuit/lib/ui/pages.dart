@@ -265,7 +265,61 @@ extension _ScPages on _CircuitHomePageState {
 
   // ---- notes ---------------------------------------------------------------
 
+  Widget _captureButton({
+    required IconData icon,
+    required double iconSize,
+    required String label,
+    required String tooltip,
+    required Color color,
+    required VoidCallback? onTap,
+  }) => Tooltip(
+    message: onTap == null
+        ? '$tooltip (Circuit is not connected or busy)'
+        : tooltip,
+    child: Material(
+      color: color,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onTap,
+        child: Opacity(
+          opacity: onTap == null ? .45 : 1,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 15),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: iconSize, color: Colors.white),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Future<void> _openMusicSettings() async {
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => const MusicSettingsPage()));
+    await _loadMusicState();
+  }
+
   bool _noteNeedsAttention(CircuitNote note) =>
+      note.song?.state == 'failed' ||
       note.status.startsWith('No speech detected') ||
       note.status.startsWith('Transcription error') ||
       note.status.startsWith('Sync failed') ||
@@ -286,6 +340,7 @@ extension _ScPages on _CircuitHomePageState {
 
   IconData _noteIcon(CircuitNote note) {
     if (_noteNeedsAttention(note)) return LucideIcons.circleAlert;
+    if (note.isSong) return LucideIcons.music;
     return switch (note.category) {
       'reminder' || 'task' || 'calendar_event' => LucideIcons.check,
       'idea' => LucideIcons.sparkles,
@@ -300,6 +355,18 @@ extension _ScPages on _CircuitHomePageState {
     final when =
         '${_dayLabel(note.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}';
     if (note.id == _syncingNoteId) return '$when · Syncing';
+    final song = note.song;
+    if (note.isSong && song != null) {
+      if (song.matched) {
+        return song.artist == null ? when : '$when · ${song.artist}';
+      }
+      if (note.audioPath == null) return '$when · Waiting to sync';
+      return switch (song.state) {
+        'no_match' => '$when · No match found',
+        'failed' => '$when · Identification failed',
+        _ => '$when · Identifying…',
+      };
+    }
     if (note.id == _transcribingNoteId) return '$when · Transcribing…';
     if (note.status.startsWith('No speech detected'))
       return '$when · No speech found';
@@ -321,6 +388,21 @@ extension _ScPages on _CircuitHomePageState {
   }
 
   VoidCallback? _openNote(CircuitNote note) {
+    if (note.isSong) {
+      return () => Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => SongPage(
+            noteId: note.id,
+            noteById: (id) => _notes.where((n) => n.id == id).firstOrNull,
+            onIdentify: _identifySongNote,
+            onPlay: _playSyncedNote,
+            onDelete: _deleteNote,
+            onOpenSettings: _openMusicSettings,
+            onUseAsNote: (id) => _transcribeNote(id, asSpeech: true),
+          ),
+        ),
+      );
+    }
     return () => Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => TranscriptPage(
@@ -364,7 +446,8 @@ extension _ScPages on _CircuitHomePageState {
 
   Widget _noteTile(CircuitNote note, {bool actions = false}) {
     final attention = _noteNeedsAttention(note);
-    final canTranscribe = note.audioPath != null && note.transcript == null;
+    final canTranscribe =
+        !note.isSong && note.audioPath != null && note.transcript == null;
     final needsSync = note.audioPath == null && note.id != _syncingNoteId;
     final footerButtons = <Widget>[
       if (actions &&
@@ -399,6 +482,18 @@ extension _ScPages on _CircuitHomePageState {
                   open?.call();
                 },
         ),
+      if (actions &&
+          note.isSong &&
+          note.audioPath != null &&
+          note.song != null &&
+          !note.song!.matched &&
+          !note.song!.busy)
+        ScIconButton(
+          size: 40,
+          icon: LucideIcons.refreshCw,
+          tooltip: 'Identify again',
+          onPressed: () => _identifySongNote(note.id),
+        ),
       if (actions && needsSync)
         ScIconButton(
           size: 40,
@@ -409,9 +504,10 @@ extension _ScPages on _CircuitHomePageState {
     ];
     return ScTile(
       icon: _noteIcon(note),
-      title:
-          note.title ??
-          (note.audioPath == null ? 'Voice recording' : 'Voice note'),
+      title: note.isSong
+          ? (note.song?.title ?? 'Song identification')
+          : note.title ??
+                (note.audioPath == null ? 'Voice recording' : 'Voice note'),
       subtitle: _noteSubtitle(note),
       subtitleColor: attention ? Sc.danger : null,
       onTap: _openNote(note),
@@ -1023,6 +1119,62 @@ extension _ScPages on _CircuitHomePageState {
         ),
       ),
     ),
+    const SizedBox(height: 12),
+    InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: _openMusicSettings,
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: Sc.warmCard,
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 34,
+              height: 34,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(11),
+              ),
+              child: const Icon(
+                LucideIcons.music,
+                size: 18,
+                color: Color(0xffdb5b37),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Music recognition',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+                  ),
+                  Text(
+                    _musicConnected
+                        ? 'Identify song is ready'
+                        : 'Add your service to identify songs',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xff8e857d),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(
+              LucideIcons.chevronRight,
+              size: 18,
+              color: Color(0xff9f968d),
+            ),
+          ],
+        ),
+      ),
+    ),
     const SizedBox(height: 24),
     const ScGroupLabel('What AI can do'),
     ScRow(
@@ -1259,56 +1411,35 @@ extension _ScPages on _CircuitHomePageState {
         ),
       ],
       const SizedBox(height: 22),
-      Container(
-        padding: const EdgeInsets.fromLTRB(15, 12, 13, 12),
-        decoration: BoxDecoration(
-          color: Sc.dark,
-          borderRadius: BorderRadius.circular(18),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            const Text(
-              'Short-Circuit',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 13,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-            Material(
+      Row(
+        children: [
+          Expanded(
+            child: _captureButton(
+              icon: LucideIcons.circle,
+              iconSize: 11,
+              label: 'Record',
+              tooltip: 'Record a voice note on Circuit',
               color: Sc.accent,
-              borderRadius: BorderRadius.circular(15),
-              child: InkWell(
-                borderRadius: BorderRadius.circular(15),
-                onTap: !available || _audioBusy || _recordingAudio
-                    ? null
-                    : _recordAudio,
-                child: Opacity(
-                  opacity: !available ? .45 : 1,
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 13, vertical: 10),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(LucideIcons.circle, size: 9, color: Colors.white),
-                        SizedBox(width: 8),
-                        Text(
-                          'Record',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
+              onTap: !available || _audioBusy || _recordingAudio
+                  ? null
+                  : _recordAudio,
             ),
-          ],
-        ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: _captureButton(
+              icon: LucideIcons.music,
+              iconSize: 15,
+              label: 'Identify song',
+              tooltip:
+                  'Listen for $_songClipSeconds seconds and identify the song',
+              color: Sc.dark,
+              onTap: !available || _audioBusy || _recordingAudio
+                  ? null
+                  : _identifySong,
+            ),
+          ),
+        ],
       ),
       const SizedBox(height: 14),
       ScActionBar(
@@ -1640,88 +1771,13 @@ extension _ScPages on _CircuitHomePageState {
 
   Widget _recordPage() {
     final started = _recordingStartedAt;
-    final elapsed = started == null
-        ? Duration.zero
-        : DateTime.now().difference(started);
-    final clock = '${_two(elapsed.inMinutes)}:${_two(elapsed.inSeconds % 60)}';
-    // The glow breathes once a second (the screen already rebuilds each second).
-    final glow = elapsed.inSeconds.isEven ? 14.0 : 26.0;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 24, 24, 24),
-      child: Column(
-        children: [
-          const Spacer(flex: 2),
-          // Sized to include the glow, so it never runs into the text below.
-          SizedBox(
-            width: 220,
-            height: 220,
-            child: Center(
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 900),
-                curve: Curves.easeInOut,
-                width: 132,
-                height: 132,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Sc.accent),
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color(0x14f05b3d),
-                      spreadRadius: glow,
-                    ),
-                    BoxShadow(
-                      color: const Color(0x0af05b3d),
-                      spreadRadius: glow * 1.7,
-                    ),
-                  ],
-                ),
-                child: const Icon(
-                  LucideIcons.circle,
-                  size: 38,
-                  color: Sc.accent,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 28),
-          const Text(
-            'Recording on Circuit',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 26,
-              fontWeight: FontWeight.w800,
-              letterSpacing: -1,
-              height: 1.1,
-            ),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            clock,
-            style: const TextStyle(
-              fontSize: 40,
-              fontWeight: FontWeight.w800,
-              letterSpacing: -1.5,
-              fontFeatures: [FontFeature.tabularFigures()],
-            ),
-          ),
-          const SizedBox(height: 10),
-          const Text(
-            "Speak naturally. Press stop when you're done.",
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Sc.muted, fontSize: 13, height: 1.4),
-          ),
-          const Spacer(flex: 3),
-          // Anchored at the bottom, where a thumb reaches it.
-          ScIconButton(
-            size: 72,
-            icon: LucideIcons.square,
-            tone: ScTone.primary,
-            tooltip: 'Stop recording',
-            onPressed: _audioBusy ? null : _stopRecording,
-          ),
-        ],
-      ),
+    return RecordingView(
+      elapsed: started == null
+          ? Duration.zero
+          : DateTime.now().difference(started),
+      song: _songClipArmed,
+      busy: _audioBusy,
+      onStop: _stopRecording,
     );
   }
 
