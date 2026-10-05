@@ -170,6 +170,28 @@ in flash at `0x9000`, between the partition table and the app, and are left alon
 merged image is blank between its parts, so either one wipes that region. Notes
 sealed with the wiped key could then only be opened by a phone that already holds it.
 
+## Flashing a build from GitHub
+
+`firmware/CircuitBleDisplay/tools/flash-release.sh` downloads a firmware build and flashes the
+board that is plugged in over USB. It needs `gh` (signed in, the repository is private) and
+`esptool` (`pip install esptool`).
+
+```bash
+tools/flash-release.sh                  # the newest release (tag firmware-v*)
+tools/flash-release.sh firmware-v0.2.0  # a specific release
+tools/flash-release.sh --run 123456     # the build of a GitHub Actions run, before it is released
+tools/flash-release.sh --dir ./dist     # files you already have
+tools/flash-release.sh --dry-run        # download and check everything, flash nothing
+```
+
+It checks the files against `SHA256SUMS`, refuses anything that looks like a merged image,
+finds the board's serial port (or use `--port`), asks before flashing (`--yes` skips the
+question) and writes only the bootloader, partition table and app. Your saved Wi-Fi, pairing and
+notes key are never touched. Close any serial monitor first; it holds the port.
+
+A release needs a tag: `git tag firmware-v0.2.0 && git push origin firmware-v0.2.0`. Until one
+exists, use `--run` with an id from `gh run list --workflow firmware.yml`.
+
 ## How the firmware build works
 
 The board support code (Waveshare's example, LVGL, the codec driver) is not in

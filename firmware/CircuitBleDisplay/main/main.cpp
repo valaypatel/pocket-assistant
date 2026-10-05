@@ -10,6 +10,7 @@
 #include "esp_bt_main.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
+#include "esp_mac.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gatt_common_api.h"
 #include "esp_gatts_api.h"
@@ -39,6 +40,7 @@
 #include "port_power.h"
 #include "port_codec.h"
 #include "circuit_demo_screens.h"
+#include "circuit_recording_icon.h"
 #include "circuit_crypto.h"
 #include "circuit_notes.h"
 #include "circuit_selftest_vector.h"
@@ -82,6 +84,7 @@ lv_obj_t *connection_label;
 lv_obj_t *wordmark_image;
 lv_obj_t *pairing_code_label;
 lv_obj_t *recording_timer_label;
+lv_obj_t *recording_icon;  // the animated device icon on the recording screen (64x64)
 lv_obj_t *sync_progress_label;
 lv_obj_t *idle_date_label;
 lv_obj_t *idle_time_label;
@@ -464,6 +467,7 @@ void show_device_screen(DeviceScreen screen) {
     lv_obj_add_flag(message_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(pairing_code_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     lv_img_set_src(wordmark_image, kScreens[static_cast<size_t>(screen)]);
     lv_obj_center(wordmark_image);
@@ -471,6 +475,8 @@ void show_device_screen(DeviceScreen screen) {
     if (screen == DeviceScreen::Recording) {
         lv_label_set_text(recording_timer_label, "00:00");
         lv_obj_clear_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+        lv_img_set_src(recording_icon, circuit_recording_frame(0));
+        lv_obj_clear_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     } else if (screen == DeviceScreen::Syncing) {
         lv_label_set_text(sync_progress_label, "0%");
         lv_obj_clear_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
@@ -480,28 +486,27 @@ void show_device_screen(DeviceScreen screen) {
 }
 
 void demo_animation_task(void *) {
-    size_t record_frame = 0;
     size_t sync_frame = 0;
     while (true) {
-        if (active_screen == DeviceScreen::Recording && wordmark_image != nullptr) {
+        if (active_screen == DeviceScreen::Recording && wordmark_image != nullptr && recording_icon != nullptr) {
             if (Lvgl_lock(-1)) {
-                // An expanding ring and a breathing dot, stepped for the e-paper.
-                static constexpr const lv_image_dsc_t *kRecordFrames[] = {
-                    &circuit_record_screen, &circuit_record_1_screen,
-                    &circuit_record_2_screen, &circuit_record_3_screen,
-                };
-                lv_img_set_src(wordmark_image, kRecordFrames[record_frame]);
-                const uint32_t elapsed = (xTaskGetTickCount() - recording_started_at) / configTICK_RATE_HZ;
-                char elapsed_text[12];
-                snprintf(elapsed_text, sizeof(elapsed_text), "%02lu:%02lu",
-                    static_cast<unsigned long>(elapsed / 60),
-                    static_cast<unsigned long>(elapsed % 60));
-                lv_label_set_text(recording_timer_label, elapsed_text);
-                lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
+                // Re-check under the lock: the screen may have changed while waiting for it.
+                if (active_screen == DeviceScreen::Recording) {
+                    // Four stepped frames (waveform changes, the dot alternates filled and hollow)
+                    // at the e-paper's cadence; it shows recording is on, not the sound level.
+                    const uint32_t elapsed_ticks = xTaskGetTickCount() - recording_started_at;
+                    lv_img_set_src(recording_icon, circuit_recording_frame(elapsed_ticks * 1000 / configTICK_RATE_HZ));
+                    const uint32_t elapsed = elapsed_ticks / configTICK_RATE_HZ;
+                    char elapsed_text[12];
+                    snprintf(elapsed_text, sizeof(elapsed_text), "%02lu:%02lu",
+                        static_cast<unsigned long>(elapsed / 60),
+                        static_cast<unsigned long>(elapsed % 60));
+                    lv_label_set_text(recording_timer_label, elapsed_text);
+                    lv_obj_clear_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
+                }
                 Lvgl_unlock();
             }
-            record_frame = (record_frame + 1) % 4;
-            vTaskDelay(pdMS_TO_TICKS(700));
+            vTaskDelay(pdMS_TO_TICKS(circuit_recording_frame_ms));
         } else if (active_screen == DeviceScreen::Syncing && wordmark_image != nullptr) {
             // The e-paper cannot spin smoothly, so step the refresh icon
             // through its rotations instead.
@@ -518,7 +523,6 @@ void demo_animation_task(void *) {
             }
             vTaskDelay(pdMS_TO_TICKS(700));
         } else {
-            record_frame = 0;
             sync_frame = 0;
             vTaskDelay(pdMS_TO_TICKS(150));
         }
@@ -538,6 +542,7 @@ void show_pairing_code() {
     lv_label_set_text(pairing_code_label, code);
     lv_obj_clear_flag(pairing_code_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     apply_persistent_labels(DeviceScreen::Pairing);
     lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
@@ -1049,7 +1054,12 @@ const char *wifi_reason_text(uint8_t reason) {
 void send_wifi_status() {
     static const char *const names[] = {"none", "connecting", "connected", "failed"};
     char message[kMaxTextBytes + 1];
-    snprintf(message, sizeof(message), "@wifi-status\n%s\n%s\n%s", names[static_cast<int>(wifi_ui)], wifi_ssid, wifi_detail);
+    // The Wi-Fi MAC address goes last as "mac=..." so older apps, which read everything after the
+    // third line as the detail, just show it there and newer ones pick it out.
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(message, sizeof(message), "@wifi-status\n%s\n%s\n%s\nmac=%02X:%02X:%02X:%02X:%02X:%02X",
+        names[static_cast<int>(wifi_ui)], wifi_ssid, wifi_detail, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     send_relay_request(message);
 }
 
@@ -1872,6 +1882,13 @@ void init_display() {
         lv_img_set_src(wordmark_image, &circuit_splash_screen);
         lv_obj_center(wordmark_image);
 
+        // The recording animation: a 64x64 image of its own, where the screen's ring used to be
+        // (centred at 68,137, left of the timer). Shown only while recording.
+        recording_icon = lv_img_create(lv_screen_active());
+        lv_img_set_src(recording_icon, circuit_recording_frame(0));
+        lv_obj_align(recording_icon, LV_ALIGN_TOP_LEFT, 36, 105);
+        lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
+
         // Header icons: positioned and shown by refresh_status_icons().
         icon_wifi_obj = lv_img_create(lv_screen_active());
         icon_phone_obj = lv_img_create(lv_screen_active());
@@ -1977,14 +1994,31 @@ extern "C" void app_main(void) {
     xTaskCreate(local_clock_task, "local_clock", 3072, nullptr, 2, nullptr);
     start_wifi();
     start_ble();
-    // Start-up is done: leave the splash for the pairing code, or for home. If
-    // something has already taken over (a recording started with the button),
+    // Start-up code is done, but give the splash time to be seen: about five seconds on the panel
+    // (the board takes roughly two seconds after power-up to draw it, so leave at kSplashMinMs).
+    // Home then opens with the clock kept from before, so it is not empty; Wi-Fi and the phone
+    // connect in their own time and their icons update. If the clock somehow is not set, wait up
+    // to kSplashMaxMs. If something has already taken over (a recording started with the button),
     // leave that alone.
-    ESP_LOGI(kTag, "Start-up done, leaving the splash; internal RAM free %u, largest block %u",
+    constexpr uint32_t kSplashMinMs = 7000;
+    constexpr uint32_t kSplashMaxMs = 9000;
+    const bool paired = esp_ble_get_bond_device_num() > 0;
+    while (boot_splash) {
+        const uint32_t up_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        const bool ready = !paired || clock_set;
+        if ((up_ms >= kSplashMinMs && ready) || up_ms >= kSplashMaxMs) {
+            ESP_LOGI(kTag, "Leaving the splash after %u ms (clock %d, wifi %d, phone %d)",
+                static_cast<unsigned>(up_ms), clock_set ? 1 : 0, wifi_ui != WifiUi::Connecting ? 1 : 0,
+                ble_encrypted ? 1 : 0);
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    ESP_LOGI(kTag, "Start-up done; internal RAM free %u, largest block %u",
         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     if (esp_ble_get_bond_device_num() == 0) {
-        show_pairing_code();
+        if (boot_splash) show_pairing_code();
     } else {
         // Paired before this firmware had notes encryption: make the key now. Older
         // notes stay exactly as they are; only new recordings are encrypted.

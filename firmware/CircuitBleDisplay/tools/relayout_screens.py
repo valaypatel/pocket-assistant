@@ -34,6 +34,7 @@ HEADER_ICON_BOX = (134, 0, 200, 28)
 CLOCK_BOX = (6, 36, 130, 84)  # clock digits and AM/PM
 COUNT_BOX = (100, 36, 200, 84)
 BODY_TOP = 32  # everything under the header rule
+SPLASH_ICON = 84  # side of the brand icon on the boot screen
 
 # Header icons, left to right.
 HEADER_ICONS = [("wifi", 138, 3), ("phone", 161, 5), ("hard-drive", 181, 5)]
@@ -42,9 +43,7 @@ HEADER_ICONS = [("wifi", 138, 3), ("phone", 161, 5), ("hard-drive", 181, 5)]
 # with dashes turned into underscores.
 COUNT_ICONS = ["clock", "check", "wifi", "wifi-off", "wifi-low", "wifi-high", "wifi-zero", "phone", "hard-drive"]
 
-# Record animation: (dot radius, expanding ring radius or None) per frame.
-RECORD_CENTER = (68, 137)
-RECORD_FRAMES = [(14, None), (12, 36), (10, 40), (12, None)]
+# Where the animated recording icon sits (an LVGL image of its own, see main.cpp).
 RECORD_BOX = (20, 92, 116, 182)
 
 # The sync glyph is the prototype's refresh-cw icon stepped through rotations
@@ -149,6 +148,32 @@ def wordmark_mask(size=40):
     return [r[min(xs):max(xs) + 1] for r in mask[min(ys):max(ys) + 1]]
 
 
+# The Circuit device icon (apps/short_circuit/assets/brand/circuit-device.svg) in black and white:
+# the dark square and screen become black, the board body and waveform white-on-black as drawn.
+DEVICE_BARS = [(364, 437, 56), (428, 395, 140), (492, 351, 228), (556, 407, 116), (620, 441, 48)]  # x, y, height; 40 wide
+
+
+def icon_mask(size):
+    """The device icon as a size x size ink mask (True = black), drawn at 8x and reduced."""
+    ss = 8
+    k = size * ss / 1024
+    im = Image.new("L", (size * ss, size * ss), 255)
+    dr = ImageDraw.Draw(im)
+
+    def box(x, y, w, h, r, fill):
+        dr.rounded_rectangle((x * k, y * k, (x + w) * k - 1, (y + h) * k - 1), radius=r * k, fill=fill)
+
+    box(0, 0, 1024, 1024, 224, 0)  # dark tile
+    box(270, 230, 484, 564, 114, 255)  # board body
+    box(318, 278, 388, 366, 68, 0)  # screen
+    for x, y, h in DEVICE_BARS:
+        box(x, y, 40, h, 20, 255)
+    dr.ellipse(((512 - 34) * k, (714 - 34) * k, (512 + 34) * k, (714 + 34) * k), fill=0)  # button
+    dr.ellipse(((512 - 15) * k, (714 - 15) * k, (512 + 15) * k, (714 + 15) * k), fill=255)  # its light
+    im = im.resize((size, size), Image.LANCZOS)
+    return [[im.getpixel((x, y)) < 140 for x in range(size)] for y in range(size)]
+
+
 def sync_icon(angle):
     """Rasterise the refresh-cw icon (24-unit grid, 2.3 stroke) rotated about its centre."""
     def arc(p0, p1, r, steps=24):
@@ -230,7 +255,7 @@ def main():
     src = parse(SCREENS)
     wm = wordmark_mask()
     jobs = [("idle", "idle", 0), ("saved", "saved", 0), ("pair", "pair", 0), ("splash", "splash", 0)]
-    jobs += [("record" if i == 0 else f"record_{i}", "record", i) for i in range(len(RECORD_FRAMES))]
+    jobs += [("record", "record", 0)]
     jobs += [("sync" if i == 0 else f"sync_{i}", "sync", a) for i, a in enumerate(SYNC_ANGLES)]
 
     parts = ["#pragma once\n\n#include \"lvgl.h\"\n\n"
@@ -243,7 +268,11 @@ def main():
             big = max((sz for sz in range(40, 80, 2) if mask_size(wordmark_mask(sz))[0] <= W - 28), default=40)
             mark = wordmark_mask(big)
             mw, mh = mask_size(mark)
-            paste_mask(g, mark, (W - mw) // 2, (H - mh) // 2)
+            # Boot screen: the Circuit device icon above the wordmark, the pair centred as a group.
+            icon = icon_mask(SPLASH_ICON)
+            top = (H - (SPLASH_ICON + 12 + mh)) // 2
+            paste_mask(g, icon, (W - SPLASH_ICON) // 2, top)
+            paste_mask(g, mark, (W - mw) // 2, top + SPLASH_ICON + 12)
         elif base == "pair":
             build_pair(g)
         else:
@@ -255,13 +284,9 @@ def main():
             ww, wh = mask_size(wm)
             paste_mask(g, wm, (W - ww) // 2, 84 + (H - 84 - wh) // 2)
         elif base == "record":
+            # The animated device icon (main/circuit_recording_icon.h) is its own LVGL image
+            # placed here at run time, so the baked screen keeps only the static layout.
             clear(g, RECORD_BOX)
-            cx, cy = RECORD_CENTER
-            ring(g, cx, cy, 33, 3)
-            dot, outer = RECORD_FRAMES[arg]
-            disc(g, cx, cy, dot)
-            if outer:
-                ring(g, cx, cy, outer, 3)
         elif base == "sync":
             clear(g, SYNC_BOX)
             paste_mask(g, sync_icon(arg), SYNC_BOX[0], SYNC_BOX[1])
