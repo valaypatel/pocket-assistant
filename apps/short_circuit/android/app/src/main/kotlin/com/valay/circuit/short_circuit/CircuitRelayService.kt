@@ -105,6 +105,7 @@ class CircuitRelayService : Service() {
     @Volatile private var syncGeneration = 0
     private val reconnectHandler = Handler(Looper.getMainLooper())
     private var reconnectDelayMs = 1000L
+    private val connectedStatus = "Connected to Circuit"
     private var shouldReconnect = false
     private var circuitAddress: String? = null
     private var gatt: BluetoothGatt? = null
