@@ -3,6 +3,7 @@
 #include <initializer_list>
 #include <cctype>
 #include <ctime>
+#include <new>
 
 #include "esp_bt.h"
 #include "esp_bt_main.h"
@@ -21,6 +22,7 @@
 
 #include "lwip/inet.h"
 #include "ping/ping_sock.h"
+#include "mbedtls/base64.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdmmc_cmd.h"
@@ -36,7 +38,9 @@
 #include "port_power.h"
 #include "port_codec.h"
 #include "circuit_demo_screens.h"
+#include "circuit_crypto.h"
 #include "circuit_notes.h"
+#include "circuit_selftest_vector.h"
 #include "circuit_sync_server.h"
 
 namespace {
@@ -634,6 +638,82 @@ void report_audio_status(const char *status) {
     send_relay_request(message);
 }
 
+// ---- encrypted notes ---------------------------------------------------------
+// Notes are sealed as they are recorded (circuit_crypto.h) with a key that exists
+// only on this board and on the phone it is paired with. The key is made the first
+// time the board is paired and is destroyed, with every note, on a re-pair.
+
+circuit_secure::Key note_key = {};
+volatile bool note_key_ready = false;
+bool crypto_self_test_ok = false;
+
+// Proves at every start that this build's crypto matches the reference vectors the
+// Android app is also tested against. If it does not, nothing is recorded.
+bool run_crypto_self_test() {
+    static uint8_t sealed[512], opened[512], damaged[512];
+    circuit_secure::Key key = {};
+    memcpy(key.bytes, kVectorMasterKey, sizeof(kVectorMasterKey));
+    key.id = kVectorKeyId;
+    const uint8_t *pcm[] = {kVectorPcm0, kVectorPcm1};
+    const unsigned pcm_len[] = {kVectorPcm0Len, kVectorPcm1Len};
+    const uint8_t *file[] = {kVectorFile0, kVectorFile1};
+    const unsigned file_len[] = {kVectorFile0Len, kVectorFile1Len};
+    for (unsigned i = 0; i < kVectorCases; ++i) {
+        // Sealing must produce exactly the reference file.
+        const size_t made = circuit_secure::seal_buffer(key, kVectorNoteId, 16000, 1, 16, kVectorChunk, pcm[i],
+                                                        pcm_len[i], sealed, sizeof(sealed));
+        if (made != file_len[i] || memcmp(sealed, file[i], made) != 0) return false;
+        // The reference file must open to exactly the reference audio.
+        size_t length = 0;
+        if (!circuit_secure::open_buffer(key, file[i], file_len[i], opened, sizeof(opened), &length) ||
+            length != pcm_len[i] || memcmp(opened, pcm[i], length) != 0) {
+            return false;
+        }
+        // And a single flipped bit must be caught.
+        memcpy(damaged, file[i], file_len[i]);
+        damaged[file_len[i] - 1] ^= 1;
+        if (circuit_secure::open_buffer(key, damaged, file_len[i], opened, sizeof(opened), &length)) return false;
+    }
+    return true;
+}
+
+// Makes the key the first time the board is paired. A board that is not paired has
+// none, so it records nothing: there would be no phone able to read it.
+void ensure_note_key() {
+    if (note_key_ready) return;
+    if (circuit_secure::create_key(&note_key)) {
+        note_key_ready = true;
+        ESP_LOGI(kTag, "Created the notes key (id %08lx)", static_cast<unsigned long>(note_key.id));
+    } else {
+        ESP_LOGE(kTag, "Could not store the notes key");
+    }
+}
+
+// A paired phone asks for the key. Only an encrypted, bonded link can write this
+// command or receive the answer (both characteristics require encryption), so the
+// key never crosses the air in the clear. Reply: "@sec-key\n1\n<id hex>\n<base64>".
+void send_note_key_to_phone(const char *request) {
+    const unsigned long version = strtoul(request + strlen("@sec-hello\n"), nullptr, 10);
+    char reply[kMaxTextBytes + 1];
+    if (!ble_encrypted) {
+        snprintf(reply, sizeof(reply), "@sec-none\nnot encrypted");
+    } else if (version < 1) {
+        snprintf(reply, sizeof(reply), "@sec-none\nunsupported");
+    } else if (!note_key_ready) {
+        snprintf(reply, sizeof(reply), "@sec-none\nno key");
+    } else {
+        char encoded[64] = {};
+        size_t length = 0;
+        mbedtls_base64_encode(reinterpret_cast<unsigned char *>(encoded), sizeof(encoded) - 1, &length,
+                              note_key.bytes, sizeof(note_key.bytes));
+        snprintf(reply, sizeof(reply), "@sec-key\n1\n%08lx\n%s", static_cast<unsigned long>(note_key.id), encoded);
+        memset(encoded, 0, sizeof(encoded));
+    }
+    send_relay_request(reply);
+    memset(reply, 0, sizeof(reply));
+}
+
+
 void record_audio_task(void *argument) {
     const uint32_t seconds = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(argument));
     if (!audio_ready || sd_card == nullptr) {
@@ -647,20 +727,23 @@ void record_audio_task(void *argument) {
 
     char note_path[48];
     const uint32_t note_id = circuit_notes::allocate_id();
-    circuit_notes::path_for(note_id, "WAV", note_path, sizeof(note_path));
-    FILE *file = fopen(note_path, "wb");
-    if (file == nullptr) {
-        update_storage_status("Audio record failed\nCannot create WAV file");
+    circuit_notes::path_for(note_id, "ENC", note_path, sizeof(note_path));
+    // The sealing buffers are too big for this task's stack, so the writer lives on the heap.
+    auto *writer = new (std::nothrow) circuit_secure::Writer();
+    if (writer == nullptr || !writer->open(note_path, note_key, note_id, kAudioSampleRate, kAudioChannels, kAudioBitsPerSample)) {
+        delete writer;
+        update_storage_status("Audio record failed\nCannot create file");
         report_audio_status("Recording failed: cannot create file");
         finish_audio_task();
         return;
     }
 
-    WavHeader header{};
-    fwrite(&header, sizeof(header), 1, file);
+    WavHeader header{};  // only for the audio format constants
     uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(kAudioBufferBytes, MALLOC_CAP_SPIRAM));
     if (buffer == nullptr) {
-        fclose(file);
+        writer->abort();
+        delete writer;
+        remove(note_path);
         update_storage_status("Audio record failed\nNot enough memory");
         report_audio_status("Recording failed: memory unavailable");
         finish_audio_task();
@@ -684,16 +767,21 @@ void record_audio_task(void *argument) {
         for (size_t frame = 0; frame < mono_bytes / sizeof(int16_t); ++frame) {
             samples[frame] = samples[frame * kCodecCaptureChannels];
         }
-        if (fwrite(buffer, 1, mono_bytes, file) != mono_bytes) break;
+        if (!writer->append(buffer, mono_bytes)) break;
         recorded_bytes += mono_bytes;
     }
     heap_caps_free(buffer);
 
-    header.data_size = recorded_bytes;
-    header.file_size = recorded_bytes + sizeof(WavHeader) - 8;
-    fseek(file, 0, SEEK_SET);
-    fwrite(&header, sizeof(header), 1, file);
-    fclose(file);
+    // Seals the last chunk. A note that cannot be finished is not kept as if it were fine.
+    const bool sealed_ok = writer->finish();
+    delete writer;
+    if (!sealed_ok) {
+        remove(note_path);
+        update_storage_status("Audio record failed\nCould not save note");
+        report_audio_status("Recording failed: could not save the note");
+        finish_audio_task();
+        return;
+    }
 
     const bool completed = recorded_bytes == target_bytes;
     show_device_screen(DeviceScreen::Saved);
@@ -709,61 +797,69 @@ void record_audio_task(void *argument) {
     finish_audio_task();
 }
 
-// Path of the most recent note, or an empty string if there is none.
-void latest_note_path(char *out, size_t size) {
-    const uint32_t id = circuit_notes::newest_id();
-    if (id == 0) { out[0] = '\0'; return; }
-    circuit_notes::path_for(id, "WAV", out, size);
+// Plays a mono 16-bit chunk through the stereo codec. `stereo` needs room for twice `bytes`.
+bool play_mono_chunk(const uint8_t *chunk, size_t bytes, uint8_t *stereo_buffer) {
+    auto *mono = reinterpret_cast<const int16_t *>(chunk);
+    auto *stereo = reinterpret_cast<int16_t *>(stereo_buffer);
+    const size_t samples = bytes / sizeof(int16_t);
+    for (size_t index = 0; index < samples; ++index) {
+        stereo[index * 2] = mono[index];
+        stereo[index * 2 + 1] = mono[index];
+    }
+    return Codec_PlaybackData(stereo_buffer, samples * kCodecCaptureChannels * sizeof(int16_t)) == ESP_OK;
 }
 
 void play_audio_task(void *) {
-    char latest[48];
-    latest_note_path(latest, sizeof(latest));
-    FILE *file = latest[0] ? fopen(latest, "rb") : nullptr;
+    // The newest note, in whichever form it is stored.
+    circuit_notes::Note note = {};
+    const uint32_t id = circuit_notes::newest_id();
+    char path[48] = {};
+    const bool found = id != 0 && circuit_notes::describe(id, &note);
+    if (found) circuit_notes::note_path(note, path, sizeof(path));
+    auto *reader = (found && note.encrypted) ? new (std::nothrow) circuit_secure::Reader() : nullptr;
+    FILE *plain = nullptr;
     WavHeader header{};
-    if (!audio_ready || file == nullptr || fread(&header, sizeof(header), 1, file) != 1 ||
-        memcmp(header.riff, "RIFF", 4) != 0 || memcmp(header.wave, "WAVE", 4) != 0) {
-        if (file != nullptr) fclose(file);
-        update_storage_status("No recording found\nRecord audio first");
-        report_audio_status("Playback failed: no recording found");
-        finish_audio_task();
-        return;
+    bool ready = audio_ready && found;
+    if (ready && note.encrypted) {
+        ready = reader != nullptr && reader->open(path) && reader->channels() == 1 && reader->bits() == 16;
+    } else if (ready) {
+        plain = fopen(path, "rb");
+        ready = plain != nullptr && fread(&header, sizeof(header), 1, plain) == 1 &&
+                memcmp(header.riff, "RIFF", 4) == 0 && memcmp(header.wave, "WAVE", 4) == 0 && header.channels == 1;
     }
-
-    uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(kAudioBufferBytes, MALLOC_CAP_SPIRAM));
-    uint8_t *stereo_buffer = header.channels == 1
-        ? static_cast<uint8_t *>(heap_caps_malloc(kAudioBufferBytes * 2, MALLOC_CAP_SPIRAM))
-        : nullptr;
-    if (buffer == nullptr || (header.channels == 1 && stereo_buffer == nullptr)) {
+    uint8_t *buffer = ready ? static_cast<uint8_t *>(heap_caps_malloc(kAudioBufferBytes, MALLOC_CAP_SPIRAM)) : nullptr;
+    uint8_t *stereo_buffer = ready ? static_cast<uint8_t *>(heap_caps_malloc(kAudioBufferBytes * 2, MALLOC_CAP_SPIRAM)) : nullptr;
+    if (!ready || buffer == nullptr || stereo_buffer == nullptr) {
         if (buffer != nullptr) heap_caps_free(buffer);
         if (stereo_buffer != nullptr) heap_caps_free(stereo_buffer);
-        fclose(file);
-        update_storage_status("Playback failed\nNot enough memory");
-        report_audio_status("Playback failed: memory unavailable");
+        if (plain != nullptr) fclose(plain);
+        delete reader;
+        const bool memory = ready;  // everything was fine except the buffers
+        update_storage_status(memory ? "Playback failed\nNot enough memory" : "No recording found\nRecord audio first");
+        report_audio_status(memory ? "Playback failed: memory unavailable" : "Playback failed: no recording found");
         finish_audio_task();
         return;
     }
 
     update_storage_status("Playing recording…\nSpeaker active");
     report_audio_status("Playing latest recording");
-    size_t bytes = 0;
-    while ((bytes = fread(buffer, 1, kAudioBufferBytes, file)) > 0) {
-        if (header.channels == 1) {
-            auto *mono = reinterpret_cast<int16_t *>(buffer);
-            auto *stereo = reinterpret_cast<int16_t *>(stereo_buffer);
-            const size_t samples = bytes / sizeof(int16_t);
-            for (size_t index = 0; index < samples; ++index) {
-                stereo[index * 2] = mono[index];
-                stereo[index * 2 + 1] = mono[index];
-            }
-            if (Codec_PlaybackData(stereo_buffer, samples * kCodecCaptureChannels * sizeof(int16_t)) != ESP_OK) break;
-        } else if (Codec_PlaybackData(buffer, bytes) != ESP_OK) {
-            break;
+    if (reader != nullptr) {
+        // read() returns 0 at the end of the note, or at a chunk that does not authenticate
+        // (damaged, or a recording cut short while it was being written): playback just stops.
+        size_t bytes = 0;
+        while ((bytes = reader->read(buffer)) > 0) {
+            if (!play_mono_chunk(buffer, bytes, stereo_buffer)) break;
+        }
+    } else {
+        size_t bytes = 0;
+        while ((bytes = fread(buffer, 1, kAudioBufferBytes, plain)) > 0) {
+            if (!play_mono_chunk(buffer, bytes, stereo_buffer)) break;
         }
     }
     heap_caps_free(buffer);
-    if (stereo_buffer != nullptr) heap_caps_free(stereo_buffer);
-    fclose(file);
+    heap_caps_free(stereo_buffer);
+    if (plain != nullptr) fclose(plain);
+    delete reader;
     update_storage_status("Playback complete\nReady to record");
     report_audio_status("Playback complete");
     finish_audio_task();
@@ -786,6 +882,16 @@ void start_recording(char *command) {
     if (audio_busy) {
         update_storage_status("Audio is busy\nPlease wait");
         report_audio_status("Audio is busy");
+        return;
+    }
+    if (!crypto_self_test_ok) {
+        update_storage_status("Encryption check failed\nNot recording");
+        report_audio_status("Recording failed: encryption self-test failed");
+        return;
+    }
+    if (!note_key_ready) {
+        update_storage_status("Pair Circuit with\nthe app first");
+        report_audio_status("Recording failed: pair Circuit with the app first");
         return;
     }
     audio_busy = true;
@@ -811,7 +917,7 @@ void audio_sync_task(void *) {
     circuit_notes::Note oldest[1];
     const size_t waiting = circuit_notes::list_unsynced(oldest, 1);
     char latest[48] = {};
-    if (waiting > 0) circuit_notes::path_for(oldest[0].id, "WAV", latest, sizeof(latest));
+    if (waiting > 0) circuit_notes::note_path(oldest[0], latest, sizeof(latest));
     FILE *file = waiting > 0 ? fopen(latest, "rb") : nullptr;
     if (file == nullptr || connection_id == UINT16_MAX || relay_handle == 0) {
         if (file != nullptr) fclose(file);
@@ -1467,6 +1573,8 @@ void text_display_task(void *) {
                     snprintf(result, sizeof(result), "Notes cleaned: %u removed from Circuit", static_cast<unsigned>(removed));
                     report_audio_status(result);
                 }
+            } else if (strncmp(message.value, "@sec-hello\n", 11) == 0) {
+                send_note_key_to_phone(message.value);
             } else if (strcmp(message.value, "@wifi-status") == 0) {
                 send_wifi_status();
                 send_sync_status();
@@ -1500,6 +1608,7 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
         if (param->ble_security.auth_cmpl.success) {
             ESP_LOGI(kTag, "Short-Circuit bonded with encrypted BLE");
             ble_encrypted = true;
+            ensure_note_key();
             show_pairing_code();
             return_to_idle_after(DeviceScreen::Pairing, 3000);
         } else {
@@ -1783,6 +1892,10 @@ extern "C" void app_main(void) {
         ESP_ERROR_CHECK(nvs_status);
     }
 
+    crypto_self_test_ok = run_crypto_self_test();
+    note_key_ready = circuit_secure::load_key(&note_key);
+    ESP_LOGI(kTag, "Notes crypto self-test: %s; notes key: %s", crypto_self_test_ok ? "PASS" : "FAIL",
+        note_key_ready ? "present" : "none yet");
     text_queue = xQueueCreate(4, sizeof(TextMessage));
     configASSERT(text_queue);
     pairing_passkey = esp_random() % 1000000;
@@ -1811,7 +1924,10 @@ extern "C" void app_main(void) {
     ESP_LOGI(kTag, "Start-up done, leaving the splash");
     if (esp_ble_get_bond_device_num() == 0) {
         show_pairing_code();
-    } else if (boot_splash) {
-        show_device_screen(DeviceScreen::Idle);
+    } else {
+        // Paired before this firmware had notes encryption: make the key now. Older
+        // notes stay exactly as they are; only new recordings are encrypted.
+        ensure_note_key();
+        if (boot_splash) show_device_screen(DeviceScreen::Idle);
     }
 }

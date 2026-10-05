@@ -67,12 +67,25 @@ class CircuitRelayService : Service() {
         @Volatile private var audioStatusListener: ((String) -> Unit)? = null
         fun writeToCircuit(value: String): Boolean = activeService?.writeCommand(value) ?: false
         fun playSyncedRecording(path: String): Boolean = activeService?.playRecording(path) ?: false
+        fun playWavBytes(bytes: ByteArray): Boolean = activeService?.playBytes(bytes) ?: false
         fun stopPlayback() { activeService?.stopPlayback() }
         fun playLatestSyncedRecording(): Boolean = latestSyncedFile?.let(::playSyncedRecording) ?: false
         fun clearAudio(): Boolean = activeService?.clearAudioFiles() ?: false
+
+        /** A downloaded note: ".wav" (older, plain) or ".cnote" (encrypted). */
+        fun isNoteFile(file: File) =
+            file.name.startsWith("circuit-note-") && (file.name.endsWith(".wav") || file.name.endsWith(".cnote"))
+
+        /** Encrypted notes start with the format's magic, "CNT1". The extension follows the content. */
+        fun noteExtension(file: File): String = try {
+            file.inputStream().use { input ->
+                val magic = ByteArray(4)
+                if (input.read(magic) == 4 && String(magic, Charsets.ISO_8859_1) == "CNT1") "cnote" else "wav"
+            }
+        } catch (_: Exception) { "wav" }
         /** Synced note files as "path|epochSeconds", oldest first. */
         fun syncedNotes(context: Context): List<String> = context.filesDir.listFiles()
-            ?.filter { it.name.startsWith("circuit-note-") && it.name.endsWith(".wav") }
+            ?.filter { isNoteFile(it) }
             ?.sortedBy { it.name }
             ?.map { "${it.absolutePath}|${it.name.removePrefix("circuit-note-").substringBefore('-').toLongOrNull() ?: 0}" }
             ?: emptyList()
@@ -329,6 +342,12 @@ class CircuitRelayService : Service() {
             audioStatusListener?.invoke(request)
             return
         }
+        if (request.startsWith("@sec-key\n") || request.startsWith("@sec-none")) {
+            // The notes key travels only over the encrypted link. It goes straight to the app,
+            // which keeps it in secure storage; it is not stored or logged here.
+            audioStatusListener?.invoke(request)
+            return
+        }
         if (request.startsWith("@sync-offer\n")) {
             handleSyncOffer(request)
             return
@@ -397,8 +416,10 @@ class CircuitRelayService : Service() {
         output.flush()
         output.close()
         syncOutput = null
-        val file = syncFile
+        var file = syncFile
         if (file != null && syncExpectedBytes > 0 && syncReceivedBytes == syncExpectedBytes) {
+            val named = File(file.parentFile, file.nameWithoutExtension + "." + noteExtension(file))
+            if (named != file && file.renameTo(named)) file = named
             latestSyncedFile = file.absolutePath
             publishAudioStatus("$status|${file.absolutePath}")
         } else {
@@ -423,27 +444,12 @@ class CircuitRelayService : Service() {
         val now = java.util.Calendar.getInstance()
         val time = "%02d:%02d".format(now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE))
         val date = java.text.SimpleDateFormat("EEE dd MMM", Locale.ENGLISH).format(now.time).uppercase(Locale.ENGLISH)
-        var pending = 0
-        var synced = 0
-        val known = HashSet<String>()
-        try {
-            val stored = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
-                .getString("flutter.circuit_notes", null)
-            if (stored != null) {
-                val notes = JSONArray(stored)
-                for (i in 0 until notes.length()) {
-                    val path = notes.getJSONObject(i).optString("audioPath", "")
-                    if (path.isEmpty()) pending++ else { synced++; known.add(path) }
-                }
-            }
-        } catch (_: Exception) { /* counts stay at what we could read */ }
-        // Notes downloaded in the background that the app screen has not adopted yet.
-        val unreferenced = ArrayList<String>()
-        filesDir.listFiles()?.filter { it.name.startsWith("circuit-note-") && it.name.endsWith(".wav") }
-            ?.forEach { if (it.absolutePath !in known) { synced++; unreferenced.add("${it.name} (${it.length()} B)") } }
-        if (unreferenced.isNotEmpty()) {
-            Log.i("CircuitCounts", "pending=$pending synced=$synced referenced=${known.size} unreferenced=$unreferenced")
-        }
+        // The app keeps its notes list encrypted, so the pending count comes from a number it
+        // writes beside it; notes already downloaded are counted from the files themselves.
+        val pending = try {
+            getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE).getLong("flutter.circuit_pending_count", 0L).toInt()
+        } catch (_: Exception) { 0 }
+        val synced = filesDir.listFiles()?.count { isNoteFile(it) } ?: 0
         val offsetMinutes = TimeZone.getDefault().getOffset(now.timeInMillis) / 60_000
         writeCommand("@home\n$time\n$date\n$pending · $synced\n${now.timeInMillis / 1000}\n$offsetMinutes")
     }
@@ -532,9 +538,9 @@ class CircuitRelayService : Service() {
                 // (an acknowledgement was lost and Circuit offered it again). Reuse it
                 // rather than keeping two copies.
                 val existing = filesDir.listFiles()?.firstOrNull {
-                    Regex("circuit-note-\\d+-$id\\.wav").matches(it.name) && it.length() == bytes
+                    Regex("circuit-note-\\d+-$id\\.(wav|cnote)").matches(it.name) && it.length() == bytes
                 }
-                val target = existing ?: File(filesDir, "circuit-note-$epoch-$id.wav")
+                var target = existing ?: File(filesDir, "circuit-note-$epoch-$id.wav")
                 val partial = File(filesDir, "circuit-note-$epoch-$id.part")
                 if (!(target.exists() && target.length() == bytes)) {
                     var attempts = 0
@@ -570,6 +576,8 @@ class CircuitRelayService : Service() {
                             if (error is javax.net.ssl.SSLException && partial.length() == 0L) throw error
                         }
                     }
+                    // Encrypted notes are kept as received; the name says which kind it is.
+                    target = File(filesDir, "circuit-note-$epoch-$id.${noteExtension(partial)}")
                     if (partial.length() != bytes || !partial.renameTo(target)) {
                         partial.delete()
                         throw IOException("Note $id arrived incomplete")
@@ -597,7 +605,7 @@ class CircuitRelayService : Service() {
     private fun clearAudioFiles(): Boolean {
         latestSyncedFile = null
         filesDir.listFiles()
-            ?.filter { it.name.startsWith("circuit-note-") && it.name.endsWith(".wav") }
+            ?.filter { isNoteFile(it) }
             ?.forEach { it.delete() }
         return writeCommand("@audio-clear")
     }
@@ -608,6 +616,31 @@ class CircuitRelayService : Service() {
         stopPlayback()
         mediaPlayer = android.media.MediaPlayer().apply {
             setDataSource(file.absolutePath)
+            setOnCompletionListener {
+                release()
+                if (mediaPlayer === this) mediaPlayer = null
+            }
+            prepare()
+            start()
+        }
+        true
+    } catch (_: Exception) { false }
+
+    /** Plays a WAV held in memory (an encrypted note the app has opened), so no plain file is written. */
+    private fun playBytes(wav: ByteArray): Boolean = try {
+        stopPlayback()
+        val source = object : android.media.MediaDataSource() {
+            override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+                if (position >= wav.size) return -1
+                val count = minOf(size, wav.size - position.toInt())
+                System.arraycopy(wav, position.toInt(), buffer, offset, count)
+                return count
+            }
+            override fun getSize(): Long = wav.size.toLong()
+            override fun close() {}
+        }
+        mediaPlayer = android.media.MediaPlayer().apply {
+            setDataSource(source)
             setOnCompletionListener {
                 release()
                 if (mediaPlayer === this) mediaPlayer = null

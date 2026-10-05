@@ -1409,6 +1409,14 @@ extension _ScPages on _CircuitHomePageState {
               ? '${_savedCircuitId!.substring(0, 8)}…'
               : _savedCircuitId!,
         ),
+        ScRow(
+          title: 'Note encryption',
+          caption: _noteKeyId == null
+              ? 'Waiting for the key from Circuit'
+              : 'New notes are encrypted on Circuit and stay encrypted here',
+          value: _noteKeyId == null ? 'Waiting' : 'On',
+          valueColor: _noteKeyId == null ? Sc.orange : Sc.green,
+        ),
       ],
       const SizedBox(height: 22),
       Row(

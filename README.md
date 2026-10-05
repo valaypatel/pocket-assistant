@@ -90,6 +90,13 @@ Install on a phone with `adb install -r build/app/outputs/flutter-apk/app-releas
    base URL, key and model for an OpenAI-compatible service (notes review and
    chat). Keys are kept in Android secure storage and never in the repository.
 
+## Security
+
+New notes are encrypted on the board as they are recorded and stay encrypted in
+transit and on the phone. Nothing deletes a note or a key. See
+[docs/security/README.md](docs/security/README.md) for how it works and what it
+does and does not protect against.
+
 ## Project status
 
 Early and personal. Things change often, and the board firmware and app are
