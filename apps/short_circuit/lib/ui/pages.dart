@@ -81,6 +81,13 @@ extension _ScPages on _CircuitHomePageState {
     _ => 'Not set up',
   };
 
+  /// Circuit's IP address while it is on Wi-Fi, else null.
+  String? get _wifiIp =>
+      _wifiState == 'connected' &&
+          RegExp(r'^\d{1,3}(\.\d{1,3}){3}$').hasMatch(_wifiDetail.trim())
+      ? _wifiDetail.trim()
+      : null;
+
   Widget _deviceChip() {
     final wifiColor = _wifiState == 'connected'
         ? Sc.green
@@ -1432,11 +1439,30 @@ extension _ScPages on _CircuitHomePageState {
         const SizedBox(height: 24),
         const ScGroupLabel('About Circuit'),
         ScRow(
-          title: 'Device ID',
-          caption: 'Bluetooth address',
-          value: _savedCircuitId!.length > 10
-              ? '${_savedCircuitId!.substring(0, 8)}…'
-              : _savedCircuitId!,
+          title: 'Bluetooth address',
+          caption: 'Tap to copy',
+          value: _savedCircuitId!,
+          onTap: () => _copyValue('Bluetooth address', _savedCircuitId!),
+        ),
+        ScRow(
+          title: 'IP address',
+          caption: _wifiIp == null
+              ? 'Circuit is not on Wi-Fi'
+              : 'On ${_wifiSsid.isEmpty ? 'your Wi-Fi' : _wifiSsid} · tap to copy',
+          value: _wifiIp ?? 'Not connected',
+          onTap: _wifiIp == null
+              ? null
+              : () => _copyValue('IP address', _wifiIp!),
+        ),
+        ScRow(
+          title: 'Wi-Fi MAC address',
+          caption: _wifiMac.isEmpty
+              ? 'Circuit shares it when it is connected'
+              : 'Tap to copy',
+          value: _wifiMac.isEmpty ? 'Unknown' : _wifiMac,
+          onTap: _wifiMac.isEmpty
+              ? null
+              : () => _copyValue('Wi-Fi MAC address', _wifiMac),
         ),
         ScRow(
           title: 'Note encryption',
