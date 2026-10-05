@@ -68,16 +68,31 @@ inline void for_each_wav(Fn fn) {
     for_each_file([&](uint32_t id, bool encrypted) { if (!encrypted) fn(id); });
 }
 
+// True if note `id` also has an encrypted file. Kept out of line so its path buffer is
+// not on the stack while the caller's callback runs: listing runs on a task with little
+// stack, inside filesystem calls that are already deep.
+__attribute__((noinline)) inline bool has_encrypted_file(uint32_t id) {
+    char path[48];
+    path_for(id, "ENC", path, sizeof(path));
+    return exists(path);
+}
+
 // Calls fn(id) once per note. If a note exists both ways (an encryption that was
 // interrupted after the new file was complete), the encrypted one is the note.
 template <typename Fn>
 inline void for_each_note(Fn fn) {
-    for_each_file([&](uint32_t id, bool encrypted) {
-        if (encrypted) { fn(id); return; }
-        char twin[48];
-        path_for(id, "ENC", twin, sizeof(twin));
-        if (!exists(twin)) fn(id);
-    });
+    DIR *dir = opendir(kDir);
+    if (dir == nullptr) return;
+    while (dirent *entry = readdir(dir)) {
+        unsigned long id = 0;
+        char ext[4] = {};
+        if (sscanf(entry->d_name, "N%7lu.%3s", &id, ext) != 2 || id == 0) continue;
+        const bool encrypted = strcasecmp(ext, "ENC") == 0;
+        if (encrypted || (strcasecmp(ext, "WAV") == 0 && !has_encrypted_file(static_cast<uint32_t>(id)))) {
+            fn(static_cast<uint32_t>(id));
+        }
+    }
+    closedir(dir);
 }
 
 inline uint32_t newest_id() {

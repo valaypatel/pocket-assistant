@@ -27,6 +27,7 @@
 #include <sys/socket.h>
 
 #include "esp_https_server.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
@@ -280,6 +281,13 @@ inline esp_err_t note_handler(httpd_req_t *req) {
         }
     }
     if (status == ESP_OK) status = httpd_resp_send_chunk(req, nullptr, 0);
+    if (status != ESP_OK) {
+        ESP_LOGW("CircuitSync", "Download of note %lu stopped after %lu bytes: internal RAM free %u, largest block %u, lowest ever %u",
+            static_cast<unsigned long>(id), static_cast<unsigned long>(state.served_bytes),
+            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+            static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+    }
     fclose(file);
     free(buffer);
     return status;

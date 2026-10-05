@@ -420,6 +420,7 @@ class CircuitRelayService : Service() {
         if (file != null && syncExpectedBytes > 0 && syncReceivedBytes == syncExpectedBytes) {
             val named = File(file.parentFile, file.nameWithoutExtension + "." + noteExtension(file))
             if (named != file && file.renameTo(named)) file = named
+            Log.i("CircuitSync", "Saved a note over Bluetooth as ${file.name}")
             latestSyncedFile = file.absolutePath
             publishAudioStatus("$status|${file.absolutePath}")
         } else {
@@ -544,7 +545,15 @@ class CircuitRelayService : Service() {
                 val partial = File(filesDir, "circuit-note-$epoch-$id.part")
                 if (!(target.exists() && target.length() == bytes)) {
                     var attempts = 0
+                    var progressedTo = partial.length()
                     while (partial.length() < bytes) {
+                        // Circuit's memory is tight, so on a long download it can drop the connection
+                        // now and then. Resuming picks up where it stopped, so only attempts that make
+                        // no progress count against the limit.
+                        if (partial.length() > progressedTo) {
+                            progressedTo = partial.length()
+                            attempts = 0
+                        }
                         if (++attempts > 4) throw IOException("Connection to Circuit kept dropping")
                         try {
                             val have = partial.length()
@@ -584,6 +593,7 @@ class CircuitRelayService : Service() {
                     }
                 }
                 doneBytes += bytes
+                Log.i("CircuitSync", "Saved note $id as ${target.name} ($bytes B)")  // the extension says whether it is encrypted
                 val ack = open("/ack/$id", "POST")
                 if (ack.responseCode != 200) throw IOException("Could not confirm note $id")
                 latestSyncedFile = target.absolutePath

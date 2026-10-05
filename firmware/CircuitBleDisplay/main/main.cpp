@@ -647,10 +647,24 @@ circuit_secure::Key note_key = {};
 volatile bool note_key_ready = false;
 bool crypto_self_test_ok = false;
 
+bool run_crypto_self_test_with(uint8_t *sealed, uint8_t *opened, uint8_t *damaged);
+
 // Proves at every start that this build's crypto matches the reference vectors the
 // Android app is also tested against. If it does not, nothing is recorded.
 bool run_crypto_self_test() {
-    static uint8_t sealed[512], opened[512], damaged[512];
+    // These buffers are only needed for a moment at start-up, so they are borrowed from
+    // the heap and given back, rather than kept as static arrays: internal RAM on this
+    // board is so tight that 1.5 KB of permanent buffers mattered.
+    uint8_t *scratch = static_cast<uint8_t *>(malloc(3 * 512));
+    if (scratch == nullptr) return false;
+    uint8_t *sealed = scratch, *opened = scratch + 512, *damaged = scratch + 1024;
+    const bool ok = run_crypto_self_test_with(sealed, opened, damaged);
+    memset(scratch, 0, 3 * 512);
+    free(scratch);
+    return ok;
+}
+
+bool run_crypto_self_test_with(uint8_t *sealed, uint8_t *opened, uint8_t *damaged) {
     circuit_secure::Key key = {};
     memcpy(key.bytes, kVectorMasterKey, sizeof(kVectorMasterKey));
     key.id = kVectorKeyId;
@@ -661,18 +675,18 @@ bool run_crypto_self_test() {
     for (unsigned i = 0; i < kVectorCases; ++i) {
         // Sealing must produce exactly the reference file.
         const size_t made = circuit_secure::seal_buffer(key, kVectorNoteId, 16000, 1, 16, kVectorChunk, pcm[i],
-                                                        pcm_len[i], sealed, sizeof(sealed));
+                                                        pcm_len[i], sealed, 512);
         if (made != file_len[i] || memcmp(sealed, file[i], made) != 0) return false;
         // The reference file must open to exactly the reference audio.
         size_t length = 0;
-        if (!circuit_secure::open_buffer(key, file[i], file_len[i], opened, sizeof(opened), &length) ||
+        if (!circuit_secure::open_buffer(key, file[i], file_len[i], opened, 512, &length) ||
             length != pcm_len[i] || memcmp(opened, pcm[i], length) != 0) {
             return false;
         }
         // And a single flipped bit must be caught.
         memcpy(damaged, file[i], file_len[i]);
         damaged[file_len[i] - 1] ^= 1;
-        if (circuit_secure::open_buffer(key, damaged, file_len[i], opened, sizeof(opened), &length)) return false;
+        if (circuit_secure::open_buffer(key, damaged, file_len[i], opened, 512, &length)) return false;
     }
     return true;
 }
@@ -708,6 +722,7 @@ void send_note_key_to_phone(const char *request) {
                               note_key.bytes, sizeof(note_key.bytes));
         snprintf(reply, sizeof(reply), "@sec-key\n1\n%08lx\n%s", static_cast<unsigned long>(note_key.id), encoded);
         memset(encoded, 0, sizeof(encoded));
+        ESP_LOGI(kTag, "Sent the notes key to the phone (id %08lx)", static_cast<unsigned long>(note_key.id));
     }
     send_relay_request(reply);
     memset(reply, 0, sizeof(reply));
@@ -783,6 +798,8 @@ void record_audio_task(void *argument) {
         return;
     }
 
+    ESP_LOGI(kTag, "Saved note %lu as %s (%lu bytes of audio, encrypted)", static_cast<unsigned long>(note_id),
+        note_path, static_cast<unsigned long>(recorded_bytes));
     const bool completed = recorded_bytes == target_bytes;
     show_device_screen(DeviceScreen::Saved);
     return_to_idle_after(DeviceScreen::Saved, 3000);
@@ -1589,6 +1606,13 @@ void text_display_task(void *) {
                 ESP_LOGI(kTag, "Displaying BLE text: %s", message.value);
                 update_message(message.value);
             }
+            // Log each new low of the unused stack, so the margin is known and not guessed.
+            static UBaseType_t lowest_spare = UINT32_MAX;
+            const UBaseType_t spare = uxTaskGetStackHighWaterMark(nullptr);
+            if (spare < lowest_spare) {
+                lowest_spare = spare;
+                ESP_LOGW(kTag, "text_display stack: never less than %u bytes spare", static_cast<unsigned>(spare));
+            }
         }
     }
 }
@@ -1912,7 +1936,9 @@ extern "C" void app_main(void) {
     audio_ready = true;
     init_record_button();
     xTaskCreate(demo_animation_task, "demo_animation", 3072, nullptr, 2, nullptr);
-    xTaskCreate(text_display_task, "text_display", 4096, nullptr, 4, nullptr);
+    // 5 KB: the command handler runs deep, through file listing and the Wi-Fi sync start, and
+    // 4 KB overflowed once note listing grew by one nested call. Its real use is logged below.
+    xTaskCreate(text_display_task, "text_display", 5120, nullptr, 4, nullptr);
     xTaskCreate(status_icon_task, "status_icons", 3072, nullptr, 2, nullptr);
     xTaskCreate(sync_supervisor_task, "sync_supervisor", 10240, nullptr, 3, nullptr);
     xTaskCreate(local_clock_task, "local_clock", 3072, nullptr, 2, nullptr);
@@ -1921,7 +1947,9 @@ extern "C" void app_main(void) {
     // Start-up is done: leave the splash for the pairing code, or for home. If
     // something has already taken over (a recording started with the button),
     // leave that alone.
-    ESP_LOGI(kTag, "Start-up done, leaving the splash");
+    ESP_LOGI(kTag, "Start-up done, leaving the splash; internal RAM free %u, largest block %u",
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     if (esp_ble_get_bond_device_num() == 0) {
         show_pairing_code();
     } else {
