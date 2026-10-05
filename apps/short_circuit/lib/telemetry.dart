@@ -56,8 +56,9 @@ class Telemetry {
       if (enabled) unawaited(_crashlytics.recordFlutterFatalError(details));
     };
     PlatformDispatcher.instance.onError = (error, stack) {
-      if (enabled)
-        unawaited(_crashlytics.recordError(error, stack, fatal: true));
+      // Switched off: leave the error to Flutter's normal handling, do not swallow it.
+      if (!enabled) return false;
+      unawaited(_crashlytics.recordError(error, stack, fatal: true));
       return true;
     };
   }
