@@ -1,6 +1,7 @@
 part of '../main.dart';
 
-/// Chat about one note. The AI sees only that note; history is saved with it.
+/// Chat about one note, or about a group of notes. The AI sees only those notes; the history is
+/// saved with them.
 class NoteChatPage extends StatefulWidget {
   const NoteChatPage({
     super.key,
@@ -10,6 +11,9 @@ class NoteChatPage extends StatefulWidget {
     required this.saveHistory,
     required this.ask,
     required this.onAddTask,
+    this.banner,
+    this.starters,
+    this.subject = 'note',
   });
 
   final String noteId;
@@ -21,6 +25,15 @@ class NoteChatPage extends StatefulWidget {
   /// Returns the assistant's reply to the last message in [history].
   final Future<String> Function(String noteId, List<ChatMessage> history) ask;
   final Future<void> Function(String title, String? detail) onAddTask;
+
+  /// A line under the title, for a group chat: "Using 18 of 22 notes · …".
+  final String? banner;
+
+  /// Suggested first questions; the single-note ones when null.
+  final List<(IconData, String)>? starters;
+
+  /// 'note' or 'group': what the chat is about, for its wording.
+  final String subject;
 
   @override
   State<NoteChatPage> createState() => _NoteChatPageState();
@@ -211,12 +224,12 @@ class _NoteChatPageState extends State<NoteChatPage> {
       const SizedBox(height: 24),
       const Icon(LucideIcons.messageCircle, size: 28, color: Sc.faint),
       const SizedBox(height: 12),
-      const Text(
-        'Ask anything about this note.',
+      Text(
+        'Ask anything about this ${widget.subject}.',
         style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
       ),
       const SizedBox(height: 16),
-      for (final starter in _starters)
+      for (final starter in widget.starters ?? _starters)
         Padding(
           padding: const EdgeInsets.only(bottom: 8),
           child: Material(
@@ -267,7 +280,7 @@ class _NoteChatPageState extends State<NoteChatPage> {
               children: [
                 ScIconButton(
                   icon: LucideIcons.arrowLeft,
-                  tooltip: 'Back to note',
+                  tooltip: 'Back to ${widget.subject}',
                   onPressed: () => Navigator.pop(context),
                 ),
                 const SizedBox(width: 12),
@@ -293,6 +306,17 @@ class _NoteChatPageState extends State<NoteChatPage> {
               ],
             ),
           ),
+          if (widget.banner != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 6, 20, 0),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  widget.banner!,
+                  style: const TextStyle(color: Sc.muted, fontSize: 12),
+                ),
+              ),
+            ),
           Expanded(
             child: _loading
                 ? const SizedBox.shrink()
@@ -359,8 +383,8 @@ class _NoteChatPageState extends State<NoteChatPage> {
                     textCapitalization: TextCapitalization.sentences,
                     textInputAction: TextInputAction.send,
                     onSubmitted: (_) => _send(),
-                    decoration: const InputDecoration(
-                      hintText: 'Ask about this note',
+                    decoration: InputDecoration(
+                      hintText: 'Ask about this ${widget.subject}',
                     ),
                   ),
                 ),

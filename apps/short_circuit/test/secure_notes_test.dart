@@ -159,6 +159,20 @@ void main() {
   });
 
   group('SecureText', () {
+    test('two first uses at the same moment share one key', () async {
+      // Nothing stored yet, as on the very first run. Both ask for the key at once.
+      FlutterSecureStorage.setMockInitialValues({});
+      final sealed = await Future.wait([
+        SecureText.encrypt('first'),
+        SecureText.encrypt('second'),
+        SecureText.encrypt('third'),
+      ]);
+      // Each opens, which is only true if they were all sealed with the one key kept.
+      expect(await SecureText.decrypt(sealed[0]), 'first');
+      expect(await SecureText.decrypt(sealed[1]), 'second');
+      expect(await SecureText.decrypt(sealed[2]), 'third');
+    });
+
     test('round-trips and is not stored as plain text', () async {
       const text = '[{"id":"1","transcript":"call the plumber"}]';
       final sealed = await SecureText.encrypt(text);

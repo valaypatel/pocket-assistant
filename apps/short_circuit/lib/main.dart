@@ -17,6 +17,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'telemetry.dart';
+part 'groups.dart';
 part 'music.dart';
 part 'secure_notes.dart';
 part 'ui/chat_page.dart';
@@ -50,6 +51,13 @@ bool shouldStartCircuitPairing({
   required bool isBonded,
   required bool userRequestedPairing,
 }) => !isBonded && userRequestedPairing;
+
+/// Whether a note should get its AI review without being asked: only with an AI service set up
+/// and the Settings toggle on. The "Run AI review" button always works.
+bool shouldEnrichAutomatically({
+  required bool aiConnected,
+  required bool autoEnrich,
+}) => aiConnected && autoEnrich;
 
 class GeminiClient {
   const GeminiClient();
@@ -794,11 +802,12 @@ WifiStatus? parseWifiStatus(String message) {
   );
 }
 
-enum _AppPage { home, notes, tasks, settings, circuit, wifi, hiddenWifi }
+enum _AppPage { home, notes, tasks, settings, circuit, wifi, hiddenWifi, group }
 
 const _tasksKey = 'circuit_tasks';
 const _boardDeletesKey = 'pending_board_deletes';
 const _autoTranscribeKey = 'auto_transcribe';
+const _autoEnrichKey = 'auto_enrich';
 const _displayNameKey = 'display_name';
 
 class CircuitTask {
@@ -880,6 +889,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   final List<_AppPage> _pageHistory = [];
   List<CircuitTask> _tasks = [];
   bool _autoTranscribe = true;
+  bool _autoEnrich =
+      true; // AI review (title, summary, tags, actions) after a transcript
   bool _shareDiagnostics = true;
   bool _geminiConnected = false;
   bool _aiConnected = false;
@@ -944,6 +955,14 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   bool _needsPairingRepair = false;
   List<String> _wifiNetworks = [];
   List<CircuitNote> _notes = [];
+  List<NoteGroup> _groups = [];
+  // Choosing notes to group, on the Notes tab.
+  bool _selecting = false;
+  bool _groupsExpanded =
+      false; // Notes tab shows the first few groups until asked for all
+  final Set<String> _selectedNoteIds = {};
+  String?
+  _openGroupId; // the group page's group (allNotesGroupId for everything)
   String? _savedCircuitId;
   String? _lastAudioStatus;
   String? _syncingNoteId;
@@ -960,6 +979,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     );
     _restoreLastCircuit();
     _loadNotes().then((_) => _reconcileSyncedNotes());
+    unawaited(_loadGroups());
     unawaited(_relayChannel.invokeMethod<bool>('requestLocalNetwork'));
     _loadPreferences();
     _loadGeminiState();
@@ -1234,7 +1254,12 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         return transcription;
       }
       await _setNoteTranscript(id, transcription);
-      if (_aiConnected) unawaited(_enrichNote(id));
+      if (shouldEnrichAutomatically(
+        aiConnected: _aiConnected,
+        autoEnrich: _autoEnrich,
+      )) {
+        unawaited(_enrichNote(id));
+      }
       return transcription;
     } catch (error, stack) {
       Telemetry.event('transcription_done', {
@@ -1261,7 +1286,12 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   /// waiting for the service to be set up. Back-off: 1, 2, 4, 8, 16 minutes, then
   /// it stops and leaves the manual "Retry AI review" button.
   void _retryEnrichmentIfDue() {
-    if (!_aiConnected) return;
+    if (!shouldEnrichAutomatically(
+      aiConnected: _aiConnected,
+      autoEnrich: _autoEnrich,
+    )) {
+      return;
+    }
     if (_notes.any((note) => note.enrichmentStatus == 'enriching')) return;
     final now = DateTime.now();
     for (final note in _notes) {
@@ -2346,6 +2376,18 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     }
   }
 
+  /// A group chat: the AI sees the group's notes as of now, so notes added or transcribed since
+  /// the chat was opened are included.
+  Future<String> _askAboutGroup(String groupId, List<ChatMessage> history) {
+    final group = _groupById(groupId);
+    if (group == null) throw Exception('This group no longer exists.');
+    return _ai.chatAboutGroup(
+      group.name,
+      buildGroupContext(_notesOfGroup(group)),
+      history,
+    );
+  }
+
   Future<String> _askAboutNote(String noteId, List<ChatMessage> history) {
     final note = _notes.where((n) => n.id == noteId).firstOrNull;
     if (note == null) throw Exception('This note no longer exists.');
@@ -2371,6 +2413,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     final notes = _notes.where((item) => item.id != id).toList();
     final preferences = await SharedPreferences.getInstance();
     await preferences.remove('note_chat_$id');
+    unawaited(_removeNoteFromGroups(id));
     await _writeSecret(
       preferences,
       _notesKey,
@@ -2739,6 +2782,9 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   void _goTo(_AppPage page) {
     setState(() {
+      // Choosing notes belongs to the Notes tab; leaving it ends the choosing.
+      _selecting = false;
+      _selectedNoteIds.clear();
       _pageHistory.add(_page);
       _page = page;
     });
@@ -2757,6 +2803,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   void _selectTab(int index) {
     setState(() {
+      _selecting = false;
+      _selectedNoteIds.clear();
       _pageHistory.clear();
       _page = const [
         _AppPage.home,
@@ -2790,6 +2838,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     setState(() {
       _tasks = tasks;
       _autoTranscribe = preferences.getBool(_autoTranscribeKey) ?? true;
+      _autoEnrich = preferences.getBool(_autoEnrichKey) ?? true;
       _shareDiagnostics = preferences.getBool(Telemetry.preferenceKey) ?? true;
       _displayName = preferences.getString(_displayNameKey) ?? _displayName;
     });
@@ -2878,6 +2927,12 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
           ? 'Test report sent. It can take a few minutes to show in Firebase.'
           : 'Nothing was sent: diagnostics are off or not set up in this build.',
     );
+  }
+
+  Future<void> _setAutoEnrich(bool value) async {
+    setState(() => _autoEnrich = value);
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setBool(_autoEnrichKey, value);
   }
 
   Future<void> _setAutoTranscribe(bool value) async {
