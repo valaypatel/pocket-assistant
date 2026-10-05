@@ -1182,6 +1182,23 @@ extension _ScPages on _CircuitHomePageState {
       caption: 'Start automatically after a note syncs',
       trailing: Switch(value: _autoTranscribe, onChanged: _setAutoTranscribe),
     ),
+    if (Telemetry.available) ...[
+      const SizedBox(height: 24),
+      const ScGroupLabel('Diagnostics'),
+      ScRow(
+        title: 'Share crash reports and usage',
+        caption: 'Counts and errors only. Never your notes or what they say',
+        trailing: Switch(
+          value: _shareDiagnostics,
+          onChanged: _setShareDiagnostics,
+        ),
+      ),
+      ScRow(
+        title: 'Send a test report',
+        caption: 'Check that reports reach Firebase',
+        onTap: _sendTestReport,
+      ),
+    ],
     const SizedBox(height: 24),
     const ScGroupLabel('You'),
     ScRow(

@@ -16,6 +16,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'telemetry.dart';
 part 'music.dart';
 part 'secure_notes.dart';
 part 'ui/chat_page.dart';
@@ -758,10 +759,11 @@ class CircuitNote {
   };
 }
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   FlutterCryptography.enable(); // native AES-GCM, much faster than Dart on long notes
   FlutterBluePlus.setOperationQueueMode(OperationQueueMode.perDevice);
+  await Telemetry.init();
   runApp(const ShortCircuitApp());
 }
 
@@ -851,6 +853,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   final List<_AppPage> _pageHistory = [];
   List<CircuitTask> _tasks = [];
   bool _autoTranscribe = true;
+  bool _shareDiagnostics = true;
   bool _geminiConnected = false;
   bool _aiConnected = false;
   bool _musicConnected = false;
@@ -983,6 +986,9 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       final status = await _relayChannel.invokeMethod<String>('status');
       if (!mounted || status == null) return;
       final needsRepair = status.startsWith('Circuit needs repair');
+      if (needsRepair && !_needsPairingRepair) {
+        Telemetry.event('pairing_repair_needed');
+      }
       final active = status != 'Stopped' && !needsRepair;
       if (active || _relayActive || needsRepair) {
         setState(() {
@@ -1172,11 +1178,18 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     }
     setState(() => _transcribingNoteId = id);
     await _setNoteStatus(id, 'Transcribing with Gemini…');
+    final timer = Stopwatch()..start();
     try {
+      final audio = await readNoteAudio(path);
       final transcription = await _gemini.transcribeWav(
-        await readNoteAudio(path),
+        audio,
         detectMusic: !asSpeech,
       );
+      Telemetry.event('transcription_done', {
+        'ok': true,
+        'seconds': timer.elapsed.inSeconds,
+        'audio_mb': Telemetry.megabytes(audio.length),
+      });
       if (transcription.isMusic) {
         // Not a spoken note: keep the clip, drop the transcript, and look it up.
         await _updateNote(
@@ -1193,7 +1206,12 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       await _setNoteTranscript(id, transcription);
       if (_aiConnected) unawaited(_enrichNote(id));
       return transcription;
-    } catch (error) {
+    } catch (error, stack) {
+      Telemetry.event('transcription_done', {
+        'ok': false,
+        'seconds': timer.elapsed.inSeconds,
+      });
+      Telemetry.nonFatal('transcription', error, stack);
       final message = error.toString().replaceFirst('Exception: ', '');
       final noSpeech =
           message.toLowerCase().contains('no speech') ||
@@ -2089,6 +2107,13 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         boardId: boardId,
       );
     }
+    unawaited(() async {
+      final bytes = await File(path).length();
+      Telemetry.event('note_synced', {
+        'size_mb': Telemetry.megabytes(bytes),
+        'encrypted': path.endsWith('.cnote'),
+      });
+    }());
     await _transcribeAfterSync(noteId, path);
   }
 
@@ -2576,6 +2601,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         final result = await _music.identify(
           wavSample(await readNoteAudio(path), seconds: _songClipSeconds),
         );
+        Telemetry.event('song_identified', {'matched': result.matched});
         await _updateNote(
           id,
           (n) => n.copyWith(
@@ -2583,7 +2609,9 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
             song: result,
           ),
         );
-      } catch (error) {
+      } catch (error, stack) {
+        Telemetry.event('song_identified', {'matched': false, 'ok': false});
+        Telemetry.nonFatal('song_identify', error, stack);
         final message = error.toString().replaceFirst('Exception: ', '');
         await _updateNote(
           id,
@@ -2723,6 +2751,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     setState(() {
       _tasks = tasks;
       _autoTranscribe = preferences.getBool(_autoTranscribeKey) ?? true;
+      _shareDiagnostics = preferences.getBool(Telemetry.preferenceKey) ?? true;
       _displayName = preferences.getString(_displayNameKey) ?? _displayName;
     });
   }
@@ -2796,6 +2825,20 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   Future<void> _deleteTask(String id) async {
     setState(() => _tasks = _tasks.where((task) => task.id != id).toList());
     await _saveTasks();
+  }
+
+  Future<void> _setShareDiagnostics(bool value) async {
+    setState(() => _shareDiagnostics = value);
+    await Telemetry.setEnabled(value);
+  }
+
+  Future<void> _sendTestReport() async {
+    final sent = await Telemetry.sendTestReport();
+    _setStatus(
+      sent
+          ? 'Test report sent. It can take a few minutes to show in Firebase.'
+          : 'Nothing was sent: diagnostics are off or not set up in this build.',
+    );
   }
 
   Future<void> _setAutoTranscribe(bool value) async {

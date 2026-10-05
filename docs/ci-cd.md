@@ -93,6 +93,13 @@ are lost, no update can ever be signed to replace the installed app, and the onl
 way forward is to uninstall it, which erases its data. They are also stored as
 GitHub secrets, but secrets cannot be read back out.
 
+**Firebase (events and crash reports).** `google-services.json` from the Firebase console is
+not committed. Locally it lives at `apps/short_circuit/android/app/google-services.json`
+(git-ignored); CI writes it from the `GOOGLE_SERVICES_JSON_BASE64` secret
+(`base64 -i google-services.json | gh secret set GOOGLE_SERVICES_JSON_BASE64`). Without it
+the build works and the app sends nothing. What is and is not sent is described at the top
+of `apps/short_circuit/lib/telemetry.dart`.
+
 GitHub secrets used by `app.yml`: `ANDROID_KEYSTORE_BASE64`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` and
 `ANDROID_LINEAGE_BASE64`. Without the first four, pull request builds use a

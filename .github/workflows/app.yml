@@ -73,6 +73,19 @@ jobs:
           cache: true
       - run: flutter pub get
 
+      - name: Add the Firebase config
+        # Not a secret as such, but kept out of the repository. Without it the build
+        # is the same and the app's Firebase code does nothing.
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [[ -n "$GOOGLE_SERVICES_JSON_BASE64" ]]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > android/app/google-services.json
+            echo "Firebase config added."
+          else
+            echo "::notice::No GOOGLE_SERVICES_JSON_BASE64 secret: this build has no Firebase reporting."
+          fi
+
       - name: Work out the version
         id: version
         run: |
