@@ -97,6 +97,12 @@ transit and on the phone. Nothing deletes a note or a key. See
 [docs/security/README.md](docs/security/README.md) for how it works and what it
 does and does not protect against.
 
+## CI/CD
+
+GitHub Actions builds and tests each part when its files change, and can release
+the APK and the firmware files from a tag. The Lambda code deploys from `main`
+once its AWS role is set up. See [docs/ci-cd.md](docs/ci-cd.md).
+
 ## Project status
 
 Early and personal. Things change often, and the board firmware and app are

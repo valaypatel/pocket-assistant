@@ -42,7 +42,14 @@ resource "aws_lambda_function" "music" {
   timeout       = 30
 
   filename         = var.zip_path
-  source_code_hash = filebase64sha256(var.zip_path)
+  source_code_hash = try(filebase64sha256(var.zip_path), null)
+
+  # The deploy workflow ships new code (see deploy.tf and docs/ci-cd.md), so
+  # Terraform owns the infrastructure only. The zip is needed just to create the
+  # function the first time.
+  lifecycle {
+    ignore_changes = [filename, source_code_hash]
+  }
 
   environment {
     variables = {

@@ -8,3 +8,8 @@ output "service_key" {
   value       = random_password.service_key.result
   sensitive   = true
 }
+
+output "deploy_role_arn" {
+  description = "Set as the AWS_DEPLOY_ROLE_ARN variable in the GitHub repository."
+  value       = one(aws_iam_role.deploy[*].arn)
+}
