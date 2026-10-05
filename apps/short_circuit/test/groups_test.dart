@@ -301,4 +301,89 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
     });
   });
+
+  group('many groups on a phone', () {
+    testWidgets('every group is visible, not hidden off the edge', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      FlutterSecureStorage.setMockInitialValues({});
+      SharedPreferences.setMockInitialValues({
+        'circuit_notes': jsonEncode([
+          note('a', DateTime(2026, 10, 1, 9), title: 'Groceries').toJson(),
+          note('b', DateTime(2026, 10, 2, 9), title: 'Trip plan').toJson(),
+        ]),
+        'circuit_groups': jsonEncode([
+          for (final name in ['First', 'Second', 'Third'])
+            NoteGroup(
+              id: name,
+              name: name,
+              noteIds: const ['a'],
+              createdAt: DateTime(2026, 10, 4),
+            ).toJson(),
+        ]),
+      });
+      await tester.pumpWidget(const ShortCircuitApp());
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(find.text('Notes').last);
+      await tester.pump(const Duration(milliseconds: 400));
+      for (final name in ['All notes', 'First', 'Second', 'Third']) {
+        expect(
+          find.text(name),
+          findsOneWidget,
+          reason: '$name should be on screen',
+        );
+        final box = tester.getRect(find.text(name));
+        expect(
+          box.right,
+          lessThanOrEqualTo(400),
+          reason: '$name runs off the edge',
+        );
+      }
+      await tester.pump(const Duration(seconds: 3));
+    });
+
+    testWidgets(
+      'with many groups, the first few show and Show all reveals the rest',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 1400);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        FlutterSecureStorage.setMockInitialValues({});
+        SharedPreferences.setMockInitialValues({
+          'circuit_notes': jsonEncode([
+            note('a', DateTime(2026, 10, 1, 9), title: 'Groceries').toJson(),
+          ]),
+          'circuit_groups': jsonEncode([
+            for (var i = 1; i <= 8; i++)
+              NoteGroup(
+                id: 'g$i',
+                name: 'Group $i',
+                noteIds: const ['a'],
+                createdAt: DateTime(2026, 10, 4),
+              ).toJson(),
+          ]),
+        });
+        await tester.pumpWidget(const ShortCircuitApp());
+        await tester.pump(const Duration(seconds: 1));
+        await tester.tap(find.text('Notes').last);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('GROUPS (8)'), findsOneWidget);
+        expect(
+          find.text('Group 5'),
+          findsOneWidget,
+        ); // six cards: All notes + five groups
+        expect(find.text('Group 6'), findsNothing);
+        await tester.tap(find.text('Show all 8 groups'));
+        await tester.pump();
+        expect(find.text('Group 8'), findsOneWidget);
+        await tester.tap(find.text('Show fewer'));
+        await tester.pump();
+        expect(find.text('Group 8'), findsNothing);
+        await tester.pump(const Duration(seconds: 3));
+      },
+    );
+  });
 }

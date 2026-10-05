@@ -948,6 +948,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   List<NoteGroup> _groups = [];
   // Choosing notes to group, on the Notes tab.
   bool _selecting = false;
+  bool _groupsExpanded =
+      false; // Notes tab shows the first few groups until asked for all
   final Set<String> _selectedNoteIds = {};
   String?
   _openGroupId; // the group page's group (allNotesGroupId for everything)

@@ -430,56 +430,54 @@ extension _ScGroupUi on _CircuitHomePageState {
   Widget _groupsRow() {
     final spoken = _notes.where((n) => !n.isSong).toList();
     if (_selecting || spoken.isEmpty) return const SizedBox.shrink();
-    Widget card(String id, String name, int count) => Padding(
-      padding: const EdgeInsets.only(right: 10),
-      child: Semantics(
-        button: true,
-        label: '$name, $count note${count == 1 ? '' : 's'}',
-        excludeSemantics: true,
-        child: SizedBox(
-          width: 156,
-          child: Material(
-            color: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(18),
-              side: const BorderSide(color: Sc.line),
-            ),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(18),
-              onTap: () => _openGroup(id),
-              child: Padding(
-                padding: const EdgeInsets.all(14),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Icon(
-                      id == allNotesGroupId
-                          ? LucideIcons.layers
-                          : LucideIcons.messagesSquare,
-                      size: 18,
-                      color: Sc.accent,
-                    ),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 13.5,
-                            fontWeight: FontWeight.w800,
-                          ),
+    Widget card(String id, String name, int count, double width) => Semantics(
+      button: true,
+      label: '$name, $count note${count == 1 ? '' : 's'}',
+      excludeSemantics: true,
+      child: SizedBox(
+        width: width,
+        height: 88,
+        child: Material(
+          color: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+            side: const BorderSide(color: Sc.line),
+          ),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(18),
+            onTap: () => _openGroup(id),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Icon(
+                    id == allNotesGroupId
+                        ? LucideIcons.layers
+                        : LucideIcons.messagesSquare,
+                    size: 18,
+                    color: Sc.accent,
+                  ),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w800,
                         ),
-                        Text(
-                          '$count note${count == 1 ? '' : 's'}',
-                          style: const TextStyle(color: Sc.faint, fontSize: 11),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+                      ),
+                      Text(
+                        '$count note${count == 1 ? '' : 's'}',
+                        style: const TextStyle(color: Sc.faint, fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
           ),
@@ -487,25 +485,41 @@ extension _ScGroupUi on _CircuitHomePageState {
       ),
     );
 
+    // Two columns that wrap, so every group is on screen. A sideways list hid the later ones
+    // off the edge with nothing to say they were there.
+    const maxShown = 6;
+    final all = <(String, String, int)>[
+      (allNotesGroupId, 'All notes', spoken.length),
+      for (final g in _groups)
+        (g.id, g.name, _notesOfGroup(g).where((n) => !n.isSong).length),
+    ];
+    final shown = _groupsExpanded ? all : all.take(maxShown).toList();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const ScGroupLabel('Groups'),
-        SizedBox(
-          height: 98,
-          child: ListView(
-            scrollDirection: Axis.horizontal,
-            children: [
-              card(allNotesGroupId, 'All notes', spoken.length),
-              for (final g in _groups)
-                card(
-                  g.id,
-                  g.name,
-                  _notesOfGroup(g).where((n) => !n.isSong).length,
-                ),
-            ],
-          ),
+        ScGroupLabel('Groups (${all.length - 1})'),
+        LayoutBuilder(
+          builder: (context, box) {
+            final width = (box.maxWidth - 10) / 2;
+            return Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                for (final (id, name, count) in shown)
+                  card(id, name, count, width),
+              ],
+            );
+          },
         ),
+        if (all.length > maxShown)
+          TextButton(
+            onPressed: () => _update(() => _groupsExpanded = !_groupsExpanded),
+            child: Text(
+              _groupsExpanded
+                  ? 'Show fewer'
+                  : 'Show all ${all.length - 1} groups',
+            ),
+          ),
         const SizedBox(height: 16),
       ],
     );
