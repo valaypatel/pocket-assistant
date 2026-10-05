@@ -117,6 +117,35 @@ void main() {
     handle.dispose();
   });
 
+  testWidgets('Stop stays its own control for a screen reader', (tester) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _host(
+        RecordingIsland(
+          elapsed: const Duration(seconds: 3),
+          song: false,
+          busy: false,
+          onStop: () {},
+          onExpand: () {},
+        ),
+      ),
+    );
+    expect(
+      tester.getSemantics(find.byTooltip('Stop recording')),
+      matchesSemantics(
+        label: 'Stop recording',
+        tooltip: 'Stop recording',
+        isButton: true,
+        isEnabled: true,
+        hasEnabledState: true,
+        hasTapAction: true,
+        hasFocusAction: true,
+        isFocusable: true,
+      ),
+    );
+    handle.dispose();
+  });
+
   testWidgets('it fits a 320 dp phone with text at double size', (
     tester,
   ) async {

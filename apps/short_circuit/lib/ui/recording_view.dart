@@ -197,7 +197,8 @@ class RecordingIsland extends StatelessWidget {
       label: title,
       hint: 'Opens the full recording view',
       onTap: onExpand,
-      excludeSemantics: true,
+      // Not excludeSemantics: the Stop button inside must stay its own control for TalkBack. The
+      // title and timer are skipped below so they are not read twice.
       child: Material(
         color: decorated ? Sc.dark : Colors.transparent,
         borderRadius: BorderRadius.circular(decorated ? 28 : 0),
@@ -213,54 +214,56 @@ class RecordingIsland extends StatelessWidget {
                     const ScDeviceMark(size: 36),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              AnimatedOpacity(
-                                opacity: dotOn ? 1 : 0.3,
-                                duration: still
-                                    ? Duration.zero
-                                    : const Duration(milliseconds: 400),
-                                child: Container(
-                                  width: 8,
-                                  height: 8,
-                                  decoration: const BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    color: Sc.accent,
+                      child: ExcludeSemantics(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                AnimatedOpacity(
+                                  opacity: dotOn ? 1 : 0.3,
+                                  duration: still
+                                      ? Duration.zero
+                                      : const Duration(milliseconds: 400),
+                                  child: Container(
+                                    width: 8,
+                                    height: 8,
+                                    decoration: const BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: Sc.accent,
+                                    ),
                                   ),
                                 ),
-                              ),
-                              const SizedBox(width: 6),
-                              Flexible(
-                                child: Text(
-                                  title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w800,
+                                const SizedBox(width: 6),
+                                Flexible(
+                                  child: Text(
+                                    title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w800,
+                                    ),
                                   ),
                                 ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            detail,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Color(0xb3ffffff),
-                              fontSize: 13,
-                              fontWeight: FontWeight.w700,
-                              fontFeatures: [FontFeature.tabularFigures()],
+                              ],
                             ),
-                          ),
-                        ],
+                            const SizedBox(height: 2),
+                            Text(
+                              detail,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Color(0xb3ffffff),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                fontFeatures: [FontFeature.tabularFigures()],
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                     const SizedBox(width: 8),
