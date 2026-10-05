@@ -2108,11 +2108,15 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       );
     }
     unawaited(() async {
-      final bytes = await File(path).length();
-      Telemetry.event('note_synced', {
-        'size_mb': Telemetry.megabytes(bytes),
-        'encrypted': path.endsWith('.cnote'),
-      });
+      try {
+        final bytes = await File(path).length();
+        Telemetry.event('note_synced', {
+          'size_mb': Telemetry.megabytes(bytes),
+          'encrypted': path.endsWith('.cnote'),
+        });
+      } catch (_) {
+        // A counter must never become an error report: the file may already be gone.
+      }
     }());
     await _transcribeAfterSync(noteId, path);
   }
