@@ -909,6 +909,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   Timer? _wifiPollTimer;
   bool _audioBusy = false;
   bool _recordingAudio = false;
+  final _deviceChipKey =
+      GlobalKey(); // where the recording pill grows from and folds back to
   bool _relayActive = false;
   // Android no longer holds Circuit's pairing; the user chooses when to pair again.
   bool _needsPairingRepair = false;

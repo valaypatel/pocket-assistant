@@ -169,6 +169,7 @@ class RecordingIsland extends StatelessWidget {
     required this.busy,
     required this.onStop,
     required this.onExpand,
+    this.decorated = true,
   });
 
   final Duration elapsed;
@@ -176,6 +177,10 @@ class RecordingIsland extends StatelessWidget {
   final bool busy;
   final VoidCallback onStop;
   final VoidCallback onExpand;
+
+  /// False when something else draws the pill's shape, as RecordingMorph does while it
+  /// grows from and folds back into the Circuit indicator.
+  final bool decorated;
 
   @override
   Widget build(BuildContext context) {
@@ -194,8 +199,8 @@ class RecordingIsland extends StatelessWidget {
       onTap: onExpand,
       excludeSemantics: true,
       child: Material(
-        color: Sc.dark,
-        borderRadius: BorderRadius.circular(28),
+        color: decorated ? Sc.dark : Colors.transparent,
+        borderRadius: BorderRadius.circular(decorated ? 28 : 0),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onExpand,
@@ -358,6 +363,149 @@ class _RecordingSheetState extends State<RecordingSheet> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Puts the recording pill above a page and animates it: it grows out of the Circuit
+/// indicator ([chipKey]) when [active] turns on, and folds back into it when it turns off. The
+/// page slides down to make room, so the pill never covers anything. Where the indicator is not
+/// on screen (any page but Home) the pill grows from the top edge instead. With animations
+/// turned off it simply appears and disappears.
+class RecordingMorph extends StatefulWidget {
+  const RecordingMorph({
+    super.key,
+    required this.active,
+    required this.chipKey,
+    required this.island,
+    required this.child,
+  });
+
+  final bool active;
+  final GlobalKey chipKey;
+
+  /// Builds the pill's contents (RecordingIsland with decorated: false).
+  final Widget Function() island;
+  final Widget child;
+
+  @override
+  State<RecordingMorph> createState() => _RecordingMorphState();
+}
+
+class _RecordingMorphState extends State<RecordingMorph>
+    with SingleTickerProviderStateMixin {
+  static const _height = 64.0;
+  static const _gap = 8.0;
+  static const _margin = 12.0;
+
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 420),
+    reverseDuration: const Duration(milliseconds: 320),
+    value: widget.active ? 1 : 0,
+  );
+  late final Animation<double> _t = CurvedAnimation(
+    parent: _controller,
+    curve: Curves.easeOutCubic,
+    reverseCurve: Curves.easeInCubic,
+  );
+  final _stackKey = GlobalKey();
+  Rect? _from;
+  Widget? _frozen;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  /// The indicator's resting place in this widget's coordinates. The page is pushed down while
+  /// the pill is open, so that push is taken back off.
+  Rect? _chipRect() {
+    final chip = widget.chipKey.currentContext?.findRenderObject();
+    final stack = _stackKey.currentContext?.findRenderObject();
+    if (chip is! RenderBox ||
+        stack is! RenderBox ||
+        !chip.attached ||
+        !chip.hasSize ||
+        !stack.attached) {
+      return null;
+    }
+    final topLeft = stack.globalToLocal(chip.localToGlobal(Offset.zero));
+    return (topLeft & chip.size).shift(Offset(0, -_t.value * (_height + _gap)));
+  }
+
+  @override
+  void didUpdateWidget(RecordingMorph old) {
+    super.didUpdateWidget(old);
+    if (widget.active == old.active) return;
+    _from = _chipRect() ?? _from;
+    if (MediaQuery.of(context).disableAnimations) {
+      _controller.value = widget.active ? 1 : 0;
+    } else if (widget.active) {
+      _controller.forward();
+    } else {
+      _controller.reverse();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.active) _frozen = widget.island();
+    return AnimatedBuilder(
+      animation: _t,
+      builder: (context, _) {
+        final t = _t.value;
+        return LayoutBuilder(
+          builder: (context, box) {
+            final fullWidth = box.maxWidth - _margin * 2;
+            final end = Rect.fromLTWH(_margin, _gap, fullWidth, _height);
+            final start =
+                _from ??
+                Rect.fromCenter(
+                  center: Offset(box.maxWidth / 2, _gap + _height / 2),
+                  width: 120,
+                  height: 40,
+                );
+            final rect = Rect.lerp(start, end, t)!;
+            final radius = 14 + 14 * t;
+            final shade = Color.lerp(Sc.chip, Sc.dark, (t / 0.4).clamp(0, 1))!;
+            final content = ((t - 0.45) / 0.55).clamp(0.0, 1.0);
+            return Stack(
+              key: _stackKey,
+              children: [
+                Positioned.fill(
+                  child: Padding(
+                    padding: EdgeInsets.only(top: t * (_height + _gap)),
+                    child: widget.child,
+                  ),
+                ),
+                if (t > 0 && _frozen != null)
+                  Positioned.fromRect(
+                    rect: rect,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: shade,
+                        borderRadius: BorderRadius.circular(radius),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(radius),
+                        child: OverflowBox(
+                          alignment: Alignment.centerLeft,
+                          minWidth: fullWidth,
+                          maxWidth: fullWidth,
+                          minHeight: _height,
+                          maxHeight: _height,
+                          child: Opacity(opacity: content, child: _frozen),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 }

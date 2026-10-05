@@ -88,54 +88,54 @@ extension _ScPages on _CircuitHomePageState {
         ? Sc.orange
         : const Color(0xffa6a9af);
     final available = _circuitAvailable;
-    return GestureDetector(
-      onTap: () => _goTo(_AppPage.circuit),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
-        decoration: BoxDecoration(
-          color: Sc.chip,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: available
-                    ? const Color(0xff3b9a68)
-                    : const Color(0xffa6a9af),
-                boxShadow: available
-                    ? const [
-                        BoxShadow(color: Color(0x203b9a68), spreadRadius: 4),
-                      ]
-                    : null,
+    return Semantics(
+      button: true,
+      label: available ? 'Circuit, connected' : 'Circuit, not connected',
+      hint: 'Opens device settings',
+      excludeSemantics: true,
+      child: GestureDetector(
+        onTap: () => _goTo(_AppPage.circuit),
+        child: Container(
+          key: _deviceChipKey,
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+          decoration: BoxDecoration(
+            color: Sc.chip,
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: available
+                      ? const Color(0xff3b9a68)
+                      : const Color(0xffa6a9af),
+                  boxShadow: available
+                      ? const [
+                          BoxShadow(color: Color(0x203b9a68), spreadRadius: 4),
+                        ]
+                      : null,
+                ),
               ),
-            ),
-            const SizedBox(width: 8),
-            Icon(
-              _wifiState == 'failed' ? LucideIcons.wifiOff : LucideIcons.wifi,
-              size: 15,
-              color: wifiColor,
-            ),
-            const SizedBox(width: 6),
-            Icon(
-              LucideIcons.smartphone,
-              size: 15,
-              color: _relayActive ? Sc.orange : const Color(0xffa6a9af),
-            ),
-            const SizedBox(width: 8),
-            const Text(
-              'Circuit',
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w800,
-                color: Color(0xff30333a),
+              const SizedBox(width: 8),
+              Icon(
+                _wifiState == 'failed' ? LucideIcons.wifiOff : LucideIcons.wifi,
+                size: 15,
+                color: wifiColor,
               ),
-            ),
-          ],
+              const SizedBox(width: 6),
+              Icon(
+                LucideIcons.smartphone,
+                size: 15,
+                color: _relayActive ? Sc.orange : const Color(0xffa6a9af),
+              ),
+              const SizedBox(width: 8),
+              const ScDeviceMark(size: 22),
+            ],
+          ),
         ),
       ),
     );
@@ -1819,9 +1819,10 @@ extension _ScPages on _CircuitHomePageState {
   }
 
   /// The compact pill shown at the top of every screen while Circuit records.
-  Widget _recordingIsland() {
+  Widget _recordingIsland({bool decorated = true}) {
     final snapshot = _recordingSnapshot();
     return RecordingIsland(
+      decorated: decorated,
       elapsed: snapshot.elapsed,
       song: snapshot.song,
       busy: snapshot.busy,
@@ -1855,24 +1856,14 @@ extension _ScPages on _CircuitHomePageState {
         _AppPage.hiddenWifi => _hiddenWifiPage(),
       },
     );
-    // While Circuit records, a compact pill sits above the page instead of taking it over,
-    // so notes, tasks and settings stay usable.
-    final body = Column(
-      children: [
-        AnimatedSize(
-          duration: MediaQuery.of(context).disableAnimations
-              ? Duration.zero
-              : const Duration(milliseconds: 200),
-          alignment: Alignment.topCenter,
-          child: _recordingAudio
-              ? Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                  child: _recordingIsland(),
-                )
-              : const SizedBox(width: double.infinity),
-        ),
-        Expanded(child: content),
-      ],
+    // While Circuit records, a compact pill grows out of the Circuit indicator on Home (or out of
+    // the top edge on other pages) and folds back into it when recording ends, so notes, tasks
+    // and settings stay usable.
+    final body = RecordingMorph(
+      active: _recordingAudio,
+      chipKey: _deviceChipKey,
+      island: () => _recordingIsland(decorated: false),
+      child: content,
     );
     final tab = switch (_page) {
       _AppPage.home => 0,
