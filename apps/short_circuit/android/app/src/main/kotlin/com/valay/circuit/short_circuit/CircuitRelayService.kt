@@ -123,6 +123,33 @@ class CircuitRelayService : Service() {
     private var syncCompleteStatus: String? = null
     private var mediaPlayer: android.media.MediaPlayer? = null
     private val reconnectRunnable = Runnable { circuitAddress?.let(::connect) }
+    // Turning Bluetooth off kills the connection without a callback, and nothing then
+    // brought it back when Bluetooth returned. Follow the adapter instead.
+    private val adapterReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+                BluetoothAdapter.STATE_OFF -> {
+                    Log.i("CircuitRelay", "[BLE] Bluetooth turned off")
+                    reconnectHandler.removeCallbacks(reconnectRunnable)
+                    reconnectHandler.removeCallbacks(setupTimeout)
+                    relayReady = false
+                    command = null
+                    gatt?.close()
+                    gatt = null
+                    setRelayStatus("Bluetooth is off")
+                }
+                BluetoothAdapter.STATE_ON -> {
+                    Log.i("CircuitRelay", "[BLE] Bluetooth turned on")
+                    if (shouldReconnect && circuitAddress != null) {
+                        reconnectDelayMs = 1000L
+                        reconnectHandler.removeCallbacks(reconnectRunnable)
+                        reconnectHandler.postDelayed(reconnectRunnable, 2000L)
+                    }
+                }
+            }
+        }
+    }
     private val setupTimeout = Runnable {
         gatt?.let { failConnection(it, "Circuit setup timed out") }
     }
@@ -136,7 +163,7 @@ class CircuitRelayService : Service() {
                     reconnectDelayMs = 1000L
                     reconnectHandler.post { connect(device.address) }
                 }
-                BluetoothDevice.BOND_NONE -> stopForUnpairing()
+                BluetoothDevice.BOND_NONE -> pauseForRepair()
             }
         }
     }
@@ -161,6 +188,7 @@ class CircuitRelayService : Service() {
         super.onCreate()
         activeService = this
         registerReceiver(bondReceiver, IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED))
+        registerReceiver(adapterReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
     }
     override fun onDestroy() {
         shouldReconnect = false
@@ -168,6 +196,7 @@ class CircuitRelayService : Service() {
         reconnectHandler.removeCallbacks(setupTimeout)
         reconnectHandler.removeCallbacks(homeStatusRunnable)
         unregisterReceiver(bondReceiver)
+        unregisterReceiver(adapterReceiver)
         if (activeService === this) activeService = null
         relayStatus = "Stopped"
         gatt?.close()
@@ -189,8 +218,9 @@ class CircuitRelayService : Service() {
         relayReady = false
         val device = BluetoothAdapter.getDefaultAdapter()?.getRemoteDevice(address) ?: return
         if (device.bondState != BluetoothDevice.BOND_BONDED) {
-            setRelayStatus("Pair Circuit in Short-Circuit to enable the relay")
-            device.createBond()
+            // Never start pairing from here: Android would pop up its pairing dialog
+            // unprompted, as it did when the phone came back after being away.
+            pauseForRepair()
             return
         }
         setRelayStatus("Connecting to Circuit…")
@@ -207,7 +237,13 @@ class CircuitRelayService : Service() {
         reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(30_000L)
     }
 
-    private fun stopForUnpairing() {
+    /**
+     * Android no longer holds the pairing (for instance after Circuit refused the phone's
+     * saved key). Stop retrying, but keep the saved Circuit and everything stored, so the
+     * app can offer "Repair pairing" and the user decides when to pair again.
+     */
+    private fun pauseForRepair() {
+        Log.w("CircuitRelay", "[BLE] Circuit is not bonded; waiting for the user to repair pairing")
         shouldReconnect = false
         reconnectHandler.removeCallbacks(reconnectRunnable)
         reconnectHandler.removeCallbacks(setupTimeout)
@@ -215,9 +251,7 @@ class CircuitRelayService : Service() {
         command = null
         gatt?.close()
         gatt = null
-        getSharedPreferences(preferencesName, MODE_PRIVATE).edit().remove(addressKey).apply()
-        relayStatus = "Circuit unpaired"
-        stopSelf()
+        setRelayStatus("Circuit needs repair in Short-Circuit")
     }
 
     private fun failConnection(candidate: BluetoothGatt, reason: String) {
@@ -233,6 +267,7 @@ class CircuitRelayService : Service() {
 
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, state: Int) {
+            Log.i("CircuitRelay", "[BLE] connection state=$state status=$status")
             if (state == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 if (this@CircuitRelayService.gatt !== gatt) {
                     gatt.close()

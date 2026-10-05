@@ -32,7 +32,6 @@ final _relayCharacteristicId = Guid('0000fff2-0000-1000-8000-00805f9b34fb');
 const _relayChannel = MethodChannel('circuit/relay');
 const _audioStatusEvents = EventChannel('circuit/audio_status');
 const _savedCircuitIdKey = 'saved_circuit_id';
-const _secureBondMigrationKey = 'secure_bond_migration_complete';
 const _notesKey = 'circuit_notes';
 const _geminiApiKey = 'gemini_api_key';
 const _geminiModelKey = 'gemini_model';
@@ -43,6 +42,13 @@ const _aiModelKey = 'hermes_model';
 const _defaultAiModel = 'hermes-agent';
 const _defaultAiBaseUrl = 'https://hermes.yourdomain.com/v1';
 const _secureStorage = FlutterSecureStorage();
+
+/// Pairing opens Android's pairing dialog, so it must only follow a deliberate tap on
+/// Connect or Repair pairing, never an automatic reconnect.
+bool shouldStartCircuitPairing({
+  required bool isBonded,
+  required bool userRequestedPairing,
+}) => !isBonded && userRequestedPairing;
 
 class GeminiClient {
   const GeminiClient();
@@ -901,6 +907,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   bool _audioBusy = false;
   bool _recordingAudio = false;
   bool _relayActive = false;
+  // Android no longer holds Circuit's pairing; the user chooses when to pair again.
+  bool _needsPairingRepair = false;
   List<String> _wifiNetworks = [];
   List<CircuitNote> _notes = [];
   String? _savedCircuitId;
@@ -974,12 +982,16 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     try {
       final status = await _relayChannel.invokeMethod<String>('status');
       if (!mounted || status == null) return;
-      final active = status != 'Stopped';
-      if (active || _relayActive) {
+      final needsRepair = status.startsWith('Circuit needs repair');
+      final active = status != 'Stopped' && !needsRepair;
+      if (active || _relayActive || needsRepair) {
         setState(() {
           _relayActive = active;
+          _needsPairingRepair = needsRepair;
           if (_syncingNoteId == null) {
-            _status = active ? status : 'Phone relay stopped.';
+            _status = active
+                ? status
+                : (needsRepair ? status : 'Phone relay stopped.');
           }
         });
       }
@@ -1320,11 +1332,13 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     if (deviceId == null || !mounted) return;
     final savedDevice = BluetoothDevice.fromId(deviceId);
     if (await savedDevice.bondState.first != BluetoothBondState.bonded) {
-      await preferences.remove(_savedCircuitIdKey);
+      // Keep the saved Circuit: only the user's "Repair pairing" starts pairing.
       if (mounted) {
         setState(() {
-          _savedCircuitId = null;
-          _status = 'Circuit was unpaired. Scan to pair it again.';
+          _savedCircuitId = deviceId;
+          _needsPairingRepair = true;
+          _status =
+              'Circuit needs repair. Tap Repair pairing to pair it again.';
         });
       }
       return;
@@ -1395,6 +1409,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   Future<void> _connect(
     BluetoothDevice device, {
     bool savedReconnect = false,
+    bool userRequestedPairing = false,
   }) async {
     setState(() {
       _connecting = true;
@@ -1402,24 +1417,43 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     });
     try {
       await FlutterBluePlus.stopScan();
+      final isBonded =
+          await device.bondState.first == BluetoothBondState.bonded;
+      if (!isBonded && !userRequestedPairing) {
+        debugPrint('Short-Circuit: not bonded; waiting for Repair pairing');
+        if (mounted) {
+          setState(() {
+            _needsPairingRepair = true;
+            _status =
+                'Circuit needs repair. Tap Repair pairing to pair it again.';
+          });
+        }
+        return;
+      }
+      if (shouldStartCircuitPairing(
+        isBonded: isBonded,
+        userRequestedPairing: userRequestedPairing,
+      )) {
+        _setStatus(
+          'Enter Circuit’s six-digit code in the Android pairing prompt…',
+        );
+        final paired = device.bondState
+            .where((state) => state == BluetoothBondState.bonded)
+            .first
+            .timeout(const Duration(seconds: 90));
+        try {
+          await device.createBond();
+          await paired;
+        } catch (_) {
+          paired.ignore(); // already timed out or failed: nothing is listening
+          rethrow;
+        }
+      }
       await device.connect(
         license: License.nonprofit,
         timeout: const Duration(seconds: 15),
       );
       final preferences = await SharedPreferences.getInstance();
-      var bondState = await device.bondState.first;
-      if (bondState == BluetoothBondState.bonded &&
-          preferences.getBool(_secureBondMigrationKey) != true) {
-        await device.removeBond();
-        bondState = BluetoothBondState.none;
-      }
-      if (bondState != BluetoothBondState.bonded) {
-        _setStatus(
-          'Enter Circuit’s six-digit code in the Android pairing prompt…',
-        );
-        await device.createBond();
-        await preferences.setBool(_secureBondMigrationKey, true);
-      }
       _connectionSubscription?.cancel();
       _connectionSubscription = device.connectionState.listen((state) {
         if (state == BluetoothConnectionState.disconnected && mounted) {
@@ -1457,6 +1491,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         _device = device;
         _textCharacteristic = characteristic;
         _relayCharacteristic = relay;
+        _needsPairingRepair = false;
         _status = 'Connected. Send text to the e-ink screen.';
       });
       await preferences.setString(_savedCircuitIdKey, device.remoteId.str);
@@ -1471,6 +1506,25 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     } finally {
       if (mounted) setState(() => _connecting = false);
     }
+  }
+
+  /// The user's choice to pair again. Only Android's own pairing record is replaced:
+  /// notes, keys and settings on the phone and the board are not touched.
+  Future<void> _repairPairing() async {
+    final deviceId = _savedCircuitId;
+    if (deviceId == null) {
+      _setStatus('Scan for Circuit first.');
+      return;
+    }
+    final device = BluetoothDevice.fromId(deviceId);
+    try {
+      if (await device.bondState.first == BluetoothBondState.bonded) {
+        await device.removeBond();
+      }
+    } catch (error) {
+      debugPrint('Short-Circuit: could not clear the old pairing: $error');
+    }
+    await _connect(device, savedReconnect: true, userRequestedPairing: true);
   }
 
   Future<void> _provisionWifi() async {

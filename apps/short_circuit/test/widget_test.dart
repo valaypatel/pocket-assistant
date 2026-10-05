@@ -2,6 +2,21 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:short_circuit/main.dart';
 
 void main() {
+  test('only an explicit action may start Circuit pairing', () {
+    expect(
+      shouldStartCircuitPairing(isBonded: false, userRequestedPairing: false),
+      isFalse,
+    );
+    expect(
+      shouldStartCircuitPairing(isBonded: false, userRequestedPairing: true),
+      isTrue,
+    );
+    expect(
+      shouldStartCircuitPairing(isBonded: true, userRequestedPairing: true),
+      isFalse,
+    );
+  });
+
   test('extracts readable fields from Gemini JSON instead of showing JSON', () {
     final parsed = parseGeminiTranscriptionPayload(
       '```json\n{"category":"task","title":"Buy milk",'
