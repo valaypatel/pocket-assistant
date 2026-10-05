@@ -1194,6 +1194,13 @@ extension _ScPages on _CircuitHomePageState {
       caption: 'Start automatically after a note syncs',
       trailing: Switch(value: _autoTranscribe, onChanged: _setAutoTranscribe),
     ),
+    ScRow(
+      title: 'Review new notes',
+      caption: _aiConnected
+          ? 'Add a title, summary, tags and suggested actions after a note is transcribed'
+          : 'Needs an AI service above. Add one to review notes automatically',
+      trailing: Switch(value: _autoEnrich, onChanged: _setAutoEnrich),
+    ),
     if (Telemetry.available) ...[
       const SizedBox(height: 24),
       const ScGroupLabel('Diagnostics'),

@@ -52,6 +52,13 @@ bool shouldStartCircuitPairing({
   required bool userRequestedPairing,
 }) => !isBonded && userRequestedPairing;
 
+/// Whether a note should get its AI review without being asked: only with an AI service set up
+/// and the Settings toggle on. The "Run AI review" button always works.
+bool shouldEnrichAutomatically({
+  required bool aiConnected,
+  required bool autoEnrich,
+}) => aiConnected && autoEnrich;
+
 class GeminiClient {
   const GeminiClient();
 
@@ -800,6 +807,7 @@ enum _AppPage { home, notes, tasks, settings, circuit, wifi, hiddenWifi, group }
 const _tasksKey = 'circuit_tasks';
 const _boardDeletesKey = 'pending_board_deletes';
 const _autoTranscribeKey = 'auto_transcribe';
+const _autoEnrichKey = 'auto_enrich';
 const _displayNameKey = 'display_name';
 
 class CircuitTask {
@@ -881,6 +889,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   final List<_AppPage> _pageHistory = [];
   List<CircuitTask> _tasks = [];
   bool _autoTranscribe = true;
+  bool _autoEnrich =
+      true; // AI review (title, summary, tags, actions) after a transcript
   bool _shareDiagnostics = true;
   bool _geminiConnected = false;
   bool _aiConnected = false;
@@ -1244,7 +1254,12 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         return transcription;
       }
       await _setNoteTranscript(id, transcription);
-      if (_aiConnected) unawaited(_enrichNote(id));
+      if (shouldEnrichAutomatically(
+        aiConnected: _aiConnected,
+        autoEnrich: _autoEnrich,
+      )) {
+        unawaited(_enrichNote(id));
+      }
       return transcription;
     } catch (error, stack) {
       Telemetry.event('transcription_done', {
@@ -1271,7 +1286,12 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   /// waiting for the service to be set up. Back-off: 1, 2, 4, 8, 16 minutes, then
   /// it stops and leaves the manual "Retry AI review" button.
   void _retryEnrichmentIfDue() {
-    if (!_aiConnected) return;
+    if (!shouldEnrichAutomatically(
+      aiConnected: _aiConnected,
+      autoEnrich: _autoEnrich,
+    )) {
+      return;
+    }
     if (_notes.any((note) => note.enrichmentStatus == 'enriching')) return;
     final now = DateTime.now();
     for (final note in _notes) {
@@ -2813,6 +2833,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     setState(() {
       _tasks = tasks;
       _autoTranscribe = preferences.getBool(_autoTranscribeKey) ?? true;
+      _autoEnrich = preferences.getBool(_autoEnrichKey) ?? true;
       _shareDiagnostics = preferences.getBool(Telemetry.preferenceKey) ?? true;
       _displayName = preferences.getString(_displayNameKey) ?? _displayName;
     });
@@ -2901,6 +2922,12 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
           ? 'Test report sent. It can take a few minutes to show in Firebase.'
           : 'Nothing was sent: diagnostics are off or not set up in this build.',
     );
+  }
+
+  Future<void> _setAutoEnrich(bool value) async {
+    setState(() => _autoEnrich = value);
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setBool(_autoEnrichKey, value);
   }
 
   Future<void> _setAutoTranscribe(bool value) async {
