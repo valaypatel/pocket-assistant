@@ -32,6 +32,7 @@ Uint8List _wav(int seconds, {int rate = 16000, int channels = 1}) {
 }
 
 void main() {
+  group('speaker labels', _speakerTests);
   group('wavSample', () {
     test('a long recording becomes a 12 second WAV from the middle', () {
       final long = _wav(60);
@@ -239,5 +240,21 @@ void main() {
       expect(find.text('Finishing up…'), findsOneWidget);
       expect(find.text('00:00'), findsOneWidget);
     });
+  });
+}
+
+void _speakerTests() {
+  test('speaker labels stay in the transcript but not in the title', () {
+    final t = GeminiClient.parseTranscriptionText(
+      'Speaker 1: Are we still on for lunch?\nSpeaker 2: Yes, at noon.',
+    );
+    expect(t.transcript, contains('Speaker 2: Yes, at noon.'));
+    expect(t.title, 'Are we still on for lunch? Yes,');
+  });
+
+  test('a single-speaker note is unchanged', () {
+    final t = GeminiClient.parseTranscriptionText('Buy milk on the way home');
+    expect(t.transcript, 'Buy milk on the way home');
+    expect(t.title, 'Buy milk on the way home');
   });
 }

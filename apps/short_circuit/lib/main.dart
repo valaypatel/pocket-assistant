@@ -136,6 +136,7 @@ class GeminiClient {
                     'text':
                         'Transcribe this voice note exactly. Preserve Gujarati script, English, and mixed Gujarati-English. Return the complete transcription only. Do not summarise, classify, translate, or add a title.'
                         '${detectMusic ? ' Exception: if the recording is mainly music or a song playing, with no one speaking to record a note, reply with exactly [[MUSIC]] and nothing else.' : ''}'
+                        ' If two or more different people clearly speak, start each change of speaker on a new line labelled "Speaker 1:", "Speaker 2:" and so on, using the same label for the same voice throughout. If only one person speaks, add no label.'
                         ' If it is only silence or background noise, reply with exactly [[NOISE]].',
                   },
                   {
@@ -199,6 +200,7 @@ class GeminiClient {
 
   String _fallbackHeading(String transcript) {
     final words = transcript
+        .replaceAll(RegExp(r'Speaker \d+:\s*'), '')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim()
         .split(' ')
@@ -472,7 +474,7 @@ class AiClient {
         {
           'role': 'system',
           'content':
-              'You answer questions about one private voice note. Use only the note below. If the answer is not in the note, say so plainly instead of guessing. Be brief. Reply in the language the user writes in. Plain text, no markdown headings.\n\n--- NOTE ---\n$context',
+              'You answer questions about one private voice note. Use only the note below. The transcript may label different voices as "Speaker 1:", "Speaker 2:"; use the labels when saying who said something, and do not guess real names unless the note states them. If the answer is not in the note, say so plainly instead of guessing. Be brief. Reply in the language the user writes in. Plain text, no markdown headings.\n\n--- NOTE ---\n$context',
         },
         for (final message in recent)
           {'role': message.role, 'content': message.text},
@@ -519,7 +521,7 @@ class AiClient {
     final response = await _completion([
       {
         'role': 'system',
-        'content': 'You analyse private voice-note transcripts. Return JSON only: {"title":"short heading in English","category":"primary category","categories":["primary category","optional secondary categories"],"tags":["short English searchable tags"],"summary":"one short English sentence","englishTranslation":"faithful English translation; if already English, repeat it","language":"language or mixed","actions":[{"type":"task|reminder|calendar_event","title":"action title in English","details":"brief detail in English","scheduledAt":"ISO-8601 local time or null"}]}. Categories may include note, idea, task, reminder, calendar_event, shopping, journal, project, meeting, reference. Translate Hindi/Gujarati faithfully but never alter the original transcript. Suggest actions only when clearly supported; never invent dates. Use reminder or calendar_event only when the note states a date or time; otherwise the action type must be task.',
+        'content': 'You analyse private voice-note transcripts. Return JSON only: {"title":"short heading in English","category":"primary category","categories":["primary category","optional secondary categories"],"tags":["short English searchable tags"],"summary":"one short English sentence","englishTranslation":"faithful English translation; if already English, repeat it","language":"language or mixed","actions":[{"type":"task|reminder|calendar_event","title":"action title in English","details":"brief detail in English","scheduledAt":"ISO-8601 local time or null"}]}. Categories may include note, idea, task, reminder, calendar_event, shopping, journal, project, meeting, reference. Translate Hindi/Gujarati faithfully but never alter the original transcript. The transcript may label voices as "Speaker 1:", "Speaker 2:"; keep those labels in englishTranslation, say who said or agreed to what in the summary and action details when it matters, and never use a speaker label as a title or tag. Suggest actions only when clearly supported; never invent dates. Use reminder or calendar_event only when the note states a date or time; otherwise the action type must be task.',
       },
       {
         'role': 'user',
