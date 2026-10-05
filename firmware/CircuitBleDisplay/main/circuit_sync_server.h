@@ -44,6 +44,10 @@
 
 namespace circuit_sync {
 
+// How many downloads the board has cut short since it started (memory, or the phone going
+// away). Reported to the phone with the rest of the board's health.
+inline volatile uint32_t download_stops = 0;
+
 constexpr uint32_t kIdleTimeoutMs = 120000;
 constexpr uint32_t kLockoutMs = 30000;
 constexpr int kMaxBadAttempts = 3;
@@ -282,6 +286,7 @@ inline esp_err_t note_handler(httpd_req_t *req) {
     }
     if (status == ESP_OK) status = httpd_resp_send_chunk(req, nullptr, 0);
     if (status != ESP_OK) {
+        download_stops = download_stops + 1;
         ESP_LOGW("CircuitSync", "Download of note %lu stopped after %lu bytes: internal RAM free %u, largest block %u, lowest ever %u",
             static_cast<unsigned long>(id), static_cast<unsigned long>(state.served_bytes),
             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),

@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - "apps/short_circuit/**"
+      - "docs/security/**" # the test vectors both sides check against
       - ".github/workflows/app.yml"
   push:
     branches: [main]
     paths:
       - "apps/short_circuit/**"
+      - "docs/security/**" # the test vectors both sides check against
       - ".github/workflows/app.yml"
     tags: ["app-v*"]
   workflow_dispatch:

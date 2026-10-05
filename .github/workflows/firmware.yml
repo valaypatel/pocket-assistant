@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - "firmware/**"
+      - "docs/security/**" # the test vectors both sides check against
       - ".github/workflows/firmware.yml"
   push:
     branches: [main]
     paths:
       - "firmware/**"
+      - "docs/security/**" # the test vectors both sides check against
       - ".github/workflows/firmware.yml"
     tags: ["firmware-v*"]
   workflow_dispatch:
