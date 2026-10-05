@@ -1,0 +1,163 @@
+name: App
+
+on:
+  pull_request:
+    paths:
+      - "apps/short_circuit/**"
+      - ".github/workflows/app.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/short_circuit/**"
+      - ".github/workflows/app.yml"
+    tags: ["app-v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: "3.47.6"
+
+jobs:
+  test:
+    name: Format, analyze, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/short_circuit
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter pub get
+      - name: Check formatting
+        run: dart format --output=none --set-exit-if-changed lib test
+      - name: Analyze (errors and warnings fail; infos do not)
+        run: flutter analyze --no-fatal-infos
+      - run: flutter test
+
+  apk:
+    name: Build release APK
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Optional. Without them the APK is signed with a throwaway debug key, which
+      # cannot update an app that is already installed from another build.
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    defaults:
+      run:
+        working-directory: apps/short_circuit
+    outputs:
+      version: ${{ steps.version.outputs.name }}
+      signed: ${{ steps.signing.outputs.signed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            apps/short_circuit/android/**/*.gradle*
+            apps/short_circuit/android/**/gradle-wrapper.properties
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter pub get
+
+      - name: Work out the version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/app-v* ]]; then
+            name="${GITHUB_REF_NAME#app-v}"
+          else
+            name="$(sed -nE 's/^version: *([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)"
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          # Always above the 1 of the first sideloaded build, and rising each run.
+          echo "number=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
+
+      - name: Set up signing
+        id: signing
+        run: |
+          if [[ -n "$ANDROID_KEYSTORE_BASE64" && -n "$ANDROID_KEYSTORE_PASSWORD" && -n "$ANDROID_KEY_ALIAS" && -n "$ANDROID_KEY_PASSWORD" ]]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+            {
+              echo "storeFile=release.keystore"
+              echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+              echo "keyAlias=$ANDROID_KEY_ALIAS"
+              echo "keyPassword=$ANDROID_KEY_PASSWORD"
+            } > android/key.properties
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            if [[ "$GITHUB_REF" == refs/tags/app-v* ]]; then
+              echo "::error::A release needs the signing secrets (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD). See docs/ci-cd.md."
+              exit 1
+            fi
+            echo "::warning::No signing key configured: this APK uses a throwaway debug key and cannot update an installed copy."
+          fi
+
+      - name: Build
+        run: >
+          flutter build apk --release
+          --build-name="${{ steps.version.outputs.name }}"
+          --build-number="${{ steps.version.outputs.number }}"
+
+      - name: Name and describe the APK
+        id: apk
+        run: |
+          out="short-circuit-${{ steps.version.outputs.name }}-${{ steps.version.outputs.number }}.apk"
+          cp build/app/outputs/flutter-apk/app-release.apk "$out"
+          sha256sum "$out" | tee "$out.sha256"
+          {
+            echo "### Short-Circuit APK"
+            echo "- Version: \`${{ steps.version.outputs.name }}\` (build ${{ steps.version.outputs.number }})"
+            echo "- Signed with: $([[ '${{ steps.signing.outputs.signed }}' == 'true' ]] && echo 'the release key' || echo 'a throwaway debug key (cannot update an installed copy)')"
+            echo "- Size: $(du -h "$out" | cut -f1)"
+            echo "- SHA-256: \`$(cut -d' ' -f1 "$out.sha256")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: short-circuit-apk
+          path: |
+            apps/short_circuit/short-circuit-*.apk
+            apps/short_circuit/short-circuit-*.apk.sha256
+          retention-days: 30
+          if-no-files-found: error
+
+  release:
+    name: Publish a GitHub release
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    needs: apk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: short-circuit-apk
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          name: Short-Circuit app ${{ needs.apk.outputs.version }}
+          files: |
+            short-circuit-*.apk
+            short-circuit-*.apk.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true

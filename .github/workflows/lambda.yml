@@ -1,0 +1,112 @@
+name: Lambda
+
+on:
+  pull_request:
+    paths:
+      - "services/music-lambda/**"
+      - ".github/workflows/lambda.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/music-lambda/**"
+      - ".github/workflows/lambda.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: lambda-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: services/music-lambda
+
+jobs:
+  test:
+    name: Test, package, validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # The Lambda runtime. ShazamIO needs audioop, which Python 3.13 removed.
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/music-lambda/requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q tests
+
+      - name: Build the Lambda package
+        run: python build.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: music-lambda-zip
+          path: services/music-lambda/build/music-lambda.zip
+          retention-days: 14
+          if-no-files-found: error
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+      - name: Terraform format
+        run: terraform fmt -check -recursive -diff
+        working-directory: services/music-lambda/terraform
+      - name: Terraform validate
+        working-directory: services/music-lambda/terraform
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  deploy:
+    name: Deploy the code to AWS
+    needs: test
+    # Only from main, and only once the AWS role is set up (see docs/ci-cd.md).
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write # lets the job exchange its GitHub identity for AWS credentials
+      contents: read
+    concurrency:
+      group: lambda-deploy
+      cancel-in-progress: false
+    env:
+      FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME || 'circuit-music' }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: music-lambda-zip
+          path: package
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+
+      - name: Update the function code
+        working-directory: package
+        run: |
+          aws lambda update-function-code \
+            --function-name "$FUNCTION_NAME" \
+            --zip-file fileb://music-lambda.zip \
+            --query '[FunctionName,LastUpdateStatus,CodeSha256]' --output text
+          aws lambda wait function-updated --function-name "$FUNCTION_NAME"
+
+      - name: Smoke test
+        run: |
+          # No key is sent, so a healthy function answers 401 "unauthorised". An
+          # import error or crash would show up as a function error instead.
+          echo '{"rawPath":"/music/health","requestContext":{"http":{"method":"GET"}},"headers":{}}' > event.json
+          fn_error=$(aws lambda invoke --function-name "$FUNCTION_NAME" \
+            --payload fileb://event.json response.json --query FunctionError --output text)
+          cat response.json; echo
+          [[ "$fn_error" == "None" ]] || { echo "::error::The function crashed: $fn_error"; exit 1; }
+          python3 - <<'PY'
+          import json, sys
+          r = json.load(open("response.json"))
+          if r.get("statusCode") != 401 or "unauthorised" not in r.get("body", ""):
+              sys.exit(f"Unexpected answer from the deployed function: {r}")
+          print("Smoke test passed: the deployed code answers and enforces the key.")
+          PY
+          echo "### Lambda deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "Function \`$FUNCTION_NAME\` updated from \`${GITHUB_SHA:0:7}\`; smoke test passed." >> "$GITHUB_STEP_SUMMARY"

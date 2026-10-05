@@ -1,0 +1,125 @@
+name: Firmware
+
+on:
+  pull_request:
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware.yml"
+  push:
+    branches: [main]
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware.yml"
+    tags: ["firmware-v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # The board support code is not in this repository. Both are pinned so a build
+  # never changes because Waveshare or the component registry did.
+  WAVESHARE_REPO: https://github.com/waveshareteam/ESP32-S3-ePaper-1.54.git
+  WAVESHARE_COMMIT: aaf395c1bbd86f7c5b7a2f9f0401241ff5c44956
+  WAVESHARE_PROJECT: vendor/waveshare-board/02_Example/ESP-IDF/V2/11_FactoryProgram
+
+jobs:
+  build:
+    name: Build for ESP32-S3
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    container:
+      image: espressif/idf:v5.5.3
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch the Waveshare board support (pinned commit)
+        run: |
+          git clone --quiet --filter=blob:none "$WAVESHARE_REPO" vendor/waveshare-board
+          git -C vendor/waveshare-board checkout --quiet --detach "$WAVESHARE_COMMIT"
+          # Exact component versions and hashes, as used on the board. Without
+          # this, "^9.3.0" would pick up whatever LVGL is newest.
+          cp firmware/CircuitBleDisplay/ci/waveshare.dependencies.lock "$WAVESHARE_PROJECT/dependencies.lock"
+
+      - name: Download the Waveshare components
+        run: |
+          . "$IDF_PATH/export.sh" > /dev/null
+          cd "$WAVESHARE_PROJECT"
+          idf.py set-target esp32s3 > /dev/null
+          idf.py reconfigure
+          ls managed_components
+
+      - name: Build
+        working-directory: firmware/CircuitBleDisplay
+        run: |
+          . "$IDF_PATH/export.sh" > /dev/null
+          idf.py build
+          idf.py merge-bin
+
+      - name: Report size and versions
+        working-directory: firmware/CircuitBleDisplay
+        run: |
+          . "$IDF_PATH/export.sh" > /dev/null
+          app_bytes=$(stat -c %s build/circuit_ble_display.bin)
+          part_bytes=$((0x3f0000))
+          {
+            echo "### Firmware build"
+            echo "- App: $((app_bytes / 1024)) KiB of $((part_bytes / 1024)) KiB ($((100 * app_bytes / part_bytes))%)"
+            echo "- ESP-IDF: \`$(idf.py --version 2>/dev/null | tail -1)\`"
+            echo "- LVGL: \`$(grep -m1 '^version' "../../$WAVESHARE_PROJECT/managed_components/lvgl__lvgl/idf_component.yml" | cut -d' ' -f2)\`"
+            echo "- Waveshare board support: \`${WAVESHARE_COMMIT:0:10}\`"
+            echo "- Flash image: \`merged-binary.bin\` at address 0x0"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect the files
+        working-directory: firmware/CircuitBleDisplay
+        run: |
+          mkdir -p ../../dist
+          cp build/merged-binary.bin ../../dist/circuit-firmware.bin
+          cp build/circuit_ble_display.bin ../../dist/circuit-app.bin
+          cp build/bootloader/bootloader.bin build/partition_table/partition-table.bin ../../dist/
+          (cd ../../dist && sha256sum -- * > SHA256SUMS)
+          cat ../../dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: circuit-firmware
+          path: dist/
+          retention-days: 30
+          if-no-files-found: error
+
+  release:
+    name: Publish a GitHub release
+    if: startsWith(github.ref, 'refs/tags/firmware-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: circuit-firmware
+          path: dist
+      - name: Name the flash image after the version
+        run: |
+          version="${GITHUB_REF_NAME#firmware-v}"
+          mv dist/circuit-firmware.bin "dist/circuit-firmware-$version.bin"
+          (cd dist && sha256sum circuit-firmware-*.bin > SHA256SUMS)
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          name: Circuit firmware ${{ github.ref_name }}
+          body: |
+            Flash with `esptool.py --chip esp32s3 write_flash 0x0 circuit-firmware-<version>.bin`.
+            Notes on the SD card and the saved Wi-Fi and pairing are kept unless you erase flash.
+          files: |
+            dist/circuit-firmware-*.bin
+            dist/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true

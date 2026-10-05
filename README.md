@@ -90,6 +90,12 @@ Install on a phone with `adb install -r build/app/outputs/flutter-apk/app-releas
    base URL, key and model for an OpenAI-compatible service (notes review and
    chat). Keys are kept in Android secure storage and never in the repository.
 
+## CI/CD
+
+GitHub Actions builds and tests each part when its files change, and can release
+the APK and the firmware image from a tag. The Lambda code deploys from `main`
+once its AWS role is set up. See [docs/ci-cd.md](docs/ci-cd.md).
+
 ## Project status
 
 Early and personal. Things change often, and the board firmware and app are

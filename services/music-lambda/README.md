@@ -59,6 +59,10 @@ terraform output -raw service_key
 In the app, open **Settings → Music recognition**, paste the address and the
 key, and tap the flask button to test.
 
+From then on the **code** is deployed by GitHub Actions on merges to `main`
+(see [docs/ci-cd.md](../../docs/ci-cd.md)), and Terraform ignores it. Use
+`terraform apply` for infrastructure and settings.
+
 Variables (`terraform/variables.tf`): `region`, `aws_profile`, `name`,
 `max_audio_bytes`, `log_retention_days`, `allowed_origin`.
 
