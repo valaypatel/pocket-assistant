@@ -61,7 +61,6 @@ jobs:
         run: |
           . "$IDF_PATH/export.sh" > /dev/null
           idf.py build
-          idf.py merge-bin
 
       - name: Report size and versions
         working-directory: firmware/CircuitBleDisplay
@@ -75,14 +74,16 @@ jobs:
             echo "- ESP-IDF: \`$(idf.py --version 2>/dev/null | tail -1)\`"
             echo "- LVGL: \`$(grep -m1 '^version' "../../$WAVESHARE_PROJECT/managed_components/lvgl__lvgl/idf_component.yml" | cut -d' ' -f2)\`"
             echo "- Waveshare board support: \`${WAVESHARE_COMMIT:0:10}\`"
-            echo "- Flash image: \`merged-binary.bin\` at address 0x0"
+            echo "- Files: bootloader (0x0), partition table (0x8000), app (0x10000). The settings partition at 0x9000 is never written."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collect the files
         working-directory: firmware/CircuitBleDisplay
         run: |
+          # Three separate files, each flashed at its own address. A single merged image
+          # would blank the gaps between them, and the settings partition (Wi-Fi, pairing,
+          # the notes key) sits in one of those gaps at 0x9000.
           mkdir -p ../../dist
-          cp build/merged-binary.bin ../../dist/circuit-firmware.bin
           cp build/circuit_ble_display.bin ../../dist/circuit-app.bin
           cp build/bootloader/bootloader.bin build/partition_table/partition-table.bin ../../dist/
           (cd ../../dist && sha256sum -- * > SHA256SUMS)
@@ -107,19 +108,31 @@ jobs:
         with:
           name: circuit-firmware
           path: dist
-      - name: Name the flash image after the version
+      - name: Name the app after the version
         run: |
           version="${GITHUB_REF_NAME#firmware-v}"
-          mv dist/circuit-firmware.bin "dist/circuit-firmware-$version.bin"
-          (cd dist && sha256sum circuit-firmware-*.bin > SHA256SUMS)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::The tag must look like firmware-v1.2.3"; exit 1; }
+          mv dist/circuit-app.bin "dist/circuit-app-$version.bin"
+          (cd dist && sha256sum -- *.bin > SHA256SUMS)
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: Circuit firmware ${{ github.ref_name }}
           body: |
-            Flash with `esptool.py --chip esp32s3 write_flash 0x0 circuit-firmware-<version>.bin`.
-            Notes on the SD card and the saved Wi-Fi and pairing are kept unless you erase flash.
+            Flash with (replace `<version>`):
+
+            ```
+            esptool.py --chip esp32s3 write_flash 0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 circuit-app-<version>.bin
+            ```
+
+            This writes only those three regions. The saved Wi-Fi, pairing and notes key
+            (flash at 0x9000) and the notes on the SD card are left alone. **Do not run
+            `erase_flash`, and do not flash a merged image at 0x0:** either one wipes the
+            notes key, and notes sealed with it can then only be opened by a phone that
+            already has it.
           files: |
-            dist/circuit-firmware-*.bin
+            dist/bootloader.bin
+            dist/partition-table.bin
+            dist/circuit-app-*.bin
             dist/SHA256SUMS
           generate_release_notes: true
           fail_on_unmatched_files: true

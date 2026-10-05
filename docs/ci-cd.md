@@ -17,8 +17,8 @@ Every action is pinned to a commit SHA, and Dependabot proposes updates weekly.
 These work as soon as the workflows are merged:
 
 - App checks and the debug-signed APK artifact.
-- The firmware build and its artifact (`circuit-firmware`, containing
-  `circuit-firmware.bin`, the whole flash image to write at address 0).
+- The firmware build and its artifact (`circuit-firmware`: `bootloader.bin`,
+  `partition-table.bin` and `circuit-app.bin`, to be flashed at their own addresses).
 - Lambda tests, packaging and Terraform validation.
 
 ## One-time setup
@@ -40,6 +40,19 @@ Optional repository variables: `AWS_REGION` (default `ap-south-1`) and
 The role can only update that one function's code and invoke it, and only a
 workflow running on `main` of `valaypatel/pocket-assistant` can assume it. The
 account's existing GitHub provider is reused.
+
+**Rolling back.** Every successful run keeps its package as the `music-lambda-zip`
+artifact for 14 days. To put an earlier one back:
+
+```bash
+gh run download <run id> -n music-lambda-zip -D old
+aws lambda update-function-code --function-name circuit-music --region ap-south-1 \
+  --zip-file fileb://old/music-lambda.zip
+```
+
+A merge that touches anything under `services/music-lambda` redeploys, even a docs-only
+change (the code is the same, so it is harmless). The smoke test only checks that the
+function starts and refuses a request with no key; it does not run a recognition.
 
 **Dependencies are pinned.** `services/music-lambda/requirements.lock` lists the exact
 version of everything the function runs, and `build.py` installs exactly those, so a
@@ -84,6 +97,13 @@ updates in place and keeps its notes, settings and pairing. For that reason the 
 needs Android 9 or later (`minSdk = 28`) and is signed with the v3 scheme only,
 which is the one that carries the proof. The old key is not needed again.
 
+CI builds are numbered `100 + the run number` (so always above the `1` of a local
+build), and Android refuses to install a lower number over a higher one. If a phone
+has a CI or released build, install the next one from CI too, or pass a higher
+`--build-number` to a local `flutter build`. If the rotation secret
+(`ANDROID_LINEAGE_BASE64`) is ever missing, the build warns, and the APK will not
+update an app that was installed signed with the previous key.
+
 Locally, put the same values in `apps/short_circuit/android/key.properties`
 (git-ignored), including `lineageFile=<path to rotation.lineage>`. Then:
 
@@ -107,8 +127,18 @@ git tag app-v1.0.1 && git push origin app-v1.0.1             # Short-Circuit APK
 git tag firmware-v0.2.0 && git push origin firmware-v0.2.0   # Circuit flash image
 ```
 
-Flash a firmware release with
-`esptool.py --chip esp32s3 write_flash 0x0 circuit-firmware-<version>.bin`.
+Flash a firmware release with its three files, each at its own address:
+
+```bash
+esptool.py --chip esp32s3 write_flash \
+  0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 circuit-app-<version>.bin
+```
+
+This writes only those regions. The board's saved Wi-Fi, pairing and notes key live
+in flash at `0x9000`, between the partition table and the app, and are left alone.
+**Do not flash a single merged image at `0x0`, and do not run `erase_flash`:** a
+merged image is blank between its parts, so either one wipes that region. Notes
+sealed with the wiped key could then only be opened by a phone that already holds it.
 
 ## How the firmware build works
 

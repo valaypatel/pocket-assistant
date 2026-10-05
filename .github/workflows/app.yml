@@ -50,15 +50,6 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      # Optional. Without them the APK is signed with a throwaway debug key, which
-      # cannot update an app that is already installed from another build.
-      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-      # The proof that the release key replaces the key the installed app was signed with.
-      ANDROID_LINEAGE_BASE64: ${{ secrets.ANDROID_LINEAGE_BASE64 }}
     defaults:
       run:
         working-directory: apps/short_circuit
@@ -87,6 +78,7 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/app-v* ]]; then
             name="${GITHUB_REF_NAME#app-v}"
+            [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::The tag must look like app-v1.2.3"; exit 1; }
           else
             name="$(sed -nE 's/^version: *([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)"
           fi
@@ -96,6 +88,16 @@ jobs:
 
       - name: Set up signing
         id: signing
+        # The secrets are only visible to this step, not to the other actions or the build.
+        # Without them the APK is signed with a throwaway debug key, which cannot update an
+        # app that is already installed from another build.
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          # Proof that the release key replaces the key the installed app was signed with.
+          ANDROID_LINEAGE_BASE64: ${{ secrets.ANDROID_LINEAGE_BASE64 }}
         run: |
           if [[ -n "$ANDROID_KEYSTORE_BASE64" && -n "$ANDROID_KEYSTORE_PASSWORD" && -n "$ANDROID_KEY_ALIAS" && -n "$ANDROID_KEY_PASSWORD" ]]; then
             echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
@@ -108,6 +110,8 @@ jobs:
             if [[ -n "$ANDROID_LINEAGE_BASE64" ]]; then
               echo "$ANDROID_LINEAGE_BASE64" | base64 --decode > android/app/rotation.lineage
               echo "lineageFile=$PWD/android/app/rotation.lineage" >> android/key.properties
+            else
+              echo "::warning::No ANDROID_LINEAGE_BASE64 secret: this APK is signed with the release key but carries no rotation proof, so it cannot update an app that was installed signed with the previous key."
             fi
             echo "signed=true" >> "$GITHUB_OUTPUT"
           else
@@ -120,10 +124,10 @@ jobs:
           fi
 
       - name: Build
-        run: >
-          flutter build apk --release
-          --build-name="${{ steps.version.outputs.name }}"
-          --build-number="${{ steps.version.outputs.number }}"
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+          VERSION_NUMBER: ${{ steps.version.outputs.number }}
+        run: flutter build apk --release --build-name="$VERSION_NAME" --build-number="$VERSION_NUMBER"
 
       - name: Attach the key-rotation proof
         if: steps.signing.outputs.signed == 'true'
@@ -131,15 +135,19 @@ jobs:
 
       - name: Name and describe the APK
         id: apk
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+          VERSION_NUMBER: ${{ steps.version.outputs.number }}
+          SIGNED: ${{ steps.signing.outputs.signed }}
         run: |
-          out="short-circuit-${{ steps.version.outputs.name }}-${{ steps.version.outputs.number }}.apk"
+          out="short-circuit-$VERSION_NAME-$VERSION_NUMBER.apk"
           apksigner="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner | sort -V | tail -1)"
           cp build/app/outputs/flutter-apk/app-release.apk "$out"
           sha256sum "$out" | tee "$out.sha256"
           {
             echo "### Short-Circuit APK"
-            echo "- Version: \`${{ steps.version.outputs.name }}\` (build ${{ steps.version.outputs.number }})"
-            echo "- Signed with: $([[ '${{ steps.signing.outputs.signed }}' == 'true' ]] && echo 'the release key' || echo 'a throwaway debug key (cannot update an installed copy)')"
+            echo "- Version: \`$VERSION_NAME\` (build $VERSION_NUMBER)"
+            echo "- Signed with: $([[ "$SIGNED" == 'true' ]] && echo 'the release key' || echo 'a throwaway debug key (cannot update an installed copy)')"
             echo "- Signing certificate: \`$("$apksigner" verify --print-certs "$out" 2>/dev/null | sed -n 's/.*Signer #1 certificate SHA-256 digest: //p' | head -1)\`"
             echo "- Size: $(du -h "$out" | cut -f1)"
             echo "- SHA-256: \`$(cut -d' ' -f1 "$out.sha256")\`"
