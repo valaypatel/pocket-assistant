@@ -50,35 +50,50 @@ A private repository on the free GitHub plan has no branch protection or
 environment approvals, so a merge to `main` that touches `services/music-lambda`
 deploys straight away. Review before merging.
 
-### Signing the app for releases
+### Signing the app
 
-An APK built on a CI runner is signed with a throwaway debug key, and Android
-refuses to update an installed app with an APK signed by a different key. So a
-**release** (tag `app-v*`) fails unless these four secrets exist:
+Releases are signed with a release key kept outside the repository, in
+`~/.circuit-signing/` on the Mac that made it:
 
-| Secret | Value |
+| File | What it is |
 |---|---|
-| `ANDROID_KEYSTORE_BASE64` | the keystore, base64 encoded |
-| `ANDROID_KEYSTORE_PASSWORD` | its store password |
-| `ANDROID_KEY_ALIAS` | the key alias |
-| `ANDROID_KEY_PASSWORD` | the key password |
+| `short-circuit-release.keystore` | the release key (4096-bit RSA, SHA-256, valid to 2056) |
+| `credentials.env` | its passwords and alias |
+| `rotation.lineage` | proof that this key replaces the earlier one (see below) |
 
-To keep updating the copy already on your phone, it has to be signed with the
-same key. That one was built with this machine's debug keystore:
+**Back these three files up** (a password manager's file storage is fine). If they
+are lost, no update can ever be signed to replace the installed app, and the only
+way forward is to uninstall it, which erases its data. They are also stored as
+GitHub secrets, but secrets cannot be read back out.
+
+GitHub secrets used by `app.yml`: `ANDROID_KEYSTORE_BASE64`,
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` and
+`ANDROID_LINEAGE_BASE64`. Without the first four, pull request builds use a
+throwaway debug key, and a tagged release (`app-v*`) fails on purpose.
+
+**Why there is a rotation proof.** The app on the phone was first installed signed
+with the old debug key. Android only accepts an update signed with the same key,
+unless the update carries a signed proof that a new key replaces the old one
+(Android 9 and later). `tool/sign_with_lineage.sh` attaches that proof, so the app
+updates in place and keeps its notes, settings and pairing. For that reason the app
+needs Android 9 or later (`minSdk = 28`) and is signed with the v3 scheme only,
+which is the one that carries the proof. The old key is not needed again.
+
+Locally, put the same values in `apps/short_circuit/android/key.properties`
+(git-ignored), including `lineageFile=<path to rotation.lineage>`. Then:
 
 ```bash
-base64 -i ~/.android/debug.keystore | gh secret set ANDROID_KEYSTORE_BASE64
-gh secret set ANDROID_KEYSTORE_PASSWORD --body android
-gh secret set ANDROID_KEY_ALIAS --body androiddebugkey
-gh secret set ANDROID_KEY_PASSWORD --body android
+cd apps/short_circuit
+flutter build apk --release
+tool/sign_with_lineage.sh build/app/outputs/flutter-apk/app-release.apk
 ```
 
-Or make a new key (`keytool -genkeypair ...`) and reinstall the app once; that
-loses its saved settings and Circuit pairing. A debug keystore's password is
-well known, so use a proper key before sharing the app with anyone.
+Check the result with the Android SDK's `apksigner verify --print-certs`, and read
+the proof back with `apksigner lineage --in app-release.apk --print-certs`.
 
-Locally, `android/key.properties` (git-ignored) does the same job. Without it the
-release build uses the debug key, as before.
+To change keys again later, make a new keystore and a new lineage with
+`apksigner rotate --old-signer ... --new-signer ...` from the current key, then
+replace the secrets.
 
 ## Releasing
 

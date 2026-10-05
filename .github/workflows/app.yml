@@ -57,6 +57,8 @@ jobs:
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      # The proof that the release key replaces the key the installed app was signed with.
+      ANDROID_LINEAGE_BASE64: ${{ secrets.ANDROID_LINEAGE_BASE64 }}
     defaults:
       run:
         working-directory: apps/short_circuit
@@ -103,6 +105,10 @@ jobs:
               echo "keyAlias=$ANDROID_KEY_ALIAS"
               echo "keyPassword=$ANDROID_KEY_PASSWORD"
             } > android/key.properties
+            if [[ -n "$ANDROID_LINEAGE_BASE64" ]]; then
+              echo "$ANDROID_LINEAGE_BASE64" | base64 --decode > android/app/rotation.lineage
+              echo "lineageFile=$PWD/android/app/rotation.lineage" >> android/key.properties
+            fi
             echo "signed=true" >> "$GITHUB_OUTPUT"
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
@@ -119,16 +125,22 @@ jobs:
           --build-name="${{ steps.version.outputs.name }}"
           --build-number="${{ steps.version.outputs.number }}"
 
+      - name: Attach the key-rotation proof
+        if: steps.signing.outputs.signed == 'true'
+        run: tool/sign_with_lineage.sh build/app/outputs/flutter-apk/app-release.apk
+
       - name: Name and describe the APK
         id: apk
         run: |
           out="short-circuit-${{ steps.version.outputs.name }}-${{ steps.version.outputs.number }}.apk"
+          apksigner="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner | sort -V | tail -1)"
           cp build/app/outputs/flutter-apk/app-release.apk "$out"
           sha256sum "$out" | tee "$out.sha256"
           {
             echo "### Short-Circuit APK"
             echo "- Version: \`${{ steps.version.outputs.name }}\` (build ${{ steps.version.outputs.number }})"
             echo "- Signed with: $([[ '${{ steps.signing.outputs.signed }}' == 'true' ]] && echo 'the release key' || echo 'a throwaway debug key (cannot update an installed copy)')"
+            echo "- Signing certificate: \`$("$apksigner" verify --print-certs "$out" 2>/dev/null | sed -n 's/.*Signer #1 certificate SHA-256 digest: //p' | head -1)\`"
             echo "- Size: $(du -h "$out" | cut -f1)"
             echo "- SHA-256: \`$(cut -d' ' -f1 "$out.sha256")\`"
           } >> "$GITHUB_STEP_SUMMARY"
