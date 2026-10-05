@@ -34,6 +34,15 @@ AWS_PROFILE=tf-admin terraform apply        # adds the deploy role and its polic
 gh variable set AWS_DEPLOY_ROLE_ARN --body "$(terraform output -raw deploy_role_arn)"
 ```
 
+This repository uses GitHub's "immutable subject" setting, so its identity token names the
+repo with numeric ids. Pass the prefix to Terraform (for example in `terraform.tfvars`) or
+AWS will refuse the deploy with "Not authorized to perform sts:AssumeRoleWithWebIdentity":
+
+```bash
+gh api repos/valaypatel/pocket-assistant/actions/oidc/customization/sub --jq .sub_claim_prefix
+# then: github_subject_prefix = "<that value>"
+```
+
 Optional repository variables: `AWS_REGION` (default `ap-south-1`) and
 `LAMBDA_FUNCTION_NAME` (default `circuit-music`).
 
