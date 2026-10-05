@@ -43,9 +43,7 @@ HEADER_ICONS = [("wifi", 138, 3), ("phone", 161, 5), ("hard-drive", 181, 5)]
 # with dashes turned into underscores.
 COUNT_ICONS = ["clock", "check", "wifi", "wifi-off", "wifi-low", "wifi-high", "wifi-zero", "phone", "hard-drive"]
 
-# Record animation: (dot radius, expanding ring radius or None) per frame.
-RECORD_CENTER = (68, 137)
-RECORD_FRAMES = [(14, None), (12, 36), (10, 40), (12, None)]
+# Where the animated recording icon sits (an LVGL image of its own, see main.cpp).
 RECORD_BOX = (20, 92, 116, 182)
 
 # The sync glyph is the prototype's refresh-cw icon stepped through rotations
@@ -150,51 +148,28 @@ def wordmark_mask(size=40):
     return [r[min(xs):max(xs) + 1] for r in mask[min(ys):max(ys) + 1]]
 
 
-# The brand icon (apps/short_circuit/assets/brand/app-icon.svg) in black and white: the
-# coral square becomes black, the cream speech bubble white, the dark waveform bars black.
-ICON_BUBBLE = ("M390 280H634C708 280 752 324 752 398V586C752 660 708 704 634 704H478L342 774"
-               "V694C296 678 272 640 272 586V398C272 324 316 280 390 280Z")
-ICON_BARS = [(356, 445, 94), (424, 399, 186), (492, 360, 264), (560, 417, 150), (628, 455, 74)]  # x, y, height; 40 wide
-ICON_CORNER = 224  # corner radius on the 1024 canvas (the app icon itself is square; the launcher masks it)
-
-
-def svg_points(path, steps=24):
-    """Flattens the absolute M/H/V/L/C/Z path above into a polygon."""
-    tok = re.findall(r"[MHVLCZ]|-?\d+(?:\.\d+)?", path)
-    pts, i, cmd, cur = [], 0, None, (0.0, 0.0)
-    while i < len(tok):
-        if tok[i] in "MHVLCZ":
-            cmd = tok[i]
-            i += 1
-            if cmd == "Z":
-                continue
-        if cmd in "ML":
-            cur = (float(tok[i]), float(tok[i + 1])); i += 2; pts.append(cur)
-        elif cmd == "H":
-            cur = (float(tok[i]), cur[1]); i += 1; pts.append(cur)
-        elif cmd == "V":
-            cur = (cur[0], float(tok[i])); i += 1; pts.append(cur)
-        elif cmd == "C":
-            p = [cur] + [(float(tok[i + 2 * k]), float(tok[i + 2 * k + 1])) for k in range(3)]
-            i += 6
-            for t in (n / steps for n in range(1, steps + 1)):
-                u = 1 - t
-                pts.append((u**3 * p[0][0] + 3 * u * u * t * p[1][0] + 3 * u * t * t * p[2][0] + t**3 * p[3][0],
-                            u**3 * p[0][1] + 3 * u * u * t * p[1][1] + 3 * u * t * t * p[2][1] + t**3 * p[3][1]))
-            cur = p[3]
-    return pts
+# The Circuit device icon (apps/short_circuit/assets/brand/circuit-device.svg) in black and white:
+# the dark square and screen become black, the board body and waveform white-on-black as drawn.
+DEVICE_BARS = [(364, 437, 56), (428, 395, 140), (492, 351, 228), (556, 407, 116), (620, 441, 48)]  # x, y, height; 40 wide
 
 
 def icon_mask(size):
-    """The brand icon as a size x size ink mask (True = black), drawn at 8x and reduced."""
+    """The device icon as a size x size ink mask (True = black), drawn at 8x and reduced."""
     ss = 8
     k = size * ss / 1024
     im = Image.new("L", (size * ss, size * ss), 255)
     dr = ImageDraw.Draw(im)
-    dr.rounded_rectangle((0, 0, size * ss - 1, size * ss - 1), radius=ICON_CORNER * k, fill=0)
-    dr.polygon([(x * k, y * k) for x, y in svg_points(ICON_BUBBLE)], fill=255)
-    for x, y, h in ICON_BARS:
-        dr.rounded_rectangle((x * k, y * k, (x + 40) * k, (y + h) * k), radius=20 * k, fill=0)
+
+    def box(x, y, w, h, r, fill):
+        dr.rounded_rectangle((x * k, y * k, (x + w) * k - 1, (y + h) * k - 1), radius=r * k, fill=fill)
+
+    box(0, 0, 1024, 1024, 224, 0)  # dark tile
+    box(270, 230, 484, 564, 114, 255)  # board body
+    box(318, 278, 388, 366, 68, 0)  # screen
+    for x, y, h in DEVICE_BARS:
+        box(x, y, 40, h, 20, 255)
+    dr.ellipse(((512 - 34) * k, (714 - 34) * k, (512 + 34) * k, (714 + 34) * k), fill=0)  # button
+    dr.ellipse(((512 - 15) * k, (714 - 15) * k, (512 + 15) * k, (714 + 15) * k), fill=255)  # its light
     im = im.resize((size, size), Image.LANCZOS)
     return [[im.getpixel((x, y)) < 140 for x in range(size)] for y in range(size)]
 
@@ -280,7 +255,7 @@ def main():
     src = parse(SCREENS)
     wm = wordmark_mask()
     jobs = [("idle", "idle", 0), ("saved", "saved", 0), ("pair", "pair", 0), ("splash", "splash", 0)]
-    jobs += [("record" if i == 0 else f"record_{i}", "record", i) for i in range(len(RECORD_FRAMES))]
+    jobs += [("record", "record", 0)]
     jobs += [("sync" if i == 0 else f"sync_{i}", "sync", a) for i, a in enumerate(SYNC_ANGLES)]
 
     parts = ["#pragma once\n\n#include \"lvgl.h\"\n\n"
@@ -293,7 +268,7 @@ def main():
             big = max((sz for sz in range(40, 80, 2) if mask_size(wordmark_mask(sz))[0] <= W - 28), default=40)
             mark = wordmark_mask(big)
             mw, mh = mask_size(mark)
-            # Boot screen: the brand icon above the wordmark, the pair centred as a group.
+            # Boot screen: the Circuit device icon above the wordmark, the pair centred as a group.
             icon = icon_mask(SPLASH_ICON)
             top = (H - (SPLASH_ICON + 12 + mh)) // 2
             paste_mask(g, icon, (W - SPLASH_ICON) // 2, top)
@@ -309,13 +284,9 @@ def main():
             ww, wh = mask_size(wm)
             paste_mask(g, wm, (W - ww) // 2, 84 + (H - 84 - wh) // 2)
         elif base == "record":
+            # The animated device icon (main/circuit_recording_icon.h) is its own LVGL image
+            # placed here at run time, so the baked screen keeps only the static layout.
             clear(g, RECORD_BOX)
-            cx, cy = RECORD_CENTER
-            ring(g, cx, cy, 33, 3)
-            dot, outer = RECORD_FRAMES[arg]
-            disc(g, cx, cy, dot)
-            if outer:
-                ring(g, cx, cy, outer, 3)
         elif base == "sync":
             clear(g, SYNC_BOX)
             paste_mask(g, sync_icon(arg), SYNC_BOX[0], SYNC_BOX[1])

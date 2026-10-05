@@ -39,6 +39,7 @@
 #include "port_power.h"
 #include "port_codec.h"
 #include "circuit_demo_screens.h"
+#include "circuit_recording_icon.h"
 #include "circuit_crypto.h"
 #include "circuit_notes.h"
 #include "circuit_selftest_vector.h"
@@ -82,6 +83,7 @@ lv_obj_t *connection_label;
 lv_obj_t *wordmark_image;
 lv_obj_t *pairing_code_label;
 lv_obj_t *recording_timer_label;
+lv_obj_t *recording_icon;  // the animated device icon on the recording screen (64x64)
 lv_obj_t *sync_progress_label;
 lv_obj_t *idle_date_label;
 lv_obj_t *idle_time_label;
@@ -464,6 +466,7 @@ void show_device_screen(DeviceScreen screen) {
     lv_obj_add_flag(message_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(pairing_code_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     lv_img_set_src(wordmark_image, kScreens[static_cast<size_t>(screen)]);
     lv_obj_center(wordmark_image);
@@ -471,6 +474,8 @@ void show_device_screen(DeviceScreen screen) {
     if (screen == DeviceScreen::Recording) {
         lv_label_set_text(recording_timer_label, "00:00");
         lv_obj_clear_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+        lv_img_set_src(recording_icon, circuit_recording_frame(0));
+        lv_obj_clear_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     } else if (screen == DeviceScreen::Syncing) {
         lv_label_set_text(sync_progress_label, "0%");
         lv_obj_clear_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
@@ -480,28 +485,27 @@ void show_device_screen(DeviceScreen screen) {
 }
 
 void demo_animation_task(void *) {
-    size_t record_frame = 0;
     size_t sync_frame = 0;
     while (true) {
-        if (active_screen == DeviceScreen::Recording && wordmark_image != nullptr) {
+        if (active_screen == DeviceScreen::Recording && wordmark_image != nullptr && recording_icon != nullptr) {
             if (Lvgl_lock(-1)) {
-                // An expanding ring and a breathing dot, stepped for the e-paper.
-                static constexpr const lv_image_dsc_t *kRecordFrames[] = {
-                    &circuit_record_screen, &circuit_record_1_screen,
-                    &circuit_record_2_screen, &circuit_record_3_screen,
-                };
-                lv_img_set_src(wordmark_image, kRecordFrames[record_frame]);
-                const uint32_t elapsed = (xTaskGetTickCount() - recording_started_at) / configTICK_RATE_HZ;
-                char elapsed_text[12];
-                snprintf(elapsed_text, sizeof(elapsed_text), "%02lu:%02lu",
-                    static_cast<unsigned long>(elapsed / 60),
-                    static_cast<unsigned long>(elapsed % 60));
-                lv_label_set_text(recording_timer_label, elapsed_text);
-                lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
+                // Re-check under the lock: the screen may have changed while waiting for it.
+                if (active_screen == DeviceScreen::Recording) {
+                    // Four stepped frames (waveform changes, the dot alternates filled and hollow)
+                    // at the e-paper's cadence; it shows recording is on, not the sound level.
+                    const uint32_t elapsed_ticks = xTaskGetTickCount() - recording_started_at;
+                    lv_img_set_src(recording_icon, circuit_recording_frame(elapsed_ticks * 1000 / configTICK_RATE_HZ));
+                    const uint32_t elapsed = elapsed_ticks / configTICK_RATE_HZ;
+                    char elapsed_text[12];
+                    snprintf(elapsed_text, sizeof(elapsed_text), "%02lu:%02lu",
+                        static_cast<unsigned long>(elapsed / 60),
+                        static_cast<unsigned long>(elapsed % 60));
+                    lv_label_set_text(recording_timer_label, elapsed_text);
+                    lv_obj_clear_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
+                }
                 Lvgl_unlock();
             }
-            record_frame = (record_frame + 1) % 4;
-            vTaskDelay(pdMS_TO_TICKS(700));
+            vTaskDelay(pdMS_TO_TICKS(circuit_recording_frame_ms));
         } else if (active_screen == DeviceScreen::Syncing && wordmark_image != nullptr) {
             // The e-paper cannot spin smoothly, so step the refresh icon
             // through its rotations instead.
@@ -518,7 +522,6 @@ void demo_animation_task(void *) {
             }
             vTaskDelay(pdMS_TO_TICKS(700));
         } else {
-            record_frame = 0;
             sync_frame = 0;
             vTaskDelay(pdMS_TO_TICKS(150));
         }
@@ -538,6 +541,7 @@ void show_pairing_code() {
     lv_label_set_text(pairing_code_label, code);
     lv_obj_clear_flag(pairing_code_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     apply_persistent_labels(DeviceScreen::Pairing);
     lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
@@ -1871,6 +1875,13 @@ void init_display() {
         wordmark_image = lv_img_create(lv_screen_active());
         lv_img_set_src(wordmark_image, &circuit_splash_screen);
         lv_obj_center(wordmark_image);
+
+        // The recording animation: a 64x64 image of its own, where the screen's ring used to be
+        // (centred at 68,137, left of the timer). Shown only while recording.
+        recording_icon = lv_img_create(lv_screen_active());
+        lv_img_set_src(recording_icon, circuit_recording_frame(0));
+        lv_obj_align(recording_icon, LV_ALIGN_TOP_LEFT, 36, 105);
+        lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
 
         // Header icons: positioned and shown by refresh_status_icons().
         icon_wifi_obj = lv_img_create(lv_screen_active());
