@@ -98,8 +98,10 @@ jobs:
             name="$(sed -nE 's/^version: *([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)"
           fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
-          # Always above the 1 of the first sideloaded build, and rising each run.
-          echo "number=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
+          # Always above any build made by hand (those use small numbers, 1 to a few hundred), so an
+          # update from App Distribution or a release is never refused as a downgrade, and rising
+          # each run.
+          echo "number=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
 
       - name: Set up signing
         id: signing

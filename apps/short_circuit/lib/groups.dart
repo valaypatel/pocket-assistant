@@ -9,8 +9,10 @@ const _groupsKey = 'circuit_groups';
 /// The built-in group of every spoken note. Never stored; always there.
 const allNotesGroupId = 'all';
 
-/// How much note text one group chat sends at once. Older notes drop first.
-const groupContextBudget = 60000;
+/// How much note text one group chat sends at once (characters, about 4,000 words). Older notes
+/// drop first. Kept modest because Gujarati and Hindi use many more tokens per character than
+/// English, and the AI service's context size is not known to the app.
+const groupContextBudget = 24000;
 
 class NoteGroup {
   const NoteGroup({

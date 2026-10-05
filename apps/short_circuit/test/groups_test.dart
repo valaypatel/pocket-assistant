@@ -386,4 +386,32 @@ void main() {
       },
     );
   });
+
+  group('choosing notes ends when you leave Notes', () {
+    testWidgets('going to another tab and back starts clean', (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      SharedPreferences.setMockInitialValues({
+        'circuit_notes': jsonEncode([
+          note('a', DateTime(2026, 10, 1, 9), title: 'Groceries').toJson(),
+        ]),
+      });
+      await tester.pumpWidget(const ShortCircuitApp());
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(find.text('Notes').last);
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.byTooltip('Select notes to group'));
+      await tester.pump();
+      await tester.tap(find.text('Groceries'), warnIfMissed: false);
+      await tester.pump();
+      expect(find.text('1 selected'), findsOneWidget);
+
+      await tester.tap(find.text('Tasks').last);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.text('Notes').last);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('1 selected'), findsNothing);
+      expect(find.byTooltip('Select notes to group'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 3));
+    });
+  });
 }

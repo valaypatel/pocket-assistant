@@ -2782,6 +2782,9 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   void _goTo(_AppPage page) {
     setState(() {
+      // Choosing notes belongs to the Notes tab; leaving it ends the choosing.
+      _selecting = false;
+      _selectedNoteIds.clear();
       _pageHistory.add(_page);
       _page = page;
     });
@@ -2800,6 +2803,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   void _selectTab(int index) {
     setState(() {
+      _selecting = false;
+      _selectedNoteIds.clear();
       _pageHistory.clear();
       _page = const [
         _AppPage.home,
