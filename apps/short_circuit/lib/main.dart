@@ -17,6 +17,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'telemetry.dart';
+part 'groups.dart';
 part 'music.dart';
 part 'secure_notes.dart';
 part 'ui/chat_page.dart';
@@ -794,7 +795,7 @@ WifiStatus? parseWifiStatus(String message) {
   );
 }
 
-enum _AppPage { home, notes, tasks, settings, circuit, wifi, hiddenWifi }
+enum _AppPage { home, notes, tasks, settings, circuit, wifi, hiddenWifi, group }
 
 const _tasksKey = 'circuit_tasks';
 const _boardDeletesKey = 'pending_board_deletes';
@@ -944,6 +945,12 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   bool _needsPairingRepair = false;
   List<String> _wifiNetworks = [];
   List<CircuitNote> _notes = [];
+  List<NoteGroup> _groups = [];
+  // Choosing notes to group, on the Notes tab.
+  bool _selecting = false;
+  final Set<String> _selectedNoteIds = {};
+  String?
+  _openGroupId; // the group page's group (allNotesGroupId for everything)
   String? _savedCircuitId;
   String? _lastAudioStatus;
   String? _syncingNoteId;
@@ -960,6 +967,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     );
     _restoreLastCircuit();
     _loadNotes().then((_) => _reconcileSyncedNotes());
+    unawaited(_loadGroups());
     unawaited(_relayChannel.invokeMethod<bool>('requestLocalNetwork'));
     _loadPreferences();
     _loadGeminiState();
@@ -2346,6 +2354,18 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     }
   }
 
+  /// A group chat: the AI sees the group's notes as of now, so notes added or transcribed since
+  /// the chat was opened are included.
+  Future<String> _askAboutGroup(String groupId, List<ChatMessage> history) {
+    final group = _groupById(groupId);
+    if (group == null) throw Exception('This group no longer exists.');
+    return _ai.chatAboutGroup(
+      group.name,
+      buildGroupContext(_notesOfGroup(group)),
+      history,
+    );
+  }
+
   Future<String> _askAboutNote(String noteId, List<ChatMessage> history) {
     final note = _notes.where((n) => n.id == noteId).firstOrNull;
     if (note == null) throw Exception('This note no longer exists.');
@@ -2371,6 +2391,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     final notes = _notes.where((item) => item.id != id).toList();
     final preferences = await SharedPreferences.getInstance();
     await preferences.remove('note_chat_$id');
+    unawaited(_removeNoteFromGroups(id));
     await _writeSecret(
       preferences,
       _notesKey,

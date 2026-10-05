@@ -698,20 +698,30 @@ extension _ScPages on _CircuitHomePageState {
         .where((note) => !_noteNeedsAttention(note))
         .toList();
     return [
-      Row(
-        children: [
-          const Expanded(child: ScTitle('Notes')),
-          ScIconButton(
-            size: 44,
-            icon: _noteSearchOpen ? LucideIcons.x : LucideIcons.search,
-            tooltip: _noteSearchOpen ? 'Close search' : 'Search notes',
-            onPressed: () => _update(() {
-              if (_noteSearchOpen) _noteSearchController.clear();
-              _noteSearchOpen = !_noteSearchOpen;
-            }),
-          ),
-        ],
-      ),
+      if (_selecting)
+        _selectionHeader()
+      else
+        Row(
+          children: [
+            const Expanded(child: ScTitle('Notes')),
+            ScIconButton(
+              size: 44,
+              icon: LucideIcons.listChecks,
+              tooltip: 'Select notes to group',
+              onPressed: _startSelecting,
+            ),
+            const SizedBox(width: 8),
+            ScIconButton(
+              size: 44,
+              icon: _noteSearchOpen ? LucideIcons.x : LucideIcons.search,
+              tooltip: _noteSearchOpen ? 'Close search' : 'Search notes',
+              onPressed: () => _update(() {
+                if (_noteSearchOpen) _noteSearchController.clear();
+                _noteSearchOpen = !_noteSearchOpen;
+              }),
+            ),
+          ],
+        ),
       if (_noteSearchOpen) ...[
         const SizedBox(height: 10),
         TextField(
@@ -728,25 +738,29 @@ extension _ScPages on _CircuitHomePageState {
       const SizedBox(height: 14),
       _syncHealthCard(),
       _syncBanner(),
+      _groupsRow(),
       if (_notes.any(_noteNeedsAttention)) ...[
         const SizedBox(height: 18),
         const ScGroupLabel('Needs attention'),
         for (final note in visibleNotes.where(_noteNeedsAttention).take(5)) ...[
-          Dismissible(
-            key: ValueKey('review-${note.id}'),
-            direction: DismissDirection.endToStart,
-            background: Container(
-              alignment: Alignment.centerRight,
-              padding: const EdgeInsets.symmetric(horizontal: 22),
-              decoration: BoxDecoration(
-                color: Sc.dangerSoft,
-                borderRadius: BorderRadius.circular(18),
+          _selectableNote(
+            note,
+            Dismissible(
+              key: ValueKey('review-${note.id}'),
+              direction: DismissDirection.endToStart,
+              background: Container(
+                alignment: Alignment.centerRight,
+                padding: const EdgeInsets.symmetric(horizontal: 22),
+                decoration: BoxDecoration(
+                  color: Sc.dangerSoft,
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: const Icon(LucideIcons.trash2, color: Sc.danger),
               ),
-              child: const Icon(LucideIcons.trash2, color: Sc.danger),
+              confirmDismiss: (_) => _confirmDeleteNote(context),
+              onDismissed: (_) => _deleteNote(note.id),
+              child: _noteTile(note, actions: true),
             ),
-            confirmDismiss: (_) => _confirmDeleteNote(context),
-            onDismissed: (_) => _deleteNote(note.id),
-            child: _noteTile(note, actions: true),
           ),
           const SizedBox(height: 8),
         ],
@@ -760,21 +774,24 @@ extension _ScPages on _CircuitHomePageState {
         )
       else
         for (final note in libraryNotes) ...[
-          Dismissible(
-            key: ValueKey(note.id),
-            direction: DismissDirection.endToStart,
-            background: Container(
-              alignment: Alignment.centerRight,
-              padding: const EdgeInsets.symmetric(horizontal: 22),
-              decoration: BoxDecoration(
-                color: Sc.dangerSoft,
-                borderRadius: BorderRadius.circular(18),
+          _selectableNote(
+            note,
+            Dismissible(
+              key: ValueKey(note.id),
+              direction: DismissDirection.endToStart,
+              background: Container(
+                alignment: Alignment.centerRight,
+                padding: const EdgeInsets.symmetric(horizontal: 22),
+                decoration: BoxDecoration(
+                  color: Sc.dangerSoft,
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: const Icon(LucideIcons.trash2, color: Sc.danger),
               ),
-              child: const Icon(LucideIcons.trash2, color: Sc.danger),
+              confirmDismiss: (_) => _confirmDeleteNote(context),
+              onDismissed: (_) => _deleteNote(note.id),
+              child: _noteTile(note, actions: true),
             ),
-            confirmDismiss: (_) => _confirmDeleteNote(context),
-            onDismissed: (_) => _deleteNote(note.id),
-            child: _noteTile(note, actions: true),
           ),
           const SizedBox(height: 10),
         ],
@@ -1880,6 +1897,7 @@ extension _ScPages on _CircuitHomePageState {
         _AppPage.circuit => _circuitPage(),
         _AppPage.wifi => _wifiPage(),
         _AppPage.hiddenWifi => _hiddenWifiPage(),
+        _AppPage.group => _groupPage(),
       },
     );
     // While Circuit records, a compact pill grows out of the Circuit indicator on Home (or out of
@@ -1893,7 +1911,7 @@ extension _ScPages on _CircuitHomePageState {
     );
     final tab = switch (_page) {
       _AppPage.home => 0,
-      _AppPage.notes => 1,
+      _AppPage.notes || _AppPage.group => 1,
       _AppPage.tasks => 2,
       _AppPage.settings => 3,
       _ => -1,
