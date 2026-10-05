@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds build/music-lambda.zip for AWS Lambda (Python 3.12, x86_64).
 
-Dependencies are fetched as Linux wheels, so the zip is correct even when built
+Dependencies come from requirements.lock, which pins every one, and are fetched as Linux wheels, so the zip is correct even when built
 on a Mac. The zip is reproducible: the same inputs give the same bytes, so
 Terraform only redeploys when the code or requirements really change.
 
@@ -43,7 +43,9 @@ def main() -> None:
             "--implementation", "cp",
             "--python-version", "3.12",
             "--only-binary=:all:",
-            "-r", str(ROOT / "requirements.txt"),
+            # Exactly the pinned versions, and nothing else (see requirements.lock).
+            "--no-deps",
+            "-r", str(ROOT / "requirements.lock"),
         ],
         check=True,
     )
