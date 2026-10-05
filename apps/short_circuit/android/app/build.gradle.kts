@@ -75,6 +75,13 @@ kotlin {
     }
 }
 
+dependencies {
+    // The relay service reports its own events (see Diagnostics.kt). Same Firebase version
+    // as the FlutterFire plugins; without google-services.json nothing is sent.
+    implementation(platform("com.google.firebase:firebase-bom:34.19.0"))
+    implementation("com.google.firebase:firebase-analytics")
+}
+
 flutter {
     source = "../.."
 }

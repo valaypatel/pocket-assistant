@@ -24,6 +24,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
@@ -106,6 +107,9 @@ class CircuitRelayService : Service() {
     private val reconnectHandler = Handler(Looper.getMainLooper())
     private var reconnectDelayMs = 1000L
     private val connectedStatus = "Connected to Circuit"
+    private var attemptStartedMs = 0L
+    private var connectedAtMs = 0L
+    private var syncStartedMs = 0L
     private var shouldReconnect = false
     private var circuitAddress: String? = null
     private var gatt: BluetoothGatt? = null
@@ -132,6 +136,14 @@ class CircuitRelayService : Service() {
             when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
                 BluetoothAdapter.STATE_OFF -> {
                     Log.i("CircuitRelay", "[BLE] Bluetooth turned off")
+                    if (connectedAtMs > 0) {
+                        // status -1: the phone's own Bluetooth went off, not a link failure.
+                        Diagnostics.event(
+                            this@CircuitRelayService, "relay_disconnect", 60_000L,
+                            "status" to -1, "up_s" to (SystemClock.elapsedRealtime() - connectedAtMs) / 1000,
+                        )
+                        connectedAtMs = 0L
+                    }
                     reconnectHandler.removeCallbacks(reconnectRunnable)
                     reconnectHandler.removeCallbacks(setupTimeout)
                     relayReady = false
@@ -211,6 +223,7 @@ class CircuitRelayService : Service() {
 
     private fun connect(address: String) {
         if (!shouldReconnect || !hasBluetoothPermission()) return
+        attemptStartedMs = SystemClock.elapsedRealtime()
         reconnectHandler.removeCallbacks(reconnectRunnable)
         reconnectHandler.removeCallbacks(setupTimeout)
         gatt?.close()
@@ -281,6 +294,14 @@ class CircuitRelayService : Service() {
                     failConnection(gatt, "Could not discover Circuit services")
                 }
             } else {
+                if (this@CircuitRelayService.gatt === gatt) {
+                    val upSeconds = if (connectedAtMs > 0) (SystemClock.elapsedRealtime() - connectedAtMs) / 1000 else 0L
+                    Diagnostics.event(
+                        this@CircuitRelayService, "relay_disconnect", 60_000L,
+                        "status" to status, "up_s" to upSeconds,
+                    )
+                    connectedAtMs = 0L
+                }
                 failConnection(gatt, "Circuit disconnected")
             }
         }
@@ -328,6 +349,13 @@ class CircuitRelayService : Service() {
             reconnectHandler.removeCallbacks(setupTimeout)
             relayReady = true
             setRelayStatus(connectedStatus)
+            connectedAtMs = SystemClock.elapsedRealtime()
+            Diagnostics.event(
+                this@CircuitRelayService, "relay_ready", 60_000L,
+                "setup_s" to (connectedAtMs - attemptStartedMs) / 1000,
+            )
+            // Ask for the board's health once the link has settled (after the home status).
+            reconnectHandler.postDelayed({ if (relayReady) writeCommand("@wifi-status") }, 6000)
             writeCommand("@relay-test")
             // The display's clock and note counts must not depend on the app
             // screen being open, so the service sends them itself.
@@ -371,6 +399,7 @@ class CircuitRelayService : Service() {
             wifiNetworks = request.lines().drop(1).map { it.trim() }.filter { it.isNotEmpty() }.distinct().sorted()
             return
         }
+        if (request.startsWith("@sync-status\n")) Diagnostics.boardHealth(this, request)
         if (request.startsWith("@wifi-status\n")) {
             // Delivered to Dart on the same channel as audio status, but cached
             // separately so it never overwrites the audio state.
@@ -441,6 +470,7 @@ class CircuitRelayService : Service() {
         syncExpectedBytes = expectedBytes
         syncReceivedBytes = 0
         syncCompleteStatus = null
+        syncStartedMs = SystemClock.elapsedRealtime()
         syncFile = File(filesDir, "circuit-note-${System.currentTimeMillis()}.wav")
         syncOutput = FileOutputStream(syncFile)
     }
@@ -457,6 +487,12 @@ class CircuitRelayService : Service() {
             val named = File(file.parentFile, file.nameWithoutExtension + "." + noteExtension(file))
             if (named != file && file.renameTo(named)) file = named
             Log.i("CircuitSync", "Saved a note over Bluetooth as ${file.name}")
+            Diagnostics.event(
+                this, "sync_stats", 0L,
+                "via" to "ble",
+                "size_mb" to Diagnostics.megabytes(syncExpectedBytes),
+                "seconds" to (SystemClock.elapsedRealtime() - syncStartedMs) / 1000,
+            )
             latestSyncedFile = file.absolutePath
             publishAudioStatus("$status|${file.absolutePath}")
         } else {
@@ -580,6 +616,8 @@ class CircuitRelayService : Service() {
                 var target = existing ?: File(filesDir, "circuit-note-$epoch-$id.wav")
                 val partial = File(filesDir, "circuit-note-$epoch-$id.part")
                 if (!(target.exists() && target.length() == bytes)) {
+                    val noteStartedMs = SystemClock.elapsedRealtime()
+                    var interruptions = 0
                     var attempts = 0
                     var progressedTo = partial.length()
                     while (partial.length() < bytes) {
@@ -617,6 +655,7 @@ class CircuitRelayService : Service() {
                                 }
                             }
                         } catch (error: IOException) {
+                            interruptions++
                             Log.w("CircuitSync", "Download attempt $attempts for note $id failed", error)
                             if (error is javax.net.ssl.SSLException && partial.length() == 0L) throw error
                         }
@@ -627,6 +666,15 @@ class CircuitRelayService : Service() {
                         partial.delete()
                         throw IOException("Note $id arrived incomplete")
                     }
+                    val seconds = ((SystemClock.elapsedRealtime() - noteStartedMs) / 1000).coerceAtLeast(1)
+                    Diagnostics.event(
+                        this, "sync_stats", 0L,
+                        "via" to "wifi",
+                        "size_mb" to Diagnostics.megabytes(bytes),
+                        "seconds" to seconds,
+                        "interruptions" to interruptions,
+                        "kb_s" to bytes / 1024 / seconds,
+                    )
                 }
                 doneBytes += bytes
                 Log.i("CircuitSync", "Saved note $id as ${target.name} ($bytes B)")  // the extension says whether it is encrypted
@@ -638,6 +686,18 @@ class CircuitRelayService : Service() {
             publishAudioStatus("Sync complete: all notes saved")
         } catch (error: Exception) {
             Log.e("CircuitSync", "Wi-Fi sync failed", error)
+            Diagnostics.event(
+                this, "sync_failed", 0L,
+                "via" to "wifi",
+                "cause" to when {
+                    error is javax.net.ssl.SSLException -> "certificate"
+                    error is java.net.SocketTimeoutException || error is java.net.ConnectException ||
+                        error is java.net.NoRouteToHostException -> "unreachable"
+                    error.message?.contains("kept dropping") == true -> "dropping"
+                    error.message?.contains("incomplete") == true -> "incomplete"
+                    else -> "other"
+                },
+            )
             val reason = when (error) {
                 is javax.net.ssl.SSLException -> "Circuit's certificate did not match this phone"
                 is java.net.SocketTimeoutException, is java.net.ConnectException, is java.net.NoRouteToHostException ->

@@ -134,6 +134,7 @@ volatile bool ble_encrypted = false;       // bonded phone, link encrypted
 volatile int64_t last_wifi_sync_end_ms = -600000;  // no cooldown at boot
 constexpr int64_t kWifiSyncCooldownMs = 45000;
 constexpr int64_t kWifiSyncMaxCooldownMs = 600000;
+volatile uint32_t text_stack_min_bytes = UINT32_MAX;  // least unused stack the command task has had
 int boot_reset_reason = -1;               // why the board last restarted (esp_reset_reason)
 char last_offer[kMaxTextBytes + 40] = "";   // kept so it can be re-sent until the phone answers
 int64_t last_offer_sent_ms = 0;
@@ -1067,9 +1068,15 @@ void send_wifi_status() {
 // the app can show a sync that is stuck, and a crash, instead of guessing.
 void send_sync_status() {
     char message[kMaxTextBytes + 1];
-    snprintf(message, sizeof(message), "@sync-status\nwaiting=%u\nreset=%d\nuptime=%lld",
+    // The first three lines are what the app has always read; the rest is board health,
+    // forwarded to the app's diagnostics (counts and sizes only).
+    snprintf(message, sizeof(message),
+        "@sync-status\nwaiting=%u\nreset=%d\nuptime=%lld\nfree_min=%u\nstack_min=%u\nstops=%u",
         static_cast<unsigned>(circuit_notes::count_unsynced()), boot_reset_reason,
-        static_cast<long long>(circuit_sync::now_ms() / 1000));
+        static_cast<long long>(circuit_sync::now_ms() / 1000),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(text_stack_min_bytes == UINT32_MAX ? 0 : text_stack_min_bytes),
+        static_cast<unsigned>(circuit_sync::download_stops));
     send_relay_request(message);
 }
 
@@ -1626,6 +1633,7 @@ void text_display_task(void *) {
             const UBaseType_t spare = uxTaskGetStackHighWaterMark(nullptr);
             if (spare < lowest_spare) {
                 lowest_spare = spare;
+                text_stack_min_bytes = static_cast<uint32_t>(spare);
                 ESP_LOGW(kTag, "text_display stack: never less than %u bytes spare", static_cast<unsigned>(spare));
             }
         }
