@@ -100,6 +100,20 @@ not committed. Locally it lives at `apps/short_circuit/android/app/google-servic
 the build works and the app sends nothing. What is and is not sent is described at the top
 of `apps/short_circuit/lib/telemetry.dart`.
 
+**Firebase App Distribution.** A release tag (`app-v*`) or a manual run of the App workflow
+sends the signed APK to the testers in Firebase. It is skipped until the repository
+variable `FIREBASE_APP_ID` exists. One-time setup:
+
+1. Firebase console > Release & Monitor > App Distribution > Get started, and make a tester
+   group named `testers` (or set the variable `FIREBASE_TESTER_GROUP`).
+2. Google Cloud console > IAM > Service accounts > create one, give it the role
+   **Firebase App Distribution Admin**, and make a JSON key for it.
+3. `gh secret set FIREBASE_SERVICE_ACCOUNT_JSON < key.json`, then delete the key file.
+4. `gh variable set FIREBASE_APP_ID --body "<mobilesdk_app_id from google-services.json>"`.
+
+The key can upload builds and nothing else. A build signed with the throwaway debug key is
+refused, because it could not update an installed app.
+
 GitHub secrets used by `app.yml`: `ANDROID_KEYSTORE_BASE64`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` and
 `ANDROID_LINEAGE_BASE64`. Without the first four, pull request builds use a
