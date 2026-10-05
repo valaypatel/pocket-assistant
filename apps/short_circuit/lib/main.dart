@@ -136,6 +136,7 @@ class GeminiClient {
                     'text':
                         'Transcribe this voice note exactly. Preserve Gujarati script, English, and mixed Gujarati-English. Return the complete transcription only. Do not summarise, classify, translate, or add a title.'
                         '${detectMusic ? ' Exception: if the recording is mainly music or a song playing, with no one speaking to record a note, reply with exactly [[MUSIC]] and nothing else.' : ''}'
+                        ' If the recording sounds like a phone call (a conversation heard through a phone, with telephone-quality audio, ringing, or a call being answered or ended), begin your reply with [[CALL]] followed by the transcription.'
                         ' If it is only silence or background noise, reply with exactly [[NOISE]].',
                   },
                   {
@@ -171,7 +172,8 @@ class GeminiClient {
   }
 
   /// Turns Gemini's plain-text answer into a transcription. A recording of
-  /// music comes back as the [[MUSIC]] marker and silence as [[NOISE]].
+  /// music comes back as the [[MUSIC]] marker, silence as [[NOISE]], and a phone
+  /// call as a [[CALL]] prefix ahead of the transcript.
   static GeminiTranscription parseTranscriptionText(
     String? answer, {
     bool allowMusic = true,
@@ -190,10 +192,14 @@ class GeminiClient {
         audioType: 'music',
       );
     }
+    final isCall = result.startsWith('[[CALL]]');
+    final text = isCall ? result.substring('[[CALL]]'.length).trim() : result;
+    if (text.isEmpty) throw Exception('No speech detected.');
     return GeminiTranscription(
       category: 'note',
-      title: const GeminiClient()._fallbackHeading(result),
-      transcript: result,
+      title: const GeminiClient()._fallbackHeading(text),
+      transcript: text,
+      isCall: isCall,
     );
   }
 
@@ -604,6 +610,7 @@ class GeminiTranscription {
     required this.title,
     required this.transcript,
     this.audioType = 'speech',
+    this.isCall = false,
   });
 
   final String category;
@@ -612,6 +619,9 @@ class GeminiTranscription {
 
   /// 'speech', or 'music' when the recording is a song rather than a note.
   final String audioType;
+
+  /// The recording sounds like a phone call.
+  final bool isCall;
 
   bool get isMusic => audioType == 'music';
 }
@@ -649,6 +659,7 @@ class CircuitNote {
     this.boardId,
     this.kind = 'voice',
     this.song,
+    this.isCall = false,
   });
 
   final String id;
@@ -674,6 +685,9 @@ class CircuitNote {
   /// 'voice' for a spoken note, 'song' for a clip sent to song recognition.
   final String kind;
   final SongResult? song;
+
+  /// Transcription judged this recording to be a phone call.
+  final bool isCall;
 
   bool get isSong => kind == 'song';
 
@@ -704,6 +718,7 @@ class CircuitNote {
     song: json['song'] is Map<String, dynamic>
         ? SongResult.fromJson(json['song'] as Map<String, dynamic>)
         : null,
+    isCall: json['isCall'] == true,
   );
 
   CircuitNote copyWith({
@@ -722,6 +737,7 @@ class CircuitNote {
     int? boardId,
     SongResult? song,
     String? kind,
+    bool? isCall,
     bool clearSong = false,
   }) => CircuitNote(
     id: id,
@@ -741,6 +757,7 @@ class CircuitNote {
     boardId: boardId ?? this.boardId,
     kind: kind ?? this.kind,
     song: clearSong ? null : (song ?? this.song),
+    isCall: isCall ?? this.isCall,
   );
 
   Map<String, dynamic> toJson() => {
@@ -764,6 +781,7 @@ class CircuitNote {
     if (boardId != null) 'boardId': boardId.toString(),
     if (isSong) 'kind': kind,
     if (song != null) 'song': song!.toJson(),
+    if (isCall) 'isCall': true,
   };
 }
 
@@ -1198,6 +1216,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
                   transcript: transcription.transcript,
                   title: transcription.title,
                   category: transcription.category,
+                  isCall: transcription.isCall,
                   enrichmentStatus: 'pending',
                 )
               : note,

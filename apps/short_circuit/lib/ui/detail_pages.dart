@@ -333,6 +333,7 @@ class TranscriptPage extends StatefulWidget {
     this.noteById,
     this.onEnrich,
     this.onOpenChat,
+    this.isCall = false,
   });
 
   final DateTime createdAt;
@@ -365,6 +366,9 @@ class TranscriptPage extends StatefulWidget {
 
   /// Opens the chat about this note.
   final VoidCallback? onOpenChat;
+
+  /// The recording was judged to be a phone call.
+  final bool isCall;
 
   @override
   State<TranscriptPage> createState() => _TranscriptPageState();
@@ -546,6 +550,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
     final tags = live?.tags ?? widget.tags;
     final suggestions = live?.actionSuggestions ?? widget.suggestions;
     final enriching = live?.enrichmentStatus == 'enriching';
+    final isCall = live?.isCall ?? widget.isCall;
     final hasTranscript = _transcript.trim().isNotEmpty;
     return Scaffold(
       body: SafeArea(
@@ -624,13 +629,14 @@ class _TranscriptPageState extends State<TranscriptPage> {
                 ),
               ),
             ],
-            if (categories.isNotEmpty || tags.isNotEmpty) ...[
+            if (isCall || categories.isNotEmpty || tags.isNotEmpty) ...[
               const SizedBox(height: 20),
               const ScGroupLabel('Metadata'),
               Wrap(
                 spacing: 6,
                 runSpacing: 6,
                 children: [
+                  if (isCall) const ScChip('phone call'),
                   ...categories.map((item) => ScChip(item)),
                   ...tags.map((item) => ScChip(item, tag: true)),
                 ],

@@ -32,6 +32,7 @@ Uint8List _wav(int seconds, {int rate = 16000, int channels = 1}) {
 }
 
 void main() {
+  group('phone call detection', _callTests);
   group('wavSample', () {
     test('a long recording becomes a 12 second WAV from the middle', () {
       final long = _wav(60);
@@ -239,5 +240,37 @@ void main() {
       expect(find.text('Finishing up…'), findsOneWidget);
       expect(find.text('00:00'), findsOneWidget);
     });
+  });
+}
+
+void _callTests() {
+  test('a [[CALL]] prefix marks a phone call and is not kept in the text', () {
+    final t = GeminiClient.parseTranscriptionText(
+      '[[CALL]] Hello, are you free?',
+    );
+    expect(t.isCall, isTrue);
+    expect(t.transcript, 'Hello, are you free?');
+    expect(t.title, 'Hello, are you free?');
+  });
+
+  test('an ordinary note is not a call', () {
+    expect(GeminiClient.parseTranscriptionText('Buy milk').isCall, isFalse);
+  });
+
+  test('a call marker with no words is treated as no speech', () {
+    expect(
+      () => GeminiClient.parseTranscriptionText('[[CALL]]'),
+      throwsException,
+    );
+  });
+
+  test('isCall survives a JSON round trip', () {
+    final note = CircuitNote(
+      id: 'n',
+      createdAt: DateTime(2026),
+      status: 'ok',
+      isCall: true,
+    );
+    expect(CircuitNote.fromJson(note.toJson()).isCall, isTrue);
   });
 }
