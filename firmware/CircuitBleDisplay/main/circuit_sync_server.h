@@ -15,7 +15,8 @@
 //
 // Endpoints (all authenticated, header `X-Circuit-Token`):
 //   GET  /notes        "<id>,<bytes>,<epoch>\n" per unsynced note
-//   GET  /notes/<id>   the WAV file; supports "Range: bytes=<start>-"
+//   GET  /notes/<id>   the note file as stored (encrypted, see circuit_crypto.h): the
+//                      board never decrypts it for the phone. Supports "Range: bytes=<start>-"
 //   POST /ack/<id>     marks the note synced (the file stays on the card)
 
 #include <arpa/inet.h>
@@ -26,6 +27,7 @@
 #include <sys/socket.h>
 
 #include "esp_https_server.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
@@ -248,7 +250,7 @@ inline esp_err_t note_handler(httpd_req_t *req) {
     }
 
     char path[48];
-    circuit_notes::path_for(id, "WAV", path, sizeof(path));
+    circuit_notes::note_path(note, path, sizeof(path));
     FILE *file = fopen(path, "rb");
     uint8_t *buffer = static_cast<uint8_t *>(malloc(kChunkBytes));
     if (file == nullptr || buffer == nullptr) {
@@ -258,7 +260,7 @@ inline esp_err_t note_handler(httpd_req_t *req) {
     }
     fseek(file, start, SEEK_SET);
 
-    httpd_resp_set_type(req, "audio/wav");
+    httpd_resp_set_type(req, note.encrypted ? "application/octet-stream" : "audio/wav");
     if (start > 0) {
         char content_range[64];
         snprintf(content_range, sizeof(content_range), "bytes %lu-%lu/%lu", static_cast<unsigned long>(start),
@@ -279,6 +281,13 @@ inline esp_err_t note_handler(httpd_req_t *req) {
         }
     }
     if (status == ESP_OK) status = httpd_resp_send_chunk(req, nullptr, 0);
+    if (status != ESP_OK) {
+        ESP_LOGW("CircuitSync", "Download of note %lu stopped after %lu bytes: internal RAM free %u, largest block %u, lowest ever %u",
+            static_cast<unsigned long>(id), static_cast<unsigned long>(state.served_bytes),
+            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+            static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+    }
     fclose(file);
     free(buffer);
     return status;

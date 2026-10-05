@@ -1,0 +1,91 @@
+# Note encryption
+
+New notes recorded on Circuit are encrypted on the board as they are recorded.
+The sync sends the encrypted file as it is, the phone keeps it encrypted, and the
+app opens it only when you play, transcribe or identify it.
+
+## The one rule
+
+**Nothing here ever deletes a note or a key.** A pairing change adds a key; it does
+not remove one. A note stays readable by the board for as long as it exists, and by
+a phone that has its key. A newly paired phone is given only the current key, so it
+cannot read notes sealed with an older one, and they are not erased either.
+
+## How it works
+
+1. **The key.** The first time Circuit is paired it makes a random 256-bit key and
+   keeps it in its flash. A board that was already paired makes it on first start.
+   A board with no key records nothing, because no phone could read the note.
+2. **Handing it to the phone.** The app sends `@sec-hello` and Circuit answers
+   `@sec-key` with the key. Both characteristics require an encrypted, bonded
+   Bluetooth link, so the key never crosses the air in the clear. The phone stores
+   it in Android's Keystore-backed secure storage, under the key's id.
+3. **Recording.** Audio is sealed in 4 KB chunks with AES-256-GCM as it is recorded
+   (`firmware/CircuitBleDisplay/main/circuit_crypto.h`). The SD card only ever holds
+   ciphertext.
+4. **Sync.** Wi-Fi (HTTPS, pinned certificate, token) and the Bluetooth fallback both
+   send the file as stored. The board never decrypts a note for the phone.
+5. **On the phone.** The file is kept as received (`.cnote`). The app opens it in
+   memory (`lib/secure_notes.dart`); an encrypted note is played from memory, so no
+   plain audio file is written. The notes list, tasks and chats are stored sealed
+   with a separate key in secure storage, and Android backup of app data is off.
+
+Older notes are untouched. A plain `.wav` from before this change stays on the card
+and on the phone exactly as it was, and still syncs and plays.
+
+## File format (CNT1)
+
+All integers are little-endian.
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | `CNT1` |
+| 4 | 1 | version (1) |
+| 5 | 1 | reserved (0) |
+| 6 | 2 | header length (28) |
+| 8 | 4 | key id |
+| 12 | 4 | note id |
+| 16 | 4 | sample rate |
+| 20 | 2 | channels |
+| 22 | 2 | bits per sample |
+| 24 | 4 | chunk size (4096 on the board) |
+
+Then chunks of `chunk size` bytes of audio, each followed by a 16-byte tag; the last
+may be shorter. The cipher is AES-256-GCM with the notes key:
+
+- **nonce** = note id (4 bytes) then chunk number (8 bytes). Note numbers only grow
+  and are never reused, so a nonce is never used twice under one key.
+- **AAD** = the 28-byte header then the chunk number (8 bytes), so a header cannot be
+  changed and chunks cannot be reordered or moved between notes.
+
+The audio is mono 16-bit PCM; the app rebuilds a WAV around it. The reference
+implementation is `docs/security/reference/note_format.py`, which also writes
+`test-vectors.json`. The board checks itself against those vectors at every start
+(and refuses to record if that fails), and the app's tests open the same files, so
+the two implementations are held to the same bytes.
+
+## What this protects against
+
+- **A lost, stolen or read SD card.** It holds only ciphertext.
+- **Someone taking files off the phone, or a backup of the app.** The notes and
+  recordings are ciphertext, and the key stays in the Keystore.
+- **Eavesdropping on sync.** The files are encrypted, and travel inside an encrypted
+  link as well.
+- **Tampering.** A changed, swapped or wrong-key chunk is rejected, not played.
+
+## What it does not protect against
+
+- **Someone holding the whole board who can read its flash.** The key is in the
+  board's flash, which is not encrypted. Closing that needs ESP32 flash encryption,
+  which burns eFuses permanently and can brick the board if set up wrongly.
+- **A rooted or compromised phone.**
+- **Plaintext that leaves on purpose.** Audio goes to Gemini when you transcribe, and
+  song clips go to the music service, both over HTTPS.
+- **The end of a note.** There is no end marker, so cutting a note short cannot be
+  detected (a recording cut off by power loss is played up to where it stopped).
+- **Notes recorded before this change.** They stay plain, by design.
+- **Metadata.** Note numbers, times and sizes are visible in file names.
+- **Pairing.** The Bluetooth passkey is still fixed for each start, so someone in
+  range could try to guess it. Hardening that is a separate change.
+- **Losing the key.** If the board's flash is erased, notes sealed with its key can
+  only be opened by a phone that already holds that key.

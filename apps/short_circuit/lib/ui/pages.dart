@@ -1220,6 +1220,7 @@ extension _ScPages on _CircuitHomePageState {
     if (!mounted) return;
     _update(() {
       _savedCircuitId = null;
+      _needsPairingRepair = false;
       _device = null;
       _textCharacteristic = null;
       _relayCharacteristic = null;
@@ -1307,17 +1308,25 @@ extension _ScPages on _CircuitHomePageState {
             ),
             if (_savedCircuitId != null) ...[
               const SizedBox(width: 16),
-              ScIconButton(
-                icon: LucideIcons.rotateCw,
-                tooltip: 'Reconnect saved Circuit',
-                caption: 'Reconnect',
-                onPressed: _connecting
-                    ? null
-                    : () => _connect(
-                        BluetoothDevice.fromId(_savedCircuitId!),
-                        savedReconnect: true,
-                      ),
-              ),
+              _needsPairingRepair
+                  ? ScIconButton(
+                      icon: LucideIcons.link,
+                      tooltip: 'Repair Circuit pairing',
+                      caption: 'Repair pairing',
+                      tone: ScTone.primary,
+                      onPressed: _connecting ? null : _repairPairing,
+                    )
+                  : ScIconButton(
+                      icon: LucideIcons.rotateCw,
+                      tooltip: 'Reconnect saved Circuit',
+                      caption: 'Reconnect',
+                      onPressed: _connecting
+                          ? null
+                          : () => _connect(
+                              BluetoothDevice.fromId(_savedCircuitId!),
+                              savedReconnect: true,
+                            ),
+                    ),
             ],
           ],
         ),
@@ -1332,7 +1341,9 @@ extension _ScPages on _CircuitHomePageState {
               icon: LucideIcons.link,
               tooltip: 'Connect to $_circuitName',
               tone: ScTone.primary,
-              onPressed: _connecting ? null : () => _connect(result.device),
+              onPressed: _connecting
+                  ? null
+                  : () => _connect(result.device, userRequestedPairing: true),
             ),
           ),
           const SizedBox(height: 10),
@@ -1342,9 +1353,15 @@ extension _ScPages on _CircuitHomePageState {
       const ScGroupLabel('Device status'),
       ScRow(
         title: 'Connection',
-        caption: _relayActive ? 'Phone relay' : 'Bluetooth',
-        value: available ? 'Online' : 'Offline',
-        valueColor: available ? Sc.green : Sc.faint,
+        caption: _needsPairingRepair
+            ? 'Pairing is needed before it can reconnect'
+            : (_relayActive ? 'Phone relay' : 'Bluetooth'),
+        value: available
+            ? 'Online'
+            : (_needsPairingRepair ? 'Repair needed' : 'Offline'),
+        valueColor: available
+            ? Sc.green
+            : (_needsPairingRepair ? Sc.orange : Sc.faint),
       ),
       ScRow(
         title: 'Notes waiting',
@@ -1408,6 +1425,14 @@ extension _ScPages on _CircuitHomePageState {
           value: _savedCircuitId!.length > 10
               ? '${_savedCircuitId!.substring(0, 8)}…'
               : _savedCircuitId!,
+        ),
+        ScRow(
+          title: 'Note encryption',
+          caption: _noteKeyId == null
+              ? 'Waiting for the key from Circuit'
+              : 'New notes are encrypted on Circuit and stay encrypted here',
+          value: _noteKeyId == null ? 'Waiting' : 'On',
+          valueColor: _noteKeyId == null ? Sc.orange : Sc.green,
         ),
       ],
       const SizedBox(height: 22),

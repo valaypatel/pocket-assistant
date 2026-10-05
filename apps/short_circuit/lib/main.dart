@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:cryptography/cryptography.dart';
+import 'package:cryptography_flutter/cryptography_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -14,6 +17,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 part 'music.dart';
+part 'secure_notes.dart';
 part 'ui/chat_page.dart';
 part 'ui/detail_pages.dart';
 part 'ui/pages.dart';
@@ -28,7 +32,6 @@ final _relayCharacteristicId = Guid('0000fff2-0000-1000-8000-00805f9b34fb');
 const _relayChannel = MethodChannel('circuit/relay');
 const _audioStatusEvents = EventChannel('circuit/audio_status');
 const _savedCircuitIdKey = 'saved_circuit_id';
-const _secureBondMigrationKey = 'secure_bond_migration_complete';
 const _notesKey = 'circuit_notes';
 const _geminiApiKey = 'gemini_api_key';
 const _geminiModelKey = 'gemini_model';
@@ -39,6 +42,13 @@ const _aiModelKey = 'hermes_model';
 const _defaultAiModel = 'hermes-agent';
 const _defaultAiBaseUrl = 'https://hermes.yourdomain.com/v1';
 const _secureStorage = FlutterSecureStorage();
+
+/// Pairing opens Android's pairing dialog, so it must only follow a deliberate tap on
+/// Connect or Repair pairing, never an automatic reconnect.
+bool shouldStartCircuitPairing({
+  required bool isBonded,
+  required bool userRequestedPairing,
+}) => !isBonded && userRequestedPairing;
 
 class GeminiClient {
   const GeminiClient();
@@ -750,6 +760,7 @@ class CircuitNote {
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  FlutterCryptography.enable(); // native AES-GCM, much faster than Dart on long notes
   FlutterBluePlus.setOperationQueueMode(OperationQueueMode.perDevice);
   runApp(const ShortCircuitApp());
 }
@@ -844,6 +855,10 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   bool _aiConnected = false;
   bool _musicConnected = false;
 
+  /// Id of the newest notes key this phone holds, or null if Circuit has not sent one.
+  int? _noteKeyId;
+  DateTime? _lastKeyRequestAt;
+
   /// True from tapping Identify song until Circuit reports that clip saved, so
   /// the new recording is kept as a song rather than a voice note.
   /// It lapses on its own, so a refused or lost request cannot turn the next
@@ -892,6 +907,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   bool _audioBusy = false;
   bool _recordingAudio = false;
   bool _relayActive = false;
+  // Android no longer holds Circuit's pairing; the user chooses when to pair again.
+  bool _needsPairingRepair = false;
   List<String> _wifiNetworks = [];
   List<CircuitNote> _notes = [];
   String? _savedCircuitId;
@@ -965,12 +982,16 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     try {
       final status = await _relayChannel.invokeMethod<String>('status');
       if (!mounted || status == null) return;
-      final active = status != 'Stopped';
-      if (active || _relayActive) {
+      final needsRepair = status.startsWith('Circuit needs repair');
+      final active = status != 'Stopped' && !needsRepair;
+      if (active || _relayActive || needsRepair) {
         setState(() {
           _relayActive = active;
+          _needsPairingRepair = needsRepair;
           if (_syncingNoteId == null) {
-            _status = active ? status : 'Phone relay stopped.';
+            _status = active
+                ? status
+                : (needsRepair ? status : 'Phone relay stopped.');
           }
         });
       }
@@ -981,7 +1002,16 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   Future<void> _loadNotes() async {
     final preferences = await SharedPreferences.getInstance();
-    final storedNotes = preferences.getString(_notesKey);
+    final String? storedNotes;
+    try {
+      storedNotes = await _readSecret(preferences, _notesKey);
+    } catch (error) {
+      // Never delete what could not be read: the data is still there.
+      _setStatus(
+        'Saved notes could not be opened ($error). They have not been deleted.',
+      );
+      return;
+    }
     if (storedNotes == null || !mounted) return;
     try {
       final decoded = jsonDecode(storedNotes) as List<dynamic>;
@@ -1037,13 +1067,16 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       });
       unawaited(_sendHomeStatus());
       if (changed) {
-        await preferences.setString(
+        await _writeSecret(
+          preferences,
           _notesKey,
           jsonEncode(notes.map((item) => item.toJson()).toList()),
         );
       }
-    } catch (_) {
-      await preferences.remove(_notesKey);
+    } catch (error) {
+      // Leave the stored notes untouched so nothing is lost; they can be recovered.
+      debugPrint('Short-Circuit: saved notes could not be read: $error');
+      _setStatus('Saved notes could not be read. They have not been deleted.');
     }
   }
 
@@ -1063,7 +1096,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     );
     final notes = [note, ..._notes];
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await _writeSecret(
+      preferences,
       _notesKey,
       jsonEncode(notes.map((item) => item.toJson()).toList()),
     );
@@ -1085,7 +1119,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         )
         .toList();
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await _writeSecret(
+      preferences,
       _notesKey,
       jsonEncode(notes.map((item) => item.toJson()).toList()),
     );
@@ -1113,7 +1148,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         )
         .toList();
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await _writeSecret(
+      preferences,
       _notesKey,
       jsonEncode(notes.map((item) => item.toJson()).toList()),
     );
@@ -1138,7 +1174,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     await _setNoteStatus(id, 'Transcribing with Gemini…');
     try {
       final transcription = await _gemini.transcribeWav(
-        await File(path).readAsBytes(),
+        await readNoteAudio(path),
         detectMusic: !asSpeech,
       );
       if (transcription.isMusic) {
@@ -1267,7 +1303,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         .map((note) => note.id == id ? update(note) : note)
         .toList();
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await _writeSecret(
+      preferences,
       _notesKey,
       jsonEncode(notes.map((item) => item.toJson()).toList()),
     );
@@ -1295,11 +1332,13 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     if (deviceId == null || !mounted) return;
     final savedDevice = BluetoothDevice.fromId(deviceId);
     if (await savedDevice.bondState.first != BluetoothBondState.bonded) {
-      await preferences.remove(_savedCircuitIdKey);
+      // Keep the saved Circuit: only the user's "Repair pairing" starts pairing.
       if (mounted) {
         setState(() {
-          _savedCircuitId = null;
-          _status = 'Circuit was unpaired. Scan to pair it again.';
+          _savedCircuitId = deviceId;
+          _needsPairingRepair = true;
+          _status =
+              'Circuit needs repair. Tap Repair pairing to pair it again.';
         });
       }
       return;
@@ -1370,6 +1409,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   Future<void> _connect(
     BluetoothDevice device, {
     bool savedReconnect = false,
+    bool userRequestedPairing = false,
   }) async {
     setState(() {
       _connecting = true;
@@ -1377,24 +1417,43 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     });
     try {
       await FlutterBluePlus.stopScan();
+      final isBonded =
+          await device.bondState.first == BluetoothBondState.bonded;
+      if (!isBonded && !userRequestedPairing) {
+        debugPrint('Short-Circuit: not bonded; waiting for Repair pairing');
+        if (mounted) {
+          setState(() {
+            _needsPairingRepair = true;
+            _status =
+                'Circuit needs repair. Tap Repair pairing to pair it again.';
+          });
+        }
+        return;
+      }
+      if (shouldStartCircuitPairing(
+        isBonded: isBonded,
+        userRequestedPairing: userRequestedPairing,
+      )) {
+        _setStatus(
+          'Enter Circuit’s six-digit code in the Android pairing prompt…',
+        );
+        final paired = device.bondState
+            .where((state) => state == BluetoothBondState.bonded)
+            .first
+            .timeout(const Duration(seconds: 90));
+        try {
+          await device.createBond();
+          await paired;
+        } catch (_) {
+          paired.ignore(); // already timed out or failed: nothing is listening
+          rethrow;
+        }
+      }
       await device.connect(
         license: License.nonprofit,
         timeout: const Duration(seconds: 15),
       );
       final preferences = await SharedPreferences.getInstance();
-      var bondState = await device.bondState.first;
-      if (bondState == BluetoothBondState.bonded &&
-          preferences.getBool(_secureBondMigrationKey) != true) {
-        await device.removeBond();
-        bondState = BluetoothBondState.none;
-      }
-      if (bondState != BluetoothBondState.bonded) {
-        _setStatus(
-          'Enter Circuit’s six-digit code in the Android pairing prompt…',
-        );
-        await device.createBond();
-        await preferences.setBool(_secureBondMigrationKey, true);
-      }
       _connectionSubscription?.cancel();
       _connectionSubscription = device.connectionState.listen((state) {
         if (state == BluetoothConnectionState.disconnected && mounted) {
@@ -1432,6 +1491,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         _device = device;
         _textCharacteristic = characteristic;
         _relayCharacteristic = relay;
+        _needsPairingRepair = false;
         _status = 'Connected. Send text to the e-ink screen.';
       });
       await preferences.setString(_savedCircuitIdKey, device.remoteId.str);
@@ -1446,6 +1506,25 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     } finally {
       if (mounted) setState(() => _connecting = false);
     }
+  }
+
+  /// The user's choice to pair again. Only Android's own pairing record is replaced:
+  /// notes, keys and settings on the phone and the board are not touched.
+  Future<void> _repairPairing() async {
+    final deviceId = _savedCircuitId;
+    if (deviceId == null) {
+      _setStatus('Scan for Circuit first.');
+      return;
+    }
+    final device = BluetoothDevice.fromId(deviceId);
+    try {
+      if (await device.bondState.first == BluetoothBondState.bonded) {
+        await device.removeBond();
+      }
+    } catch (error) {
+      debugPrint('Short-Circuit: could not clear the old pairing: $error');
+    }
+    await _connect(device, savedReconnect: true, userRequestedPairing: true);
   }
 
   Future<void> _provisionWifi() async {
@@ -1516,8 +1595,55 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     }
   }
 
+  /// The board's notes key arrives as "@sec-key\n1\n<key id, hex>\n<key, base64>", over
+  /// the encrypted, bonded link only. Returns true if the message was a security one.
+  bool _handleSecurityMessage(String message) {
+    if (message.startsWith('@sec-none')) {
+      _setStatus('Circuit has no notes key yet. Pair it first.');
+      return true;
+    }
+    if (!message.startsWith('@sec-key\n')) return false;
+    final parts = message.split('\n');
+    final id = parts.length > 2 ? int.tryParse(parts[2], radix: 16) : null;
+    Uint8List? key;
+    try {
+      key = parts.length > 3 ? base64Decode(parts[3].trim()) : null;
+    } catch (_) {}
+    if (parts.length > 3 &&
+        parts[1] == '1' &&
+        id != null &&
+        id != 0 &&
+        key != null &&
+        key.length == 32) {
+      unawaited(
+        NoteKeys.save(id, key).then((_) {
+          if (mounted) setState(() => _noteKeyId = id);
+          _setStatus('Notes are encrypted. This phone has the key.');
+        }),
+      );
+    }
+    return true;
+  }
+
+  /// Asks Circuit for its notes key. Cheap, and safe to repeat: only an encrypted,
+  /// bonded link can make Circuit answer.
+  Future<void> _requestNoteKey() async {
+    final last = _lastKeyRequestAt;
+    final now = DateTime.now();
+    if (last != null &&
+        now.difference(last) < const Duration(minutes: 10) &&
+        _noteKeyId != null) {
+      return;
+    }
+    _lastKeyRequestAt = now;
+    try {
+      await _writeCircuit('@sec-hello\n1');
+    } catch (_) {}
+  }
+
   void _onRelayMessage(List<int> value) {
     final message = utf8.decode(value, allowMalformed: true);
+    if (_handleSecurityMessage(message)) return;
     if (message.startsWith('@wifi-status\n')) {
       _applyWifiStatus(message);
       return;
@@ -1540,6 +1666,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   }
 
   void _handleAudioStatus(String status) {
+    if (_handleSecurityMessage(status)) return;
     if (status.startsWith('@wifi-status\n')) {
       _applyWifiStatus(status);
       return;
@@ -1832,7 +1959,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     if (lost.isEmpty) return;
     final notes = _notes.where((note) => !lost.contains(note.id)).toList();
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await _writeSecret(
+      preferences,
       _notesKey,
       jsonEncode(notes.map((item) => item.toJson()).toList()),
     );
@@ -1881,7 +2009,10 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     String? noteId;
     // circuit-note-<epoch>-<number>.wav: the number names the exact recording.
     final boardId = int.tryParse(
-      RegExp(r'circuit-note-\d+-(\d+)\.wav$').firstMatch(path)?.group(1) ?? '',
+      RegExp(r'circuit-note-\d+-(\d+)\.(?:wav|cnote)$')
+              .firstMatch(path)
+              ?.group(1) ??
+          '',
     );
     if (boardId != null && _pendingBoardDeletes.contains(boardId)) {
       // Deleted in the app; Circuit's copy has not been removed yet. Do not let
@@ -1974,7 +2105,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       final fileId = path == null
           ? null
           : int.tryParse(
-              RegExp(r'circuit-note-\d+-(\d+)\.wav$')
+              RegExp(r'circuit-note-\d+-(\d+)\.(?:wav|cnote)$')
                       .firstMatch(path)
                       ?.group(1) ??
                   '',
@@ -1987,7 +2118,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     }).toList();
     if (!changed) return;
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await _writeSecret(
+      preferences,
       _notesKey,
       jsonEncode(repaired.map((item) => item.toJson()).toList()),
     );
@@ -2063,10 +2195,24 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       _setStatus('This note has not finished syncing yet.');
       return;
     }
-    final started = await _relayChannel.invokeMethod<bool>(
-      'playSyncedRecording',
-      {'path': path},
-    );
+    bool? started;
+    try {
+      final bytes = await File(path).readAsBytes();
+      if (NoteCrypto.isEncrypted(bytes)) {
+        // Opened in memory and played from there, so no plain audio file is written.
+        started = await _relayChannel.invokeMethod<bool>('playWavBytes', {
+          'bytes': await readNoteAudio(path),
+        });
+      } else {
+        started = await _relayChannel.invokeMethod<bool>(
+          'playSyncedRecording',
+          {'path': path},
+        );
+      }
+    } on NoteSecurityException catch (error) {
+      _setStatus('$error');
+      return;
+    }
     _setStatus(
       started == true
           ? 'Playing this voice note on your phone.'
@@ -2082,7 +2228,10 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     final path = note.audioPath;
     if (path == null) return null;
     return int.tryParse(
-      RegExp(r'circuit-note-\d+-(\d+)\.wav$').firstMatch(path)?.group(1) ?? '',
+      RegExp(r'circuit-note-\d+-(\d+)\.(?:wav|cnote)$')
+              .firstMatch(path)
+              ?.group(1) ??
+          '',
     );
   }
 
@@ -2113,7 +2262,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   Future<List<ChatMessage>> _loadNoteChat(String noteId) async {
     final preferences = await SharedPreferences.getInstance();
-    final raw = preferences.getString('note_chat_$noteId');
+    final raw = await _readSecret(preferences, 'note_chat_$noteId');
     if (raw == null) return [];
     try {
       return (jsonDecode(raw) as List<dynamic>)
@@ -2130,7 +2279,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     if (messages.isEmpty) {
       await preferences.remove('note_chat_$noteId');
     } else {
-      await preferences.setString(
+      await _writeSecret(
+        preferences,
         'note_chat_$noteId',
         jsonEncode(messages.map((m) => m.toJson()).toList()),
       );
@@ -2162,7 +2312,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     final notes = _notes.where((item) => item.id != id).toList();
     final preferences = await SharedPreferences.getInstance();
     await preferences.remove('note_chat_$id');
-    await preferences.setString(
+    await _writeSecret(
+      preferences,
       _notesKey,
       jsonEncode(notes.map((item) => item.toJson()).toList()),
     );
@@ -2198,6 +2349,11 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     // Each message makes Circuit redraw, so only send when the counts changed or
     // the periodic refresh is due.
     final counts = '$pending · $synced';
+    // The background service sends the home screen too and needs the pending count,
+    // which it can no longer read from the encrypted notes list.
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setInt('circuit_pending_count', pending);
+    unawaited(_requestNoteKey());
     final last = _lastHomeSentAt;
     if (counts == _lastHomeCounts &&
         last != null &&
@@ -2418,7 +2574,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       );
       try {
         final result = await _music.identify(
-          wavSample(await File(path).readAsBytes(), seconds: _songClipSeconds),
+          wavSample(await readNoteAudio(path), seconds: _songClipSeconds),
         );
         await _updateNote(
           id,
@@ -2552,7 +2708,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
           .whereType<int>(),
     );
     List<CircuitTask> tasks = [];
-    final stored = preferences.getString(_tasksKey);
+    final stored = await _readSecret(preferences, _tasksKey);
     if (stored != null) {
       try {
         tasks = (jsonDecode(stored) as List<dynamic>)
@@ -2589,7 +2745,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   Future<void> _saveTasks() async {
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await _writeSecret(
+      preferences,
       _tasksKey,
       jsonEncode(_tasks.map((task) => task.toJson()).toList()),
     );

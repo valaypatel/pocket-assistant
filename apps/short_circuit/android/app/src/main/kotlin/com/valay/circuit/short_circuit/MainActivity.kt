@@ -64,6 +64,10 @@ class MainActivity : FlutterActivity() {
                     "audioStatus" -> result.success(CircuitRelayService.audioStatus)
                     "wifiStatus" -> result.success(CircuitRelayService.wifiStatus)
                     "playLatestSyncedRecording" -> result.success(CircuitRelayService.playLatestSyncedRecording())
+                    "playWavBytes" -> {
+                        val bytes = call.argument<ByteArray>("bytes")
+                        result.success(bytes != null && CircuitRelayService.playWavBytes(bytes))
+                    }
                     "playSyncedRecording" -> {
                         val path = call.argument<String>("path")
                         result.success(path != null && CircuitRelayService.playSyncedRecording(path))
