@@ -1988,14 +1988,33 @@ extern "C" void app_main(void) {
     xTaskCreate(local_clock_task, "local_clock", 3072, nullptr, 2, nullptr);
     start_wifi();
     start_ble();
-    // Start-up is done: leave the splash for the pairing code, or for home. If
-    // something has already taken over (a recording started with the button),
-    // leave that alone.
-    ESP_LOGI(kTag, "Start-up done, leaving the splash; internal RAM free %u, largest block %u",
+    // Start-up code is done, but the screen is not: keep the boot splash up until home has real
+    // things to show, so it is seen and the home screen does not appear half-empty. Ready means
+    // the clock is set (kept from before, or from the phone or the network), Wi-Fi has settled
+    // (connected, failed or not set up) and the phone has connected. It stays at least
+    // kSplashMinMs after power-up, waits for the phone only until kSplashPhoneMs, and never
+    // longer than kSplashMaxMs. If something has already taken over (a recording started with
+    // the button), leave that alone.
+    constexpr uint32_t kSplashMinMs = 6000;
+    constexpr uint32_t kSplashPhoneMs = 10000;
+    constexpr uint32_t kSplashMaxMs = 14000;
+    const bool paired = esp_ble_get_bond_device_num() > 0;
+    while (boot_splash) {
+        const uint32_t up_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        const bool wifi_settled = wifi_ui != WifiUi::Connecting;
+        const bool ready = !paired || (clock_set && wifi_settled && (ble_encrypted || up_ms >= kSplashPhoneMs));
+        if ((up_ms >= kSplashMinMs && ready) || up_ms >= kSplashMaxMs) {
+            ESP_LOGI(kTag, "Leaving the splash after %u ms (clock %d, wifi settled %d, phone %d)",
+                static_cast<unsigned>(up_ms), clock_set ? 1 : 0, wifi_settled ? 1 : 0, ble_encrypted ? 1 : 0);
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    ESP_LOGI(kTag, "Start-up done; internal RAM free %u, largest block %u",
         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     if (esp_ble_get_bond_device_num() == 0) {
-        show_pairing_code();
+        if (boot_splash) show_pairing_code();
     } else {
         // Paired before this firmware had notes encryption: make the key now. Older
         // notes stay exactly as they are; only new recordings are encrypted.
