@@ -1994,24 +1994,22 @@ extern "C" void app_main(void) {
     xTaskCreate(local_clock_task, "local_clock", 3072, nullptr, 2, nullptr);
     start_wifi();
     start_ble();
-    // Start-up code is done, but the screen is not: keep the boot splash up until home has real
-    // things to show, so it is seen and the home screen does not appear half-empty. Ready means
-    // the clock is set (kept from before, or from the phone or the network), Wi-Fi has settled
-    // (connected, failed or not set up) and the phone has connected. It stays at least
-    // kSplashMinMs after power-up, waits for the phone only until kSplashPhoneMs, and never
-    // longer than kSplashMaxMs. If something has already taken over (a recording started with
-    // the button), leave that alone.
-    constexpr uint32_t kSplashMinMs = 6000;
-    constexpr uint32_t kSplashPhoneMs = 10000;
-    constexpr uint32_t kSplashMaxMs = 14000;
+    // Start-up code is done, but give the splash time to be seen: about five seconds on the panel
+    // (the board takes roughly two seconds after power-up to draw it, so leave at kSplashMinMs).
+    // Home then opens with the clock kept from before, so it is not empty; Wi-Fi and the phone
+    // connect in their own time and their icons update. If the clock somehow is not set, wait up
+    // to kSplashMaxMs. If something has already taken over (a recording started with the button),
+    // leave that alone.
+    constexpr uint32_t kSplashMinMs = 7000;
+    constexpr uint32_t kSplashMaxMs = 9000;
     const bool paired = esp_ble_get_bond_device_num() > 0;
     while (boot_splash) {
         const uint32_t up_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        const bool wifi_settled = wifi_ui != WifiUi::Connecting;
-        const bool ready = !paired || (clock_set && wifi_settled && (ble_encrypted || up_ms >= kSplashPhoneMs));
+        const bool ready = !paired || clock_set;
         if ((up_ms >= kSplashMinMs && ready) || up_ms >= kSplashMaxMs) {
-            ESP_LOGI(kTag, "Leaving the splash after %u ms (clock %d, wifi settled %d, phone %d)",
-                static_cast<unsigned>(up_ms), clock_set ? 1 : 0, wifi_settled ? 1 : 0, ble_encrypted ? 1 : 0);
+            ESP_LOGI(kTag, "Leaving the splash after %u ms (clock %d, wifi %d, phone %d)",
+                static_cast<unsigned>(up_ms), clock_set ? 1 : 0, wifi_ui != WifiUi::Connecting ? 1 : 0,
+                ble_encrypted ? 1 : 0);
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
