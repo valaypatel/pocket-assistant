@@ -178,7 +178,18 @@ class SecureText {
   static const prefix = 'enc1:';
   static final _gcm = AesGcm.with256bits();
 
+  static Future<SecretKey>? _creating;
+
   static Future<SecretKey> _key() async {
+    final stored = await _secureStorage.read(key: _appDataKeyName);
+    if (stored != null) return SecretKey(base64Decode(stored));
+    // Several parts of the app can ask for the key at the same moment on the very first run.
+    // Without this, each would make its own key and the last one written would win, leaving
+    // data sealed with the others unreadable. One creation runs; the rest wait for it.
+    return _creating ??= _create().whenComplete(() => _creating = null);
+  }
+
+  static Future<SecretKey> _create() async {
     final stored = await _secureStorage.read(key: _appDataKeyName);
     if (stored != null) return SecretKey(base64Decode(stored));
     final fresh = await _gcm.newSecretKey();
