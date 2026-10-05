@@ -6,6 +6,15 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// Firebase (events and crash reports). The config file is not in the repository: without
+// it the build is identical to before and the app's Firebase code does nothing. CI writes
+// it from a secret; locally, drop the file from the Firebase console at
+// android/app/google-services.json (git-ignored).
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+    apply(plugin = "com.google.firebase.crashlytics")
+}
+
 // Release signing. android/key.properties (git-ignored) names a keystore; CI writes
 // it from repository secrets. Without it the release build falls back to the debug
 // key, so local `flutter run --release` keeps working.
