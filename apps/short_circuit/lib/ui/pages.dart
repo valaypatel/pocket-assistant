@@ -384,6 +384,7 @@ extension _ScPages on _CircuitHomePageState {
           noteById: (id) => _notes.where((n) => n.id == id).firstOrNull,
           onEnrich: _retryEnrichment,
           onEditNote: _editNote,
+          isCall: note.isCall,
           onOpenChat: () => Navigator.of(context).push(
             MaterialPageRoute<void>(
               builder: (_) => NoteChatPage(
