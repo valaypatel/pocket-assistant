@@ -649,6 +649,7 @@ class CircuitNote {
     this.boardId,
     this.kind = 'voice',
     this.song,
+    this.titleEdited = false,
   });
 
   final String id;
@@ -674,6 +675,9 @@ class CircuitNote {
   /// 'voice' for a spoken note, 'song' for a clip sent to song recognition.
   final String kind;
   final SongResult? song;
+
+  /// True once the user has chosen the title; AI review then leaves it alone.
+  final bool titleEdited;
 
   bool get isSong => kind == 'song';
 
@@ -704,6 +708,7 @@ class CircuitNote {
     song: json['song'] is Map<String, dynamic>
         ? SongResult.fromJson(json['song'] as Map<String, dynamic>)
         : null,
+    titleEdited: json['titleEdited'] == true,
   );
 
   CircuitNote copyWith({
@@ -722,6 +727,7 @@ class CircuitNote {
     int? boardId,
     SongResult? song,
     String? kind,
+    bool? titleEdited,
     bool clearSong = false,
   }) => CircuitNote(
     id: id,
@@ -741,6 +747,7 @@ class CircuitNote {
     boardId: boardId ?? this.boardId,
     kind: kind ?? this.kind,
     song: clearSong ? null : (song ?? this.song),
+    titleEdited: titleEdited ?? this.titleEdited,
   );
 
   Map<String, dynamic> toJson() => {
@@ -764,6 +771,7 @@ class CircuitNote {
     if (boardId != null) 'boardId': boardId.toString(),
     if (isSong) 'kind': kind,
     if (song != null) 'song': song!.toJson(),
+    if (titleEdited) 'titleEdited': true,
   };
 }
 
@@ -1196,7 +1204,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
                       ? 'Transcribed. Analysing…'
                       : 'Transcribed. Add an AI service for smart review.',
                   transcript: transcription.transcript,
-                  title: transcription.title,
+                  title: note.titleEdited ? note.title : transcription.title,
                   category: transcription.category,
                   enrichmentStatus: 'pending',
                 )
@@ -1347,7 +1355,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
           status: merged.any((a) => a.state == 'pending')
               ? 'Ready for review'
               : 'Transcription ready',
-          title: enrichment.title,
+          title: item.titleEdited ? item.title : enrichment.title,
           category: enrichment.category,
           categories: enrichment.categories,
           tags: enrichment.tags,
@@ -2392,6 +2400,22 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     final note = _notes.where((n) => n.id == noteId).firstOrNull;
     if (note == null) throw Exception('This note no longer exists.');
     return _ai.chatAboutNote(note, history);
+  }
+
+  /// Saves a hand-edited title and transcript. The title is then protected from
+  /// AI review; a changed transcript is flagged so the review can be re-run.
+  Future<void> _editNote(String id, String title, String transcript) async {
+    await _updateNote(id, (note) {
+      final changed = transcript != (note.transcript ?? '');
+      return note.copyWith(
+        title: title,
+        titleEdited: true,
+        transcript: transcript,
+        enrichmentStatus: changed && transcript.isNotEmpty
+            ? 'pending'
+            : note.enrichmentStatus,
+      );
+    });
   }
 
   Future<void> _deleteNote(String id) async {
