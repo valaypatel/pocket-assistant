@@ -1806,35 +1806,74 @@ extension _ScPages on _CircuitHomePageState {
 
   // ---- recording -----------------------------------------------------------
 
-  Widget _recordPage() {
+  RecordingSnapshot _recordingSnapshot() {
     final started = _recordingStartedAt;
-    return RecordingView(
+    return RecordingSnapshot(
+      active: _recordingAudio,
       elapsed: started == null
           ? Duration.zero
           : DateTime.now().difference(started),
       song: _songClipArmed,
       busy: _audioBusy,
-      onStop: _stopRecording,
     );
   }
+
+  /// The compact pill shown at the top of every screen while Circuit records.
+  Widget _recordingIsland() {
+    final snapshot = _recordingSnapshot();
+    return RecordingIsland(
+      elapsed: snapshot.elapsed,
+      song: snapshot.song,
+      busy: snapshot.busy,
+      onStop: _stopRecording,
+      onExpand: _openRecordingSheet,
+    );
+  }
+
+  Future<void> _openRecordingSheet() => showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    backgroundColor: Sc.bg,
+    builder: (_) =>
+        RecordingSheet(read: _recordingSnapshot, onStop: _stopRecording),
+  );
 
   // ---- shell ---------------------------------------------------------------
 
   Widget _buildShell() {
-    final body = _recordingAudio
-        ? _recordPage()
-        : ListView(
-            padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
-            children: switch (_page) {
-              _AppPage.home => _homePage(),
-              _AppPage.notes => _notesPage(),
-              _AppPage.tasks => _tasksPage(),
-              _AppPage.settings => _settingsPage(),
-              _AppPage.circuit => _circuitPage(),
-              _AppPage.wifi => _wifiPage(),
-              _AppPage.hiddenWifi => _hiddenWifiPage(),
-            },
-          );
+    final content = ListView(
+      padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
+      children: switch (_page) {
+        _AppPage.home => _homePage(),
+        _AppPage.notes => _notesPage(),
+        _AppPage.tasks => _tasksPage(),
+        _AppPage.settings => _settingsPage(),
+        _AppPage.circuit => _circuitPage(),
+        _AppPage.wifi => _wifiPage(),
+        _AppPage.hiddenWifi => _hiddenWifiPage(),
+      },
+    );
+    // While Circuit records, a compact pill sits above the page instead of taking it over,
+    // so notes, tasks and settings stay usable.
+    final body = Column(
+      children: [
+        AnimatedSize(
+          duration: MediaQuery.of(context).disableAnimations
+              ? Duration.zero
+              : const Duration(milliseconds: 200),
+          alignment: Alignment.topCenter,
+          child: _recordingAudio
+              ? Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                  child: _recordingIsland(),
+                )
+              : const SizedBox(width: double.infinity),
+        ),
+        Expanded(child: content),
+      ],
+    );
     final tab = switch (_page) {
       _AppPage.home => 0,
       _AppPage.notes => 1,
@@ -1843,15 +1882,13 @@ extension _ScPages on _CircuitHomePageState {
       _ => -1,
     };
     return PopScope(
-      canPop: _page == _AppPage.home && !_recordingAudio,
+      canPop: _page == _AppPage.home,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) _goBack();
       },
       child: Scaffold(
         body: SafeArea(bottom: false, child: body),
-        bottomNavigationBar: _recordingAudio
-            ? null
-            : ScNavBar(index: tab, onSelect: _selectTab),
+        bottomNavigationBar: ScNavBar(index: tab, onSelect: _selectTab),
       ),
     );
   }
