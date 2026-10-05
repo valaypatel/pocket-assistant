@@ -717,5 +717,5 @@ class CircuitRelayService : Service() {
     private fun setRelayStatus(text: String) { relayStatus = text; updateNotification(text) }
     private fun updateNotification(text: String) { getSystemService(NotificationManager::class.java).notify(notificationId, notification(text)) }
     private fun notification(text: String): Notification = NotificationCompat.Builder(this, channelId)
-        .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth).setContentTitle("Short-Circuit relay").setContentText(text).setOngoing(true).build()
+        .setSmallIcon(R.drawable.ic_stat_circuit).setContentTitle("Short-Circuit relay").setContentText(text).setOngoing(true).build()
 }

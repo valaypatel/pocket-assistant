@@ -566,6 +566,10 @@ extension _ScPages on _CircuitHomePageState {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 2, right: 12),
+            child: ScBrandMark(size: 38),
+          ),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1207,6 +1211,29 @@ extension _ScPages on _CircuitHomePageState {
       value: _displayName.isEmpty ? 'Not set' : _displayName,
       onTap: _promptName,
     ),
+    const SizedBox(height: 32),
+    const Row(
+      children: [
+        ScBrandMark(size: 40),
+        SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Short-Circuit',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+              ),
+              Text(
+                'Voice notes from Circuit, on your phone.',
+                style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.4),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+    const SizedBox(height: 12),
   ];
 
   // ---- Circuit device page -------------------------------------------------
