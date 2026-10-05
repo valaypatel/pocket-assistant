@@ -1367,7 +1367,7 @@ extension _ScPages on _CircuitHomePageState {
         title: 'Connection',
         caption: _needsPairingRepair
             ? 'Pairing is needed before it can reconnect'
-            : (_relayActive ? 'Phone relay' : 'Bluetooth'),
+            : (_relayActive ? 'Through your phone' : 'Bluetooth'),
         value: available
             ? 'Online'
             : (_needsPairingRepair ? 'Repair needed' : 'Offline'),
@@ -1423,8 +1423,8 @@ extension _ScPages on _CircuitHomePageState {
         onTap: available ? () => _goTo(_AppPage.wifi) : null,
       ),
       ScRow(
-        title: 'Phone relay',
-        caption: 'Background connection',
+        title: 'Stay connected',
+        caption: 'Keeps Circuit linked in the background',
         value: _relayActive ? 'On' : 'Off',
         valueColor: _relayActive ? Sc.green : Sc.faint,
       ),
@@ -1500,8 +1500,8 @@ extension _ScPages on _CircuitHomePageState {
           if (_relayActive)
             ScIconButton(
               icon: LucideIcons.radio,
-              tooltip: 'Stop phone relay',
-              caption: 'Stop relay',
+              tooltip: 'Turn off stay connected',
+              caption: 'Turn off',
               onPressed: _stopPhoneRelay,
             ),
           if (_textCharacteristic != null)

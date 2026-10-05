@@ -999,7 +999,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
           if (_syncingNoteId == null) {
             _status = active
                 ? status
-                : (needsRepair ? status : 'Phone relay stopped.');
+                : (needsRepair ? status : 'Stay connected is off.');
           }
         });
       }
@@ -2530,13 +2530,13 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         _relayCharacteristic = null;
         _circuits.clear();
         _relayActive = true;
-        _status = 'Starting phone relay…';
+        _status = 'Turning on stay connected…';
       });
       await Future<void>.delayed(const Duration(seconds: 1));
       await _refreshRelayStatus();
       unawaited(_sendHomeStatus());
     } catch (error) {
-      _setStatus('Could not start phone relay: $error');
+      _setStatus('Could not keep Circuit connected: $error');
     }
   }
 
@@ -2545,7 +2545,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     if (mounted) {
       setState(() {
         _relayActive = false;
-        _status = 'Phone relay stopped.';
+        _status = 'Stay connected is off.';
       });
     }
   }

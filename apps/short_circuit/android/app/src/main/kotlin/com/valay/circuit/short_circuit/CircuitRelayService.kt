@@ -275,7 +275,7 @@ class CircuitRelayService : Service() {
                 }
                 reconnectDelayMs = 1000L
                 gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-                setRelayStatus("Preparing secure Circuit relay…")
+                setRelayStatus("Securing the connection…")
                 if (!gatt.requestMtu(185) && !gatt.discoverServices()) {
                     failConnection(gatt, "Could not discover Circuit services")
                 }
@@ -301,7 +301,7 @@ class CircuitRelayService : Service() {
                 return
             }
             val relay = service.getCharacteristic(relayUuid) ?: run {
-                failConnection(gatt, "Circuit relay channel was not found")
+                failConnection(gatt, "Circuit's connection channel was not found")
                 return
             }
             if (!gatt.setCharacteristicNotification(relay, true)) {
@@ -326,7 +326,7 @@ class CircuitRelayService : Service() {
             if (descriptor.characteristic.uuid != relayUuid) return
             reconnectHandler.removeCallbacks(setupTimeout)
             relayReady = true
-            setRelayStatus("Circuit relay ready")
+            setRelayStatus(connectedStatus)
             writeCommand("@relay-test")
             // The display's clock and note counts must not depend on the app
             // screen being open, so the service sends them itself.
@@ -421,7 +421,7 @@ class CircuitRelayService : Service() {
                 }
             } catch (_: Exception) { false }
             writeCommand("@relay-result\n${if (online) "online" else "offline"}")
-            setRelayStatus(if (online) "Circuit relay online" else "Phone internet unavailable")
+            setRelayStatus(if (online) connectedStatus else "Phone internet unavailable")
         }
     }
 
@@ -709,19 +709,19 @@ class CircuitRelayService : Service() {
 
     private fun startAsForeground(text: String) {
         val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel(channelId, "Circuit relay", NotificationManager.IMPORTANCE_LOW))
+        manager.createNotificationChannel(NotificationChannel(channelId, "Connection", NotificationManager.IMPORTANCE_LOW))
         val notification = notification(text)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(notificationId, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         else startForeground(notificationId, notification)
     }
-    // The two "all good" statuses (link ready, phone internet checked) both read as plain "Active" in
-    // the notification; anything else (connecting, reconnecting, Bluetooth off, needs repair) is
-    // shown as it is, since that is what someone looking at the notification wants to know.
+    // The healthy status reads as plain "Active" in the notification; anything else (connecting,
+    // reconnecting, Bluetooth off, needs repair) is shown as it is, since that is what someone
+    // looking at the notification wants to know.
     private fun notificationText(status: String): String =
-        if (status == "Circuit relay ready" || status == "Circuit relay online") "Active" else status
+        if (status == connectedStatus) "Active" else status
 
     private fun setRelayStatus(text: String) { relayStatus = text; updateNotification(text) }
     private fun updateNotification(text: String) { getSystemService(NotificationManager::class.java).notify(notificationId, notification(text)) }
     private fun notification(text: String): Notification = NotificationCompat.Builder(this, channelId)
-        .setSmallIcon(R.drawable.ic_stat_circuit).setContentTitle("Short-Circuit relay").setContentText(notificationText(text)).setOngoing(true).build()
+        .setSmallIcon(R.drawable.ic_stat_circuit).setContentTitle("Short-Circuit").setContentText(notificationText(text)).setOngoing(true).build()
 }
