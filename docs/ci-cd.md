@@ -6,7 +6,7 @@ in its own area change, so an app change does not rebuild the firmware.
 | Workflow | Runs on | What it does |
 |---|---|---|
 | `app.yml` | `apps/short_circuit/**` | Format check, `flutter analyze`, `flutter test`, then builds the release APK. A tag `app-vX.Y.Z` publishes a GitHub release. |
-| `firmware.yml` | `firmware/**` | Builds the ESP32-S3 firmware in the ESP-IDF 5.5.3 container and uploads the flash image. A tag `firmware-vX.Y.Z` publishes a release. |
+| `firmware.yml` | `firmware/**` | Builds the ESP32-S3 firmware in the ESP-IDF 5.5.3 container and uploads the bootloader, partition table and app as separate files. A tag `firmware-vX.Y.Z` publishes a release. |
 | `lambda.yml` | `services/music-lambda/**` | Python tests, builds the Lambda package, `terraform fmt` and `validate`. On `main` it deploys the code to AWS and smoke-tests it. |
 
 Pull requests run the checks only. Nothing is deployed or released from a PR.
@@ -16,7 +16,7 @@ Every action is pinned to a commit SHA, and Dependabot proposes updates weekly.
 
 These work as soon as the workflows are merged:
 
-- App checks and the debug-signed APK artifact.
+- App checks and the APK artifact (signed with the release key once the signing secrets below are set, otherwise with a throwaway debug key).
 - The firmware build and its artifact (`circuit-firmware`: `bootloader.bin`,
   `partition-table.bin` and `circuit-app.bin`, to be flashed at their own addresses).
 - Lambda tests, packaging and Terraform validation.
@@ -25,8 +25,8 @@ These work as soon as the workflows are merged:
 
 ### Deploying the Lambda from GitHub
 
-The deploy step is skipped until the AWS role exists. No AWS keys are stored in
-GitHub: the job swaps its GitHub identity for short-lived credentials.
+The deploy step is skipped until the AWS role exists (done for this repository). No AWS
+keys are stored in GitHub: the job swaps its GitHub identity for short-lived credentials.
 
 ```bash
 cd services/music-lambda/terraform
@@ -124,7 +124,7 @@ replace the secrets.
 
 ```bash
 git tag app-v1.0.1 && git push origin app-v1.0.1             # Short-Circuit APK
-git tag firmware-v0.2.0 && git push origin firmware-v0.2.0   # Circuit flash image
+git tag firmware-v0.2.0 && git push origin firmware-v0.2.0   # Circuit firmware files
 ```
 
 Flash a firmware release with its three files, each at its own address:

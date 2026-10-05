@@ -71,6 +71,11 @@ jobs:
     concurrency:
       group: lambda-deploy
       cancel-in-progress: false
+    # This job does not check the repository out, so the workflow's default directory
+    # (services/music-lambda) does not exist here; the package is all there is.
+    defaults:
+      run:
+        working-directory: package
     env:
       FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME || 'circuit-music' }}
     steps:
@@ -84,7 +89,6 @@ jobs:
           aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
 
       - name: Update the function code
-        working-directory: package
         run: |
           aws lambda update-function-code \
             --function-name "$FUNCTION_NAME" \
