@@ -41,6 +41,11 @@ The role can only update that one function's code and invoke it, and only a
 workflow running on `main` of `valaypatel/pocket-assistant` can assume it. The
 account's existing GitHub provider is reused.
 
+**Dependencies are pinned.** `services/music-lambda/requirements.lock` lists the exact
+version of everything the function runs, and `build.py` installs exactly those, so a
+deploy never picks up a newer library by surprise. To change one, edit
+`requirements.txt` and regenerate the lock (the command is at the top of the file).
+
 **Code and infrastructure are now split.** The workflow ships the code, and
 Terraform ignores it (`ignore_changes` on the function). Use `terraform apply`
 for infrastructure and settings, such as the Spotify variables. To deploy code by
