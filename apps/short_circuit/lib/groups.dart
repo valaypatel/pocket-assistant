@@ -216,14 +216,14 @@ extension _ScGroupState on _CircuitHomePageState {
           .whereType<Map<String, dynamic>>()
           .map(NoteGroup.fromJson)
           .toList();
-      if (mounted) setState(() => _groups = groups);
+      if (mounted) _update(() => _groups = groups);
     } catch (_) {
       // Leave the stored text alone; the next save replaces it with what is on screen.
     }
   }
 
   Future<void> _saveGroups(List<NoteGroup> groups) async {
-    if (mounted) setState(() => _groups = groups);
+    if (mounted) _update(() => _groups = groups);
     final preferences = await SharedPreferences.getInstance();
     await _writeSecret(
       preferences,
