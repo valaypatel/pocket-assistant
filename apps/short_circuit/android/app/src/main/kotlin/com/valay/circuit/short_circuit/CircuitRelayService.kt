@@ -714,8 +714,14 @@ class CircuitRelayService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(notificationId, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         else startForeground(notificationId, notification)
     }
+    // The two "all good" statuses (link ready, phone internet checked) both read as plain "Active" in
+    // the notification; anything else (connecting, reconnecting, Bluetooth off, needs repair) is
+    // shown as it is, since that is what someone looking at the notification wants to know.
+    private fun notificationText(status: String): String =
+        if (status == "Circuit relay ready" || status == "Circuit relay online") "Active" else status
+
     private fun setRelayStatus(text: String) { relayStatus = text; updateNotification(text) }
     private fun updateNotification(text: String) { getSystemService(NotificationManager::class.java).notify(notificationId, notification(text)) }
     private fun notification(text: String): Notification = NotificationCompat.Builder(this, channelId)
-        .setSmallIcon(R.drawable.ic_stat_circuit).setContentTitle("Short-Circuit relay").setContentText(text).setOngoing(true).build()
+        .setSmallIcon(R.drawable.ic_stat_circuit).setContentTitle("Short-Circuit relay").setContentText(notificationText(text)).setOngoing(true).build()
 }
