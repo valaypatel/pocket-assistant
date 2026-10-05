@@ -947,23 +947,7 @@ extension _ScPages on _CircuitHomePageState {
         onTap: () => _goTo(_AppPage.circuit),
         child: Row(
           children: [
-            Container(
-              width: 43,
-              height: 43,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Sc.circuitMark,
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: const Text(
-                'C',
-                style: TextStyle(
-                  color: Sc.circuitMarkInk,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ),
+            const ScDeviceMark(size: 43),
             const SizedBox(width: 13),
             Expanded(
               child: Column(
@@ -1289,23 +1273,7 @@ extension _ScPages on _CircuitHomePageState {
         ),
         child: Row(
           children: [
-            Container(
-              width: 43,
-              height: 43,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Sc.circuitMark,
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: const Text(
-                'C',
-                style: TextStyle(
-                  color: Sc.circuitMarkInk,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ),
+            const ScDeviceMark(size: 43),
             const SizedBox(width: 13),
             Expanded(
               child: Column(

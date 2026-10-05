@@ -101,6 +101,56 @@ const _scTitle = TextStyle(
   letterSpacing: -1.4,
 );
 
+/// The Circuit device icon (assets/brand/circuit-device.svg): the board with a waveform on its
+/// screen and a recording dot. Drawn from the app's own device colours (Sc.circuitMark,
+/// Sc.circuitMarkInk, Sc.accent), and used wherever the device is named. Decorative.
+class ScDeviceMark extends StatelessWidget {
+  const ScDeviceMark({super.key, this.size = 43});
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => ExcludeSemantics(
+    child: SizedBox(
+      width: size,
+      height: size,
+      child: const CustomPaint(painter: _DeviceMarkPainter()),
+    ),
+  );
+}
+
+class _DeviceMarkPainter extends CustomPainter {
+  const _DeviceMarkPainter();
+
+  // Waveform bars on the icon's 1024 canvas: x, y, height (40 wide).
+  static const _bars = [
+    (364.0, 437.0, 56.0),
+    (428.0, 395.0, 140.0),
+    (492.0, 351.0, 228.0),
+    (556.0, 407.0, 116.0),
+    (620.0, 441.0, 48.0),
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.scale(size.width / 1024);
+    RRect box(double x, double y, double w, double h, double r) =>
+        RRect.fromRectAndRadius(Rect.fromLTWH(x, y, w, h), Radius.circular(r));
+    final dark = Paint()..color = Sc.circuitMark;
+    final light = Paint()..color = Sc.circuitMarkInk;
+    canvas.drawRRect(box(0, 0, 1024, 1024, 224), dark);
+    canvas.drawRRect(box(270, 230, 484, 564, 114), light);
+    canvas.drawRRect(box(318, 278, 388, 366, 68), dark);
+    for (final (x, y, h) in _bars) {
+      canvas.drawRRect(box(x, y, 40, h, 20), light);
+    }
+    canvas.drawCircle(const Offset(512, 714), 34, dark);
+    canvas.drawCircle(const Offset(512, 714), 15, Paint()..color = Sc.accent);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
 /// The brand icon (assets/brand/app-icon.svg) drawn from the app's own colours, so it stays
 /// sharp at any size: a coral rounded square, a cream speech bubble, five ink waveform bars.
 /// Decorative: it carries no meaning of its own, so screen readers skip it.
