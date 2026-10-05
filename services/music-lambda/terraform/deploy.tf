@@ -10,6 +10,18 @@ variable "github_repository" {
   default     = "valaypatel/pocket-assistant"
 }
 
+variable "github_subject_prefix" {
+  description = <<-EOT
+    How GitHub names this repository inside the identity token it sends to AWS. This
+    repository uses the "immutable subject" setting, so the name carries numeric ids
+    ("repo:owner@<owner id>/name@<repo id>"). Read the current value with:
+      gh api repos/OWNER/NAME/actions/oidc/customization/sub --jq .sub_claim_prefix
+    Leave empty for repositories that use the plain "repo:owner/name" form.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "github_deploy_ref" {
   description = "The git ref a workflow must be running on to deploy."
   type        = string
@@ -18,6 +30,7 @@ variable "github_deploy_ref" {
 
 locals {
   deploy_enabled = var.github_repository != ""
+  subject_prefix = var.github_subject_prefix != "" ? var.github_subject_prefix : "repo:${var.github_repository}"
 }
 
 # This account already has the GitHub provider (it is one per account, so it is
@@ -45,7 +58,7 @@ data "aws_iam_policy_document" "deploy_assume" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:ref:${var.github_deploy_ref}"]
+      values   = ["${local.subject_prefix}:ref:${var.github_deploy_ref}"]
     }
   }
 }
