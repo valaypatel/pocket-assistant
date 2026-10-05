@@ -3,6 +3,7 @@
 #include <initializer_list>
 #include <cctype>
 #include <ctime>
+#include <mutex>
 #include <new>
 
 #include "esp_bt.h"
@@ -694,6 +695,10 @@ bool run_crypto_self_test_with(uint8_t *sealed, uint8_t *opened, uint8_t *damage
 // Makes the key the first time the board is paired. A board that is not paired has
 // none, so it records nothing: there would be no phone able to read it.
 void ensure_note_key() {
+    // Called from start-up and from the BLE task; without the lock both could find no
+    // key and each make one (seen: two keys in flash on a board paired once).
+    static std::mutex lock;
+    std::lock_guard<std::mutex> guard(lock);
     if (note_key_ready) return;
     if (circuit_secure::create_key(&note_key)) {
         note_key_ready = true;
@@ -1628,18 +1633,30 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
     case ESP_GAP_BLE_SEC_REQ_EVT:
         ESP_ERROR_CHECK(esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true));
         break;
-    case ESP_GAP_BLE_AUTH_CMPL_EVT:
-        if (param->ble_security.auth_cmpl.success) {
-            ESP_LOGI(kTag, "Short-Circuit bonded with encrypted BLE");
+    case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
+        // A phone that has lost its pairing starts a new one: show the code it asks for,
+        // even though this board already has a bond stored.
+        ESP_LOGI(kTag, "A phone is pairing; showing the code");
+        show_pairing_code();
+        break;
+    case ESP_GAP_BLE_AUTH_CMPL_EVT: {
+        const auto &auth = param->ble_security.auth_cmpl;
+        const uint8_t *a = auth.bd_addr;
+        if (auth.success) {
+            // A bonded phone reconnecting also lands here, with key_present set and no
+            // pairing code needed; only a real pairing should show the code.
+            ESP_LOGI(kTag, "BLE link secured with %02x:..:%02x (address type %d, new keys %s, auth mode 0x%x)",
+                a[0], a[5], auth.addr_type, auth.key_present ? "yes" : "no", auth.auth_mode);
             ble_encrypted = true;
             ensure_note_key();
-            show_pairing_code();
-            return_to_idle_after(DeviceScreen::Pairing, 3000);
+            if (active_screen == DeviceScreen::Pairing) show_device_screen(DeviceScreen::Idle);
         } else {
-            ESP_LOGW(kTag, "BLE bonding failed: 0x%x", param->ble_security.auth_cmpl.fail_reason);
+            ESP_LOGW(kTag, "BLE security failed with %02x:..:%02x (address type %d): reason 0x%x, %d bonded phone(s) stored",
+                a[0], a[5], auth.addr_type, auth.fail_reason, esp_ble_get_bond_device_num());
             show_pairing_code();
         }
         break;
+    }
     default:
         break;
     }
@@ -1740,14 +1757,30 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
     }
     case ESP_GATTS_CONNECT_EVT:
         connection_id = param->connect.conn_id;
-        ESP_LOGI(kTag, "Short-Circuit connected");
-        ESP_ERROR_CHECK(esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM));
+    {
+        const uint8_t *a = param->connect.remote_bda;
+        int bonded_count = esp_ble_get_bond_device_num();
+        bool known = false;
+        if (bonded_count > 0 && bonded_count <= 8) {
+            esp_ble_bond_dev_t list[8];
+            int n = 8;
+            if (esp_ble_get_bond_device_list(&n, list) == ESP_OK) {
+                for (int i = 0; i < n; i++) {
+                    if (memcmp(list[i].bd_addr, a, ESP_BD_ADDR_LEN) == 0) known = true;
+                }
+            }
+        }
+        ESP_LOGI(kTag, "Short-Circuit connected: %02x:..:%02x (address type %d), %d bonded phone(s) stored, this address %s",
+            a[0], a[5], param->connect.ble_addr_type, bonded_count, known ? "is one of them" : "is not listed");
+        esp_err_t enc = esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
+        if (enc != ESP_OK) ESP_LOGW(kTag, "Could not ask for an encrypted link: %s", esp_err_to_name(enc));
         break;
+    }
     case ESP_GATTS_DISCONNECT_EVT:
         connection_id = UINT16_MAX;
         ble_encrypted = false;
         show_relay_disconnected();
-        ESP_LOGI(kTag, "Client disconnected; advertising again");
+        ESP_LOGI(kTag, "Client disconnected (reason 0x%x); advertising again", param->disconnect.reason);
         ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&adv_params));
         break;
     case ESP_GATTS_CONF_EVT:

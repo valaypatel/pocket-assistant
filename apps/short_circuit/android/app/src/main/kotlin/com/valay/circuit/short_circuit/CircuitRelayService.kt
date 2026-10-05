@@ -136,7 +136,7 @@ class CircuitRelayService : Service() {
                     reconnectDelayMs = 1000L
                     reconnectHandler.post { connect(device.address) }
                 }
-                BluetoothDevice.BOND_NONE -> stopForUnpairing()
+                BluetoothDevice.BOND_NONE -> pauseForRepair()
             }
         }
     }
@@ -189,8 +189,9 @@ class CircuitRelayService : Service() {
         relayReady = false
         val device = BluetoothAdapter.getDefaultAdapter()?.getRemoteDevice(address) ?: return
         if (device.bondState != BluetoothDevice.BOND_BONDED) {
-            setRelayStatus("Pair Circuit in Short-Circuit to enable the relay")
-            device.createBond()
+            // Never start pairing from here: Android would pop up its pairing dialog
+            // unprompted, as it did when the phone came back after being away.
+            pauseForRepair()
             return
         }
         setRelayStatus("Connecting to Circuit…")
@@ -207,7 +208,13 @@ class CircuitRelayService : Service() {
         reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(30_000L)
     }
 
-    private fun stopForUnpairing() {
+    /**
+     * Android no longer holds the pairing (for instance after Circuit refused the phone's
+     * saved key). Stop retrying, but keep the saved Circuit and everything stored, so the
+     * app can offer "Repair pairing" and the user decides when to pair again.
+     */
+    private fun pauseForRepair() {
+        Log.w("CircuitRelay", "[BLE] Circuit is not bonded; waiting for the user to repair pairing")
         shouldReconnect = false
         reconnectHandler.removeCallbacks(reconnectRunnable)
         reconnectHandler.removeCallbacks(setupTimeout)
@@ -215,9 +222,7 @@ class CircuitRelayService : Service() {
         command = null
         gatt?.close()
         gatt = null
-        getSharedPreferences(preferencesName, MODE_PRIVATE).edit().remove(addressKey).apply()
-        relayStatus = "Circuit unpaired"
-        stopSelf()
+        setRelayStatus("Circuit needs repair in Short-Circuit")
     }
 
     private fun failConnection(candidate: BluetoothGatt, reason: String) {
