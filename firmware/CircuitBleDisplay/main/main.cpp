@@ -10,6 +10,7 @@
 #include "esp_bt_main.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
+#include "esp_mac.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gatt_common_api.h"
 #include "esp_gatts_api.h"
@@ -1053,7 +1054,12 @@ const char *wifi_reason_text(uint8_t reason) {
 void send_wifi_status() {
     static const char *const names[] = {"none", "connecting", "connected", "failed"};
     char message[kMaxTextBytes + 1];
-    snprintf(message, sizeof(message), "@wifi-status\n%s\n%s\n%s", names[static_cast<int>(wifi_ui)], wifi_ssid, wifi_detail);
+    // The Wi-Fi MAC address goes last as "mac=..." so older apps, which read everything after the
+    // third line as the detail, just show it there and newer ones pick it out.
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(message, sizeof(message), "@wifi-status\n%s\n%s\n%s\nmac=%02X:%02X:%02X:%02X:%02X:%02X",
+        names[static_cast<int>(wifi_ui)], wifi_ssid, wifi_detail, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     send_relay_request(message);
 }
 
