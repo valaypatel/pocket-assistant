@@ -171,44 +171,50 @@ void main() {
       ),
     );
 
-    testWidgets('grows out of the indicator, then folds back into it', (
-      tester,
-    ) async {
-      tester.view.physicalSize = const Size(400, 800);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.reset);
-      final active = ValueNotifier(false);
-      await tester.pumpWidget(app(active));
-      expect(find.text('Recording on Circuit'), findsNothing);
-      final chipTop = tester.getTopLeft(find.byKey(chipKey));
+    testWidgets(
+      'floats over the page, growing from the indicator and folding back',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final active = ValueNotifier(false);
+        await tester.pumpWidget(app(active));
+        expect(find.text('Recording on Circuit'), findsNothing);
+        final chipTop = tester.getTopLeft(find.byKey(chipKey));
 
-      active.value = true;
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 40));
-      // Partway: wider than the indicator (90), not yet the full pill (376).
-      final partway = tester.getSize(find.byType(OverflowBox)).width;
-      expect(partway, greaterThan(90));
-      expect(partway, lessThan(376));
+        active.value = true;
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 40));
+        // Partway: wider than the indicator (90), not yet the full pill (376).
+        // It grows outward from the indicator: the indicator stays inside the pill all along.
+        final chipRect = tester.getRect(find.byKey(chipKey));
+        final pill = tester.getRect(find.byType(OverflowBox));
+        expect(pill.inflate(1).contains(chipRect.topLeft), isTrue);
+        expect(pill.inflate(1).contains(chipRect.bottomRight), isTrue);
+        final partway = pill.width;
+        expect(partway, greaterThan(90));
+        expect(partway, lessThan(376));
 
-      await tester.pumpAndSettle();
-      expect(
-        tester.getSize(find.byType(OverflowBox)).width,
-        376,
-      ); // 400 - 2 x 12
-      expect(find.text('Recording on Circuit'), findsOneWidget);
-      // The page slid down to make room: the pill covers nothing.
-      expect(tester.getTopLeft(find.byKey(chipKey)).dy, chipTop.dy + 72);
+        await tester.pumpAndSettle();
+        expect(
+          tester.getSize(find.byType(OverflowBox)).width,
+          376,
+        ); // 400 - 2 x 12
+        expect(find.text('Recording on Circuit'), findsOneWidget);
+        // The page does not move: the pill floats over it.
+        expect(tester.getTopLeft(find.byKey(chipKey)), chipTop);
 
-      active.value = false;
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 40));
-      final folding = tester.getSize(find.byType(OverflowBox)).width;
-      expect(folding, greaterThan(90));
-      expect(folding, lessThan(376));
-      await tester.pumpAndSettle();
-      expect(find.text('Recording on Circuit'), findsNothing);
-      expect(tester.getTopLeft(find.byKey(chipKey)), chipTop);
-    });
+        active.value = false;
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 40));
+        final folding = tester.getSize(find.byType(OverflowBox)).width;
+        expect(folding, greaterThan(90));
+        expect(folding, lessThan(376));
+        await tester.pumpAndSettle();
+        expect(find.text('Recording on Circuit'), findsNothing);
+        expect(tester.getTopLeft(find.byKey(chipKey)), chipTop);
+      },
+    );
 
     testWidgets('with animations off it just appears and disappears', (
       tester,

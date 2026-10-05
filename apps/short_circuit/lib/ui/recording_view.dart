@@ -367,11 +367,11 @@ class _RecordingSheetState extends State<RecordingSheet> {
   }
 }
 
-/// Puts the recording pill above a page and animates it: it grows out of the Circuit
+/// Floats the recording pill over a page and animates it: it grows outward from the Circuit
 /// indicator ([chipKey]) when [active] turns on, and folds back into it when it turns off. The
-/// page slides down to make room, so the pill never covers anything. Where the indicator is not
-/// on screen (any page but Home) the pill grows from the top edge instead. With animations
-/// turned off it simply appears and disappears.
+/// page itself never moves. Where the indicator is not on screen (any page but Home) the pill
+/// grows from the top edge instead. With animations turned off it simply appears and
+/// disappears.
 class RecordingMorph extends StatefulWidget {
   const RecordingMorph({
     super.key,
@@ -419,8 +419,7 @@ class _RecordingMorphState extends State<RecordingMorph>
     super.dispose();
   }
 
-  /// The indicator's resting place in this widget's coordinates. The page is pushed down while
-  /// the pill is open, so that push is taken back off.
+  /// The indicator's place in this widget's coordinates, or null when it is not on screen.
   Rect? _chipRect() {
     final chip = widget.chipKey.currentContext?.findRenderObject();
     final stack = _stackKey.currentContext?.findRenderObject();
@@ -431,8 +430,7 @@ class _RecordingMorphState extends State<RecordingMorph>
         !stack.attached) {
       return null;
     }
-    final topLeft = stack.globalToLocal(chip.localToGlobal(Offset.zero));
-    return (topLeft & chip.size).shift(Offset(0, -_t.value * (_height + _gap)));
+    return stack.globalToLocal(chip.localToGlobal(Offset.zero)) & chip.size;
   }
 
   @override
@@ -459,7 +457,12 @@ class _RecordingMorphState extends State<RecordingMorph>
         return LayoutBuilder(
           builder: (context, box) {
             final fullWidth = box.maxWidth - _margin * 2;
-            final end = Rect.fromLTWH(_margin, _gap, fullWidth, _height);
+            // Growing from the indicator: the pill is centred on it vertically, so it only
+            // ever grows outward from where the indicator is.
+            final top = _from == null
+                ? _gap
+                : (_from!.center.dy - _height / 2).clamp(_gap, double.infinity);
+            final end = Rect.fromLTWH(_margin, top, fullWidth, _height);
             final start =
                 _from ??
                 Rect.fromCenter(
@@ -474,12 +477,7 @@ class _RecordingMorphState extends State<RecordingMorph>
             return Stack(
               key: _stackKey,
               children: [
-                Positioned.fill(
-                  child: Padding(
-                    padding: EdgeInsets.only(top: t * (_height + _gap)),
-                    child: widget.child,
-                  ),
-                ),
+                Positioned.fill(child: widget.child),
                 if (t > 0 && _frozen != null)
                   Positioned.fromRect(
                     rect: rect,
@@ -487,6 +485,13 @@ class _RecordingMorphState extends State<RecordingMorph>
                       decoration: BoxDecoration(
                         color: shade,
                         borderRadius: BorderRadius.circular(radius),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Color.fromRGBO(0, 0, 0, 0.22 * t),
+                            blurRadius: 18,
+                            offset: const Offset(0, 6),
+                          ),
+                        ],
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(radius),
