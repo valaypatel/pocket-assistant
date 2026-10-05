@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Single-colour version for themed icons (the bars are holes in the bubble). The artwork is drawn on a 1024 canvas that
+     fills the 72dp the launcher always shows, centred inside the 108dp adaptive layer. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1536"
+    android:viewportHeight="1536">
+    <group android:translateX="256" android:translateY="256">
+        <path android:fillColor="#000000" android:fillType="evenOdd" android:pathData="M390 280H634C708 280 752 324 752 398V586C752 660 708 704 634 704H478L342 774V694C296 678 272 640 272 586V398C272 324 316 280 390 280ZM376 445A20 20 0 0 1 396 465V519A20 20 0 0 1 376 539A20 20 0 0 1 356 519V465A20 20 0 0 1 376 445ZM444 399A20 20 0 0 1 464 419V565A20 20 0 0 1 444 585A20 20 0 0 1 424 565V419A20 20 0 0 1 444 399ZM512 360A20 20 0 0 1 532 380V604A20 20 0 0 1 512 624A20 20 0 0 1 492 604V380A20 20 0 0 1 512 360ZM580 417A20 20 0 0 1 600 437V547A20 20 0 0 1 580 567A20 20 0 0 1 560 547V437A20 20 0 0 1 580 417ZM648 455A20 20 0 0 1 668 475V509A20 20 0 0 1 648 529A20 20 0 0 1 628 509V475A20 20 0 0 1 648 455Z"/>
+    </group>
+</vector>

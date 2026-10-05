@@ -81,6 +81,13 @@ extension _ScPages on _CircuitHomePageState {
     _ => 'Not set up',
   };
 
+  /// Circuit's IP address while it is on Wi-Fi, else null.
+  String? get _wifiIp =>
+      _wifiState == 'connected' &&
+          RegExp(r'^\d{1,3}(\.\d{1,3}){3}$').hasMatch(_wifiDetail.trim())
+      ? _wifiDetail.trim()
+      : null;
+
   Widget _deviceChip() {
     final wifiColor = _wifiState == 'connected'
         ? Sc.green
@@ -88,54 +95,54 @@ extension _ScPages on _CircuitHomePageState {
         ? Sc.orange
         : const Color(0xffa6a9af);
     final available = _circuitAvailable;
-    return GestureDetector(
-      onTap: () => _goTo(_AppPage.circuit),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
-        decoration: BoxDecoration(
-          color: Sc.chip,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: available
-                    ? const Color(0xff3b9a68)
-                    : const Color(0xffa6a9af),
-                boxShadow: available
-                    ? const [
-                        BoxShadow(color: Color(0x203b9a68), spreadRadius: 4),
-                      ]
-                    : null,
+    return Semantics(
+      button: true,
+      label: available ? 'Circuit, connected' : 'Circuit, not connected',
+      hint: 'Opens device settings',
+      excludeSemantics: true,
+      child: GestureDetector(
+        onTap: () => _goTo(_AppPage.circuit),
+        child: Container(
+          key: _deviceChipKey,
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+          decoration: BoxDecoration(
+            color: Sc.chip,
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: available
+                      ? const Color(0xff3b9a68)
+                      : const Color(0xffa6a9af),
+                  boxShadow: available
+                      ? const [
+                          BoxShadow(color: Color(0x203b9a68), spreadRadius: 4),
+                        ]
+                      : null,
+                ),
               ),
-            ),
-            const SizedBox(width: 8),
-            Icon(
-              _wifiState == 'failed' ? LucideIcons.wifiOff : LucideIcons.wifi,
-              size: 15,
-              color: wifiColor,
-            ),
-            const SizedBox(width: 6),
-            Icon(
-              LucideIcons.smartphone,
-              size: 15,
-              color: _relayActive ? Sc.orange : const Color(0xffa6a9af),
-            ),
-            const SizedBox(width: 8),
-            const Text(
-              'Circuit',
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w800,
-                color: Color(0xff30333a),
+              const SizedBox(width: 8),
+              Icon(
+                _wifiState == 'failed' ? LucideIcons.wifiOff : LucideIcons.wifi,
+                size: 15,
+                color: wifiColor,
               ),
-            ),
-          ],
+              const SizedBox(width: 6),
+              Icon(
+                LucideIcons.smartphone,
+                size: 15,
+                color: _relayActive ? Sc.orange : const Color(0xffa6a9af),
+              ),
+              const SizedBox(width: 8),
+              const ScDeviceMark(size: 22),
+            ],
+          ),
         ),
       ),
     );
@@ -566,6 +573,10 @@ extension _ScPages on _CircuitHomePageState {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 2, right: 12),
+            child: ScBrandMark(size: 38),
+          ),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -943,23 +954,7 @@ extension _ScPages on _CircuitHomePageState {
         onTap: () => _goTo(_AppPage.circuit),
         child: Row(
           children: [
-            Container(
-              width: 43,
-              height: 43,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Sc.circuitMark,
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: const Text(
-                'C',
-                style: TextStyle(
-                  color: Sc.circuitMarkInk,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ),
+            const ScDeviceMark(size: 43),
             const SizedBox(width: 13),
             Expanded(
               child: Column(
@@ -1207,6 +1202,29 @@ extension _ScPages on _CircuitHomePageState {
       value: _displayName.isEmpty ? 'Not set' : _displayName,
       onTap: _promptName,
     ),
+    const SizedBox(height: 32),
+    const Row(
+      children: [
+        ScBrandMark(size: 40),
+        SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Short-Circuit',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+              ),
+              Text(
+                'Voice notes from Circuit, on your phone.',
+                style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.4),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+    const SizedBox(height: 12),
   ];
 
   // ---- Circuit device page -------------------------------------------------
@@ -1262,23 +1280,7 @@ extension _ScPages on _CircuitHomePageState {
         ),
         child: Row(
           children: [
-            Container(
-              width: 43,
-              height: 43,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Sc.circuitMark,
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: const Text(
-                'C',
-                style: TextStyle(
-                  color: Sc.circuitMarkInk,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ),
+            const ScDeviceMark(size: 43),
             const SizedBox(width: 13),
             Expanded(
               child: Column(
@@ -1372,7 +1374,7 @@ extension _ScPages on _CircuitHomePageState {
         title: 'Connection',
         caption: _needsPairingRepair
             ? 'Pairing is needed before it can reconnect'
-            : (_relayActive ? 'Phone relay' : 'Bluetooth'),
+            : (_relayActive ? 'Through your phone' : 'Bluetooth'),
         value: available
             ? 'Online'
             : (_needsPairingRepair ? 'Repair needed' : 'Offline'),
@@ -1428,8 +1430,8 @@ extension _ScPages on _CircuitHomePageState {
         onTap: available ? () => _goTo(_AppPage.wifi) : null,
       ),
       ScRow(
-        title: 'Phone relay',
-        caption: 'Background connection',
+        title: 'Stay connected',
+        caption: 'Keeps Circuit linked in the background',
         value: _relayActive ? 'On' : 'Off',
         valueColor: _relayActive ? Sc.green : Sc.faint,
       ),
@@ -1437,11 +1439,30 @@ extension _ScPages on _CircuitHomePageState {
         const SizedBox(height: 24),
         const ScGroupLabel('About Circuit'),
         ScRow(
-          title: 'Device ID',
-          caption: 'Bluetooth address',
-          value: _savedCircuitId!.length > 10
-              ? '${_savedCircuitId!.substring(0, 8)}…'
-              : _savedCircuitId!,
+          title: 'Bluetooth address',
+          caption: 'Tap to copy',
+          value: _savedCircuitId!,
+          onTap: () => _copyValue('Bluetooth address', _savedCircuitId!),
+        ),
+        ScRow(
+          title: 'IP address',
+          caption: _wifiIp == null
+              ? 'Circuit is not on Wi-Fi'
+              : 'On ${_wifiSsid.isEmpty ? 'your Wi-Fi' : _wifiSsid} · tap to copy',
+          value: _wifiIp ?? 'Not connected',
+          onTap: _wifiIp == null
+              ? null
+              : () => _copyValue('IP address', _wifiIp!),
+        ),
+        ScRow(
+          title: 'Wi-Fi MAC address',
+          caption: _wifiMac.isEmpty
+              ? 'Circuit shares it when it is connected'
+              : 'Tap to copy',
+          value: _wifiMac.isEmpty ? 'Unknown' : _wifiMac,
+          onTap: _wifiMac.isEmpty
+              ? null
+              : () => _copyValue('Wi-Fi MAC address', _wifiMac),
         ),
         ScRow(
           title: 'Note encryption',
@@ -1505,8 +1526,8 @@ extension _ScPages on _CircuitHomePageState {
           if (_relayActive)
             ScIconButton(
               icon: LucideIcons.radio,
-              tooltip: 'Stop phone relay',
-              caption: 'Stop relay',
+              tooltip: 'Turn off stay connected',
+              caption: 'Turn off',
               onPressed: _stopPhoneRelay,
             ),
           if (_textCharacteristic != null)
@@ -1811,35 +1832,65 @@ extension _ScPages on _CircuitHomePageState {
 
   // ---- recording -----------------------------------------------------------
 
-  Widget _recordPage() {
+  RecordingSnapshot _recordingSnapshot() {
     final started = _recordingStartedAt;
-    return RecordingView(
+    return RecordingSnapshot(
+      active: _recordingAudio,
       elapsed: started == null
           ? Duration.zero
           : DateTime.now().difference(started),
       song: _songClipArmed,
       busy: _audioBusy,
-      onStop: _stopRecording,
     );
   }
+
+  /// The compact pill shown at the top of every screen while Circuit records.
+  Widget _recordingIsland({bool decorated = true}) {
+    final snapshot = _recordingSnapshot();
+    return RecordingIsland(
+      decorated: decorated,
+      elapsed: snapshot.elapsed,
+      song: snapshot.song,
+      busy: snapshot.busy,
+      onStop: _stopRecording,
+      onExpand: _openRecordingSheet,
+    );
+  }
+
+  Future<void> _openRecordingSheet() => showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    backgroundColor: Sc.bg,
+    builder: (_) =>
+        RecordingSheet(read: _recordingSnapshot, onStop: _stopRecording),
+  );
 
   // ---- shell ---------------------------------------------------------------
 
   Widget _buildShell() {
-    final body = _recordingAudio
-        ? _recordPage()
-        : ListView(
-            padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
-            children: switch (_page) {
-              _AppPage.home => _homePage(),
-              _AppPage.notes => _notesPage(),
-              _AppPage.tasks => _tasksPage(),
-              _AppPage.settings => _settingsPage(),
-              _AppPage.circuit => _circuitPage(),
-              _AppPage.wifi => _wifiPage(),
-              _AppPage.hiddenWifi => _hiddenWifiPage(),
-            },
-          );
+    final content = ListView(
+      padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
+      children: switch (_page) {
+        _AppPage.home => _homePage(),
+        _AppPage.notes => _notesPage(),
+        _AppPage.tasks => _tasksPage(),
+        _AppPage.settings => _settingsPage(),
+        _AppPage.circuit => _circuitPage(),
+        _AppPage.wifi => _wifiPage(),
+        _AppPage.hiddenWifi => _hiddenWifiPage(),
+      },
+    );
+    // While Circuit records, a compact pill grows out of the Circuit indicator on Home (or out of
+    // the top edge on other pages) and folds back into it when recording ends, so notes, tasks
+    // and settings stay usable.
+    final body = RecordingMorph(
+      active: _recordingAudio,
+      chipKey: _deviceChipKey,
+      island: () => _recordingIsland(decorated: false),
+      child: content,
+    );
     final tab = switch (_page) {
       _AppPage.home => 0,
       _AppPage.notes => 1,
@@ -1848,15 +1899,13 @@ extension _ScPages on _CircuitHomePageState {
       _ => -1,
     };
     return PopScope(
-      canPop: _page == _AppPage.home && !_recordingAudio,
+      canPop: _page == _AppPage.home,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) _goBack();
       },
       child: Scaffold(
         body: SafeArea(bottom: false, child: body),
-        bottomNavigationBar: _recordingAudio
-            ? null
-            : ScNavBar(index: tab, onSelect: _selectTab),
+        bottomNavigationBar: ScNavBar(index: tab, onSelect: _selectTab),
       ),
     );
   }

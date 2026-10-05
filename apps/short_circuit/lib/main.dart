@@ -767,6 +767,33 @@ Future<void> main() async {
   runApp(const ShortCircuitApp());
 }
 
+/// Circuit's Wi-Fi status: "@wifi-status", the state, the network name, then the detail (its IP
+/// address when connected, the reason when not) and, from newer firmware, a last "mac=" line.
+class WifiStatus {
+  const WifiStatus(this.state, this.ssid, this.detail, this.mac);
+  final String state;
+  final String ssid;
+  final String detail;
+  final String mac;
+}
+
+WifiStatus? parseWifiStatus(String message) {
+  final lines = message.split('\n');
+  if (lines.length < 2) return null;
+  var tail = lines.length > 3 ? lines.sublist(3) : <String>[];
+  var mac = '';
+  if (tail.isNotEmpty && tail.last.startsWith('mac=')) {
+    mac = tail.last.substring(4).trim();
+    tail = tail.sublist(0, tail.length - 1);
+  }
+  return WifiStatus(
+    lines[1],
+    lines.length > 2 ? lines[2] : '',
+    tail.join('\n'),
+    mac,
+  );
+}
+
 enum _AppPage { home, notes, tasks, settings, circuit, wifi, hiddenWifi }
 
 const _tasksKey = 'circuit_tasks';
@@ -904,11 +931,14 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   String _wifiState = 'none';
   String _wifiSsid = '';
   String _wifiDetail = '';
+  String _wifiMac = ''; // Circuit's Wi-Fi MAC address, once it has said
   bool _showWifiPassword = false;
   DateTime? _wifiConnectingSince;
   Timer? _wifiPollTimer;
   bool _audioBusy = false;
   bool _recordingAudio = false;
+  final _deviceChipKey =
+      GlobalKey(); // where the recording pill grows from and folds back to
   bool _relayActive = false;
   // Android no longer holds Circuit's pairing; the user chooses when to pair again.
   bool _needsPairingRepair = false;
@@ -997,7 +1027,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
           if (_syncingNoteId == null) {
             _status = active
                 ? status
-                : (needsRepair ? status : 'Phone relay stopped.');
+                : (needsRepair ? status : 'Stay connected is off.');
           }
         });
       }
@@ -2431,21 +2461,25 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   }
 
   void _applyWifiStatus(String message) {
-    final lines = message.split('\n');
-    if (lines.length < 2 || !mounted) return;
-    final state = lines[1];
-    final ssid = lines.length > 2 ? lines[2] : '';
-    final detail = lines.length > 3 ? lines.sublist(3).join('\n') : '';
+    final status = parseWifiStatus(message);
+    if (status == null || !mounted) return;
     setState(() {
-      _wifiState = state;
-      _wifiSsid = ssid;
-      _wifiDetail = detail;
-      if (state == 'connecting') {
+      _wifiState = status.state;
+      _wifiSsid = status.ssid;
+      _wifiDetail = status.detail;
+      if (status.mac.isNotEmpty) _wifiMac = status.mac;
+      if (status.state == 'connecting') {
         _wifiConnectingSince ??= DateTime.now();
       } else {
         _wifiConnectingSince = null;
       }
     });
+  }
+
+  /// Puts [value] on the clipboard and says so.
+  Future<void> _copyValue(String label, String value) async {
+    await Clipboard.setData(ClipboardData(text: value));
+    _setStatus('$label copied.');
   }
 
   Future<void> _requestWifiStatus() async {
@@ -2528,13 +2562,13 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         _relayCharacteristic = null;
         _circuits.clear();
         _relayActive = true;
-        _status = 'Starting phone relay…';
+        _status = 'Turning on stay connected…';
       });
       await Future<void>.delayed(const Duration(seconds: 1));
       await _refreshRelayStatus();
       unawaited(_sendHomeStatus());
     } catch (error) {
-      _setStatus('Could not start phone relay: $error');
+      _setStatus('Could not keep Circuit connected: $error');
     }
   }
 
@@ -2543,7 +2577,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     if (mounted) {
       setState(() {
         _relayActive = false;
-        _status = 'Phone relay stopped.';
+        _status = 'Stay connected is off.';
       });
     }
   }
@@ -2708,6 +2742,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       _pageHistory.add(_page);
       _page = page;
     });
+    if (page == _AppPage.circuit && _circuitAvailable) _requestWifiStatus();
     if (page == _AppPage.wifi && _circuitAvailable) {
       _requestWifiStatus();
       if (_wifiNetworks.isEmpty && !_scanningWifi) _scanWifi();

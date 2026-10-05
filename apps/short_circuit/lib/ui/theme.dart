@@ -101,6 +101,126 @@ const _scTitle = TextStyle(
   letterSpacing: -1.4,
 );
 
+/// The Circuit device icon (assets/brand/circuit-device.svg): the board with a waveform on its
+/// screen and a recording dot. Drawn from the app's own device colours (Sc.circuitMark,
+/// Sc.circuitMarkInk, Sc.accent), and used wherever the device is named. Decorative.
+class ScDeviceMark extends StatelessWidget {
+  const ScDeviceMark({super.key, this.size = 43});
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => ExcludeSemantics(
+    child: SizedBox(
+      width: size,
+      height: size,
+      child: const CustomPaint(painter: _DeviceMarkPainter()),
+    ),
+  );
+}
+
+class _DeviceMarkPainter extends CustomPainter {
+  const _DeviceMarkPainter();
+
+  // Waveform bars on the icon's 1024 canvas: x, y, height (40 wide).
+  static const _bars = [
+    (364.0, 437.0, 56.0),
+    (428.0, 395.0, 140.0),
+    (492.0, 351.0, 228.0),
+    (556.0, 407.0, 116.0),
+    (620.0, 441.0, 48.0),
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.scale(size.width / 1024);
+    RRect box(double x, double y, double w, double h, double r) =>
+        RRect.fromRectAndRadius(Rect.fromLTWH(x, y, w, h), Radius.circular(r));
+    final dark = Paint()..color = Sc.circuitMark;
+    final light = Paint()..color = Sc.circuitMarkInk;
+    canvas.drawRRect(box(0, 0, 1024, 1024, 224), dark);
+    canvas.drawRRect(box(270, 230, 484, 564, 114), light);
+    canvas.drawRRect(box(318, 278, 388, 366, 68), dark);
+    for (final (x, y, h) in _bars) {
+      canvas.drawRRect(box(x, y, 40, h, 20), light);
+    }
+    canvas.drawCircle(const Offset(512, 714), 34, dark);
+    canvas.drawCircle(const Offset(512, 714), 15, Paint()..color = Sc.accent);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+/// The brand icon (assets/brand/app-icon.svg) drawn from the app's own colours, so it stays
+/// sharp at any size: a coral rounded square, a cream speech bubble, five ink waveform bars.
+/// Decorative: it carries no meaning of its own, so screen readers skip it.
+class ScBrandMark extends StatelessWidget {
+  const ScBrandMark({super.key, this.size = 36});
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => ExcludeSemantics(
+    child: SizedBox(
+      width: size,
+      height: size,
+      child: const CustomPaint(painter: _BrandMarkPainter()),
+    ),
+  );
+}
+
+class _BrandMarkPainter extends CustomPainter {
+  const _BrandMarkPainter();
+
+  // Geometry on the icon's 1024 x 1024 canvas.
+  static const _bars = [
+    (356.0, 445.0, 94.0),
+    (424.0, 399.0, 186.0),
+    (492.0, 360.0, 264.0),
+    (560.0, 417.0, 150.0),
+    (628.0, 455.0, 74.0),
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final k = size.width / 1024;
+    canvas.scale(k);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(0, 0, 1024, 1024),
+        const Radius.circular(224),
+      ),
+      Paint()..color = Sc.accent,
+    );
+    final bubble = Path()
+      ..moveTo(390, 280)
+      ..lineTo(634, 280)
+      ..cubicTo(708, 280, 752, 324, 752, 398)
+      ..lineTo(752, 586)
+      ..cubicTo(752, 660, 708, 704, 634, 704)
+      ..lineTo(478, 704)
+      ..lineTo(342, 774)
+      ..lineTo(342, 694)
+      ..cubicTo(296, 678, 272, 640, 272, 586)
+      ..lineTo(272, 398)
+      ..cubicTo(272, 324, 316, 280, 390, 280)
+      ..close();
+    canvas.drawPath(bubble, Paint()..color = Sc.bg);
+    final ink = Paint()..color = Sc.ink;
+    for (final (x, y, h) in _bars) {
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(x, y, 40, h),
+          const Radius.circular(20),
+        ),
+        ink,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
 /// Small uppercase label above a title.
 class ScEyebrow extends StatelessWidget {
   const ScEyebrow(this.text, {super.key});

@@ -46,7 +46,9 @@ void main() {
 
     expect(find.text('Hello.'), findsOneWidget);
     expect(find.text('YOUR DAY AT A GLANCE'), findsOneWidget);
-    expect(find.text('Circuit'), findsWidgets);
+    // The Circuit indicator is the device icon, not the word.
+    expect(find.byType(ScDeviceMark), findsWidgets);
+    expect(find.text('Circuit'), findsNothing);
     for (final label in ['Home', 'Notes', 'Tasks', 'Settings']) {
       expect(find.text(label), findsWidgets);
     }
