@@ -43,6 +43,9 @@ class PhoneRecorderService : Service() {
         const val actionStop = "com.valay.circuit.short_circuit.PHONE_RECORD_STOP"
         const val actionDiscard = "com.valay.circuit.short_circuit.PHONE_RECORD_DISCARD"
 
+        /** The widget's button: starts a recording, or stops and saves the one running. */
+        const val actionToggle = "com.valay.circuit.short_circuit.PHONE_RECORD_TOGGLE"
+
         const val partSeconds = 60
         const val maxParts = 9999 // about 166 hours; note numbers are one per part
         private const val sampleRate = 16000
@@ -50,34 +53,90 @@ class PhoneRecorderService : Service() {
         private const val channelId = "phone_recorder"
         private const val notificationId = 43
         private const val preferencesName = "circuit_phone_recorder"
+        private const val queuePreferences = "circuit_phone_recorder_queue"
 
         @Volatile var listener: ((Map<String, Any?>) -> Unit)? = null
 
         /** The latest state, for a screen that opens while a recording is running. */
         @Volatile var snapshot: Map<String, Any?> = mapOf("state" to "idle")
 
-        /** A recording that ended while the app was not listening, until the app saves it. */
-        fun pending(context: Context): Map<String, Any?>? {
-            val prefs = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-            val parts = prefs.getString("parts", null)?.split('\n')?.filter { it.isNotEmpty() } ?: return null
-            if (parts.isEmpty()) return null
-            if (snapshot["state"] == "recording" || snapshot["state"] == "paused") return null
-            return mapOf(
-                "parts" to parts,
-                "keyId" to prefs.getInt("keyId", 0),
-                "startedAt" to prefs.getLong("startedAt", 0L),
-                "durationMs" to prefs.getLong("durationMs", 0L),
-                "reason" to (prefs.getString("reason", null) ?: "interrupted"),
-            )
+        /** True from the moment a recording begins until it has been finished. */
+        @Volatile var active = false
+
+        /** Recordings that ended while the app was not listening, until the app saves each. */
+        fun pending(context: Context): List<Map<String, Any?>> {
+            val queued = PendingQueue.parse(
+                context.getSharedPreferences(queuePreferences, Context.MODE_PRIVATE).getString("queue", null),
+            ).toMutableList()
+            if (!active) {
+                // A recording cut short by the system leaves its parts in the in-progress slot.
+                val slot = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+                val parts = slot.getString("parts", null)?.split('\n')?.filter { it.isNotEmpty() }.orEmpty()
+                if (parts.isNotEmpty() && queued.none { it.parts.first() == parts.first() }) {
+                    queued.add(PendingRecording(parts, slot.getInt("keyId", 0), slot.getLong("startedAt", 0L), 0L, "interrupted"))
+                }
+            }
+            return queued.map {
+                mapOf(
+                    "parts" to it.parts,
+                    "keyId" to it.keyId,
+                    "startedAt" to it.startedAt,
+                    "durationMs" to it.durationMs,
+                    "reason" to it.reason,
+                )
+            }
         }
 
-        fun clearPending(context: Context) {
-            context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE).edit().clear().apply()
+        /** Forgets the recording whose first file is [firstPath], or all of them when null. */
+        fun clearPending(context: Context, firstPath: String? = null) {
+            val prefs = context.getSharedPreferences(queuePreferences, Context.MODE_PRIVATE)
+            val left = PendingQueue.remove(PendingQueue.parse(prefs.getString("queue", null)), firstPath)
+            prefs.edit().putString("queue", PendingQueue.serialize(left)).apply()
+            val slot = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+            val slotFirst = slot.getString("parts", null)?.split('\n')?.firstOrNull { it.isNotEmpty() }
+            if (!active && (firstPath == null || slotFirst == firstPath)) slot.edit().clear().apply()
         }
+
+        private fun addToQueue(context: Context, entry: PendingRecording) {
+            val prefs = context.getSharedPreferences(queuePreferences, Context.MODE_PRIVATE)
+            val list = PendingQueue.add(PendingQueue.parse(prefs.getString("queue", null)), entry)
+            // commit: this runs as a recording ends and the process may be about to go away
+            prefs.edit().putString("queue", PendingQueue.serialize(list)).commit()
+        }
+
+        /** The app's counter of used note numbers (shared with the Dart side, see PhoneRecordingIds). */
+        private const val flutterPreferences = "FlutterSharedPreferences"
+        private const val lastNumberKey = "flutter.phone_last_note_id"
+
+        fun lastUsedNumber(context: Context): Long =
+            try { context.getSharedPreferences(flutterPreferences, Context.MODE_PRIVATE).getLong(lastNumberKey, 0L) } catch (_: Exception) { 0L }
+
+        fun rememberNumber(context: Context, number: Long) {
+            val prefs = context.getSharedPreferences(flutterPreferences, Context.MODE_PRIVATE)
+            if (number > lastUsedNumber(context)) prefs.edit().putLong(lastNumberKey, number).commit()
+        }
+
+        /**
+         * Whether the widget may start a recording itself. It switches to "open the app, already
+         * recording" when Android refuses a direct start (until the app is next updated).
+         */
+        fun directStartBlocked(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(queuePreferences, Context.MODE_PRIVATE)
+            return prefs.getLong("blocked_for_version", -1L) == appVersion(context)
+        }
+
+        private fun markDirectStartBlocked(context: Context) {
+            context.getSharedPreferences(queuePreferences, Context.MODE_PRIVATE).edit()
+                .putLong("blocked_for_version", appVersion(context)).apply()
+        }
+
+        private fun appVersion(context: Context): Long = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode
+        } catch (_: Exception) { 0L }
 
         fun send(context: Context, action: String, configure: Intent.() -> Unit = {}) {
             val intent = Intent(context, PhoneRecorderService::class.java).setAction(action).apply(configure)
-            if (action == actionStart && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if ((action == actionStart || action == actionToggle) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
@@ -89,6 +148,10 @@ class PhoneRecorderService : Service() {
     private var thread: Thread? = null
     private var writer: PartedNoteWriter? = null
     private var directory: File? = null
+    private var currentKeyId = 0
+    private var fromWidget = false
+    private var silenceChecked = false
+    private var widgetPaused = false
     private var startedAt = 0L
     private var notifiedSecond = -1L
     private var notifiedPaused = false
@@ -118,6 +181,10 @@ class PhoneRecorderService : Service() {
         override fun run() {
             if (running) {
                 publish(if (paused) "paused" else "recording")
+                if (paused != widgetPaused) {
+                    widgetPaused = paused
+                    RecordWidgetProvider.refresh(this@PhoneRecorderService)
+                }
                 val second = samples / sampleRate
                 if (second != notifiedSecond || paused != notifiedPaused) {
                     notifiedSecond = second
@@ -133,7 +200,8 @@ class PhoneRecorderService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            actionStart -> start(intent)
+            actionStart -> { fromWidget = false; start(intent) }
+            actionToggle -> if (running) finishReason = "stopped" else startFromWidget()
             actionPause -> pauseRequested = true
             actionResume -> { interrupted = false; pauseRequested = false }
             actionStop -> finishReason = "stopped"
@@ -141,7 +209,7 @@ class PhoneRecorderService : Service() {
             else -> {}
         }
         // A button tapped after the recording already ended must not leave an idle service.
-        if (!running && intent?.action != actionStart) stopSelf()
+        if (!running && intent?.action != actionStart && intent?.action != actionToggle) stopSelf()
         return START_NOT_STICKY
     }
 
@@ -149,7 +217,10 @@ class PhoneRecorderService : Service() {
         if (running) return
         // A service started with startForegroundService must show its notification, even
         // when it is about to give up, or Android ends the whole app.
-        startForegroundNow()
+        if (!startForegroundNow()) {
+            fail("microphone")
+            return
+        }
         val path = intent.getStringExtra("path")
         val key = intent.getStringExtra("key")?.let { Base64.decode(it, Base64.NO_WRAP) }
         val keyId = intent.getIntExtra("keyId", 0)
@@ -158,6 +229,35 @@ class PhoneRecorderService : Service() {
             fail("setup")
             return
         }
+        begin(path, key, keyId, noteId)
+    }
+
+    /**
+     * Starts a recording with no app on screen, from the home-screen widget. The key and the
+     * note number come from the phone itself (see PhoneKeyStore and PhoneNumbering), since the
+     * app that normally supplies them is not running.
+     */
+    private fun startFromWidget() {
+        if (running) return
+        fromWidget = true
+        if (!startForegroundNow()) {
+            // Android would not allow a microphone service to start from here.
+            widgetFailure("blocked")
+            fail("blocked")
+            return
+        }
+        val stored = PhoneKeyStore.load(this)
+        if (stored == null) {
+            widgetFailure("key")
+            fail("key")
+            return
+        }
+        val number = PhoneNumbering.next(lastUsedNumber(this), System.currentTimeMillis() / 1000)
+        rememberNumber(this, number.toLong())
+        begin(File(filesDir, "phone-note-$number.cnote").absolutePath, stored.second, stored.first, number)
+    }
+
+    private fun begin(path: String, key: ByteArray, keyId: Int, noteId: Int) {
         val target = File(path)
         val folder = target.parentFile ?: filesDir
         folder.mkdirs()
@@ -173,6 +273,8 @@ class PhoneRecorderService : Service() {
             return
         }
         directory = folder
+        currentKeyId = keyId
+        silenceChecked = false
         startedAt = System.currentTimeMillis()
         val prefs = getSharedPreferences(preferencesName, MODE_PRIVATE)
         prefs.edit().clear().putInt("keyId", keyId).putLong("startedAt", startedAt).apply()
@@ -188,6 +290,9 @@ class PhoneRecorderService : Service() {
         discard = false
         finishReason = null
         running = true
+        active = true
+        widgetPaused = false
+        RecordWidgetProvider.refresh(this)
         requestFocus()
         main.post(ticker)
         thread = Thread({ capture(record) }, "phone-recorder").also { it.start() }
@@ -239,6 +344,16 @@ class PhoneRecorderService : Service() {
                     writer?.append(buffer, read)
                     samples += read / 2
                     level = peak(buffer, read)
+                }
+                if (fromWidget && !silenceChecked && samples >= sampleRate * 3L / 2) {
+                    silenceChecked = true
+                    if (isSilenced(record)) {
+                        // Android is handing a recording started from the widget silence: nothing
+                        // useful is being kept, so discard it and send the person to the app.
+                        reason = "blocked"
+                        discard = true
+                        break
+                    }
                 }
                 if ((writer?.partCount ?: 0) >= maxParts) {
                     reason = "limit"
@@ -293,11 +408,14 @@ class PhoneRecorderService : Service() {
         writer = null
         abandonFocus()
         val prefs = getSharedPreferences(preferencesName, MODE_PRIVATE)
-        if (discard || parts.isEmpty()) {
-            prefs.edit().clear().apply()
-        } else {
-            prefs.edit().putLong("durationMs", durationMs).putString("reason", reason).apply()
+        if (!discard && parts.isNotEmpty()) {
+            addToQueue(this, PendingRecording(parts, currentKeyId, startedAt, durationMs, reason))
+            // The next recording must never reuse a number any of these parts has.
+            parts.mapNotNull { Regex("phone-note-(\\d+)\\.cnote$").find(it)?.groupValues?.get(1)?.toLongOrNull() }
+                .maxOrNull()?.let { rememberNumber(this, it) }
         }
+        prefs.edit().clear().apply()
+        if (reason == "blocked") widgetFailure("blocked")
         main.post {
             main.removeCallbacks(ticker)
             val done = mapOf(
@@ -308,6 +426,8 @@ class PhoneRecorderService : Service() {
                 "startedAt" to startedAt,
             )
             snapshot = mapOf("state" to "idle")
+            active = false
+            RecordWidgetProvider.refresh(this)
             listener?.invoke(done)
             // A new recording may already have started on this service; leave it running.
             if (!running) {
@@ -320,6 +440,8 @@ class PhoneRecorderService : Service() {
     private fun fail(reason: String) {
         main.post {
             snapshot = mapOf("state" to "idle")
+            active = false
+            RecordWidgetProvider.refresh(this)
             listener?.invoke(mapOf("state" to "failed", "reason" to reason))
             if (!running) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -363,7 +485,7 @@ class PhoneRecorderService : Service() {
         audioFocus = null
     }
 
-    private fun startForegroundNow() {
+    private fun startForegroundNow(): Boolean {
         val manager = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager.createNotificationChannel(
@@ -371,11 +493,57 @@ class PhoneRecorderService : Service() {
             )
         }
         val notification = buildNotification(false, 0)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        } else {
-            startForeground(notificationId, notification)
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            } else {
+                startForeground(notificationId, notification)
+            }
+            true
+        } catch (error: Exception) {
+            // Android refuses a microphone service when the app is not in a state that allows it.
+            Log.w("PhoneRecorder", "Could not start as a microphone service: ${error.message}")
+            false
         }
+    }
+
+    private fun isSilenced(record: AudioRecord): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        return try {
+            getSystemService(AudioManager::class.java).activeRecordingConfigurations
+                .any { it.clientAudioSessionId == record.audioSessionId && it.isClientSilenced }
+        } catch (_: Exception) { false }
+    }
+
+    /**
+     * A recording started from the widget could not happen. Remember that, so the widget opens
+     * the app instead from now on, and tell the person what to do.
+     */
+    private fun widgetFailure(reason: String) {
+        if (reason == "blocked") markDirectStartBlocked(this)
+        val text = when (reason) {
+            "key" -> "Open Short-Circuit once to finish setting up the widget."
+            else -> "Android would not let the widget record. Tap to record in the app."
+        }
+        val open = PendingIntent.getActivity(
+            this, 7,
+            RecordWidgetProvider.openAppIntent(this),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val manager = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(NotificationChannel(channelId, "Voice recording", NotificationManager.IMPORTANCE_LOW))
+        }
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(this, channelId) else Notification.Builder(this)
+        manager.notify(
+            notificationId + 1,
+            builder.setSmallIcon(R.drawable.ic_stat_circuit)
+                .setContentTitle("Recording did not start")
+                .setContentText(text)
+                .setContentIntent(open)
+                .setAutoCancel(true)
+                .build(),
+        )
     }
 
     private fun updateNotification() {

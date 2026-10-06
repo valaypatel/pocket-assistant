@@ -82,6 +82,8 @@ Check Android toolchains, signing, the existing Firebase distribution workflow, 
 
 Do the widget test first, before any other work. Build a throwaway app with one widget button that starts a microphone recording service while the app is closed and the screen is locked. Run it on every Android version we can reach and record the result in a table (version, worked or blocked, reason). Android 12 and newer limit starting a microphone service from the background, so do not assume it works. If a version blocks it, or the workaround is too complex, use the agreed fallback for that version: the widget opens the recorder, which starts recording straight away. Note the result in the table; no further approval is needed.
 
+**Result (6 October 2026).** Samsung SM-S942B, Android 17 (API 37): tapping the widget with the app closed starts the microphone service directly. Android allowed the foreground start and reported the recording as not silenced. The note appears in the app the next time it opens. No other Android version has been tried; the Firebase Test Lab check for an older version is still to do. If a version refuses the start, or the microphone is silenced, the widget opens the app already recording and remembers that until the next update.
+
 Gate: a tested platform capability matrix and confirmed release boundaries.
 
 ### 1. Separate the note pipeline from Circuit

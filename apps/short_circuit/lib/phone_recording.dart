@@ -61,6 +61,8 @@ class PhoneRecordingIds {
     SharedPreferences preferences, {
     DateTime? now,
   }) async {
+    // The widget starts recordings without the app and advances this counter natively.
+    await preferences.reload();
     final number = numberAfter(
       preferences.getInt(lastNotePreference) ?? 0,
       now ?? DateTime.now(),
@@ -79,6 +81,7 @@ class PhoneRecordingIds {
     SharedPreferences preferences,
     Iterable<String> parts,
   ) async {
+    await preferences.reload();
     var last = preferences.getInt(lastNotePreference) ?? 0;
     for (final part in parts) {
       last = max(last, numberOfPart(part) ?? 0);
@@ -134,6 +137,45 @@ List<String> consecutivePartPaths(
     parts.add(path);
   }
   return parts;
+}
+
+/// A recording that ended while the app was not listening, as the recorder reports it.
+class PendingPhoneRecording {
+  const PendingPhoneRecording({
+    required this.parts,
+    required this.durationMs,
+    required this.startedAt,
+    this.reason,
+  });
+
+  final List<String> parts;
+  final int durationMs;
+  final int startedAt;
+  final String? reason;
+
+  /// Reads the recorder's list. Anything that is not a recording with files is skipped, so a
+  /// damaged entry can never stop the rest from being saved.
+  static List<PendingPhoneRecording> parseAll(Object? raw) {
+    if (raw is! List) return const [];
+    final recordings = <PendingPhoneRecording>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final parts = (item['parts'] as List<dynamic>? ?? const [])
+          .map((part) => part.toString())
+          .where((part) => part.isNotEmpty)
+          .toList();
+      if (parts.isEmpty) continue;
+      recordings.add(
+        PendingPhoneRecording(
+          parts: parts,
+          durationMs: (item['durationMs'] as num?)?.toInt() ?? 0,
+          startedAt: (item['startedAt'] as num?)?.toInt() ?? 0,
+          reason: item['reason'] as String?,
+        ),
+      );
+    }
+    return recordings;
+  }
 }
 
 String phoneRecordingClock(int milliseconds) {
@@ -226,8 +268,44 @@ extension _PhoneRecording on _CircuitHomePageState {
     _phoneRecorderSubscription = _phoneRecorderEvents
         .receiveBroadcastStream()
         .listen(_handlePhoneRecorderEvent, onError: (Object _) {});
-    unawaited(_repairPhoneNoteParts().then((_) => _recoverPhoneRecording()));
+    unawaited(_syncPhoneKeyToWidget());
+    unawaited(
+      _repairPhoneNoteParts()
+          .then((_) => _recoverPhoneRecording())
+          .then((_) => _checkLaunchAction()),
+    );
   }
+
+  /// Hands this phone's recording key to the recorder, which keeps its own protected copy so
+  /// the home-screen widget can start a recording with the app closed. Safe to repeat.
+  Future<void> _syncPhoneKeyToWidget() async {
+    try {
+      final ids = await PhoneRecordingIds.key(
+        await SharedPreferences.getInstance(),
+      );
+      await _phoneRecorder.invokeMethod<void>('saveKey', {
+        'keyId': ids.keyId,
+        'key': base64Encode(ids.key),
+      });
+    } on PlatformException {
+      // Without it the widget opens the app instead, which still records.
+    }
+  }
+
+  /// The widget opened the app because it could not record by itself: start recording now.
+  Future<void> _checkLaunchAction() async {
+    try {
+      final action = await _phoneRecorder.invokeMethod<String>('launchAction');
+      if (action == 'record' && !_phoneRecordingActive) {
+        await _startPhoneRecording();
+      }
+    } on PlatformException {
+      // Nothing was asked for.
+    }
+  }
+
+  Future<void> _clearPendingPhone(String firstPath) =>
+      _phoneRecorder.invokeMethod<void>('clearPending', {'path': firstPath});
 
   /// A recording that ended while the app was closed (stopped from the notification,
   /// reached its limit, or the system ended the service) is still on disk. Save it.
@@ -241,18 +319,18 @@ extension _PhoneRecording on _CircuitHomePageState {
         _phoneRecording.value = Map<String, dynamic>.from(snapshot);
         return;
       }
-      final pending = await _phoneRecorder.invokeMapMethod<String, dynamic>(
-        'pending',
+      // Every recording that ended while the app was away, including ones the widget made.
+      final pending = PendingPhoneRecording.parseAll(
+        await _phoneRecorder.invokeMethod<List<dynamic>>('pending'),
       );
-      if (pending == null) return;
-      await _saveFinishedPhoneRecording(
-        parts: (pending['parts'] as List<dynamic>? ?? const [])
-            .map((part) => part.toString())
-            .toList(),
-        durationMs: (pending['durationMs'] as num?)?.toInt() ?? 0,
-        startedAt: (pending['startedAt'] as num?)?.toInt() ?? 0,
-        reason: pending['reason'] as String?,
-      );
+      for (final recording in pending) {
+        await _saveFinishedPhoneRecording(
+          parts: recording.parts,
+          durationMs: recording.durationMs,
+          startedAt: recording.startedAt,
+          reason: recording.reason,
+        );
+      }
     } on PlatformException {
       // The recorder is only unavailable if the native side is missing.
     }
@@ -347,7 +425,6 @@ extension _PhoneRecording on _CircuitHomePageState {
       case 'discarded':
         _phoneRecording.value = null;
         _closePhoneRecorderSheet();
-        unawaited(_phoneRecorder.invokeMethod<void>('clearPending'));
       case 'stopped':
         _phoneRecording.value = null;
         _closePhoneRecorderSheet();
@@ -408,7 +485,7 @@ extension _PhoneRecording on _CircuitHomePageState {
       for (final path in present) {
         await File(path).delete();
       }
-      await _phoneRecorder.invokeMethod<void>('clearPending');
+      await _clearPendingPhone(parts.first);
       if (mounted && reason == 'stopped') {
         ScaffoldMessenger.of(
           context,
@@ -422,7 +499,7 @@ extension _PhoneRecording on _CircuitHomePageState {
       parts,
     );
     if (_notes.any((note) => note.audioPath == path)) {
-      await _phoneRecorder.invokeMethod<void>('clearPending');
+      await _clearPendingPhone(parts.first);
       return;
     }
     final note = noteForPhoneRecording(
@@ -440,7 +517,7 @@ extension _PhoneRecording on _CircuitHomePageState {
       jsonEncode(notes.map((item) => item.toJson()).toList()),
     );
     // Only now is the note stored, so only now is the recording no longer "pending".
-    await _phoneRecorder.invokeMethod<void>('clearPending');
+    await _clearPendingPhone(parts.first);
     if (mounted) _update(() => _notes = notes);
     Telemetry.event('phone_record_saved', {
       'minutes': (lengthMs / 60000).round(),
