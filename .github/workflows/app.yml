@@ -6,12 +6,14 @@ on:
       - "apps/short_circuit/**"
       - "docs/security/**" # the test vectors both sides check against
       - ".github/workflows/app.yml"
+      - ".github/scripts/release-notes.sh"
   push:
-    branches: [main]
+    branches: [main, development]
     paths:
       - "apps/short_circuit/**"
       - "docs/security/**" # the test vectors both sides check against
       - ".github/workflows/app.yml"
+      - ".github/scripts/release-notes.sh"
     tags: ["app-v*"]
   workflow_dispatch:
 
@@ -201,15 +203,26 @@ jobs:
 
   distribute:
     name: Send to Firebase App Distribution
-    # Release tags and manual runs only (not every merge), and only once Firebase is set
-    # up (see docs/ci-cd.md). The build is the signed one made by the apk job.
+    # Every push to development (so each change is tried on a phone before it reaches main),
+    # release tags and manual runs. Not main: that is the production branch, released by tag.
+    # Only once Firebase is set up (see docs/ci-cd.md). The build is the signed one made by the
+    # apk job.
     if: >-
-      (startsWith(github.ref, 'refs/tags/app-v') || github.event_name == 'workflow_dispatch')
+      (startsWith(github.ref, 'refs/tags/app-v')
+        || github.event_name == 'workflow_dispatch'
+        || (github.event_name == 'push' && github.ref == 'refs/heads/development'))
       && vars.FIREBASE_APP_ID != ''
     needs: apk
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read # to read the pull request this build came from, for the release notes
     steps:
+      # Before the download, which this would otherwise clean away.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: short-circuit-apk
@@ -220,10 +233,24 @@ jobs:
           [[ "$SIGNED" == "true" ]] || { echo "::error::This build uses a throwaway debug key and cannot update the app on your phone. Set the signing secrets first."; exit 1; }
       - id: apk
         run: echo "path=$(ls short-circuit-*.apk | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Write the release notes
+        # The build, then the "How to test" section of the pull request(s) it came from.
+        # Best effort: a build with no notes is still sent.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.apk.outputs.version }}
+        run: |
+          gh api "repos/$REPO/commits/$SHA/pulls" 2>/dev/null > prs.json || echo '[]' > prs.json
+          bash .github/scripts/release-notes.sh < prs.json | head -c 8000 > release-notes.txt || true
+          [[ -s release-notes.txt ]] || echo "Short-Circuit $VERSION from $REF_NAME (${SHA::7})" > release-notes.txt
+          cat release-notes.txt
       - uses: wzieba/Firebase-Distribution-Github-Action@bd494989dd4bec0343f78adee87fe66e48279ad6 # v1.7.1
         with:
           appId: ${{ vars.FIREBASE_APP_ID }}
           serviceCredentialsFileContent: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
           groups: ${{ vars.FIREBASE_TESTER_GROUP || 'testers' }}
           file: ${{ steps.apk.outputs.path }}
-          releaseNotes: "Short-Circuit ${{ needs.apk.outputs.version }} from ${{ github.ref_name }} (${{ github.sha }})"
+          releaseNotesFile: release-notes.txt
