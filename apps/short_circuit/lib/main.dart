@@ -68,6 +68,31 @@ bool shouldReplaceCircuitPairing({
   required bool userRequestedPairing,
 }) => isBonded && userRequestedPairing;
 
+/// 'Phone' or 'Circuit' from the recording's file: this phone's recorder names its files
+/// phone-note-<number>.cnote and Circuit's synced files circuit-note-<time>-<number>. A note
+/// Circuit has numbered, or a song clip (always taken by Circuit), is Circuit's.
+String? noteSourceOf(String? audioPath, {int? boardId, bool isSong = false}) {
+  final name = audioPath?.split('/').last ?? '';
+  if (name.startsWith('phone-note-')) return 'Phone';
+  if (name.startsWith('circuit-note-') || boardId != null || isSong) {
+    return 'Circuit';
+  }
+  return null;
+}
+
+/// The two counts Circuit shows on its own screen: notes still waiting to reach the phone,
+/// and notes that have. They are Circuit's notes only. A recording made on the phone never
+/// went through the board, so it must not appear in the board's totals.
+({int pending, int synced}) boardNoteCounts(Iterable<CircuitNote> notes) {
+  var pending = 0;
+  var synced = 0;
+  for (final note in notes) {
+    if (note.source == 'Phone') continue;
+    note.audioPath == null ? pending++ : synced++;
+  }
+  return (pending: pending, synced: synced);
+}
+
 /// What the phone's link to Circuit is doing, read from the background service's status.
 /// "Running" is not "connected": the service also runs while it is still trying.
 enum RelayLink { off, trying, connected, needsRepair }
@@ -772,6 +797,11 @@ class CircuitNote {
       : (audioPath == null ? const [] : [audioPath!]);
 
   bool get isSong => kind == 'song';
+
+  /// Where the recording was made: 'Phone' (this phone's own recorder), 'Circuit' (the board),
+  /// or null when it cannot be told (a note with no audio yet, or from an older version).
+  String? get source =>
+      noteSourceOf(audioPath, boardId: boardId, isSong: isSong);
 
   factory CircuitNote.fromJson(Map<String, dynamic> json) => CircuitNote(
     id: json['id'] as String,
@@ -2605,8 +2635,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
     final date =
         '${weekdays[now.weekday - 1]} ${now.day.toString().padLeft(2, '0')} ${months[now.month - 1]}';
-    final synced = _notes.where((note) => note.audioPath != null).length;
-    final pending = _notes.length - synced;
+    final (:pending, :synced) = boardNoteCounts(_notes);
     // Saving a note triggers this, and a sync saves one many times a second.
     // Each message makes Circuit redraw, so only send when the counts changed or
     // the periodic refresh is due.

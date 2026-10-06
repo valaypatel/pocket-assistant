@@ -105,6 +105,63 @@ void main() {
     );
   });
 
+  group(
+    'which notes Circuit counts and which are marked as from the phone',
+    () {
+      CircuitNote note(String? audio, {int? board, String kind = 'voice'}) =>
+          CircuitNote(
+            id: '${audio ?? 'x'}$board',
+            createdAt: DateTime.utc(2026, 10, 6),
+            status: 'ok',
+            audioPath: audio,
+            boardId: board,
+            kind: kind,
+          );
+
+      test(
+        'the source comes from the file, or from Circuit having numbered it',
+        () {
+          expect(note('/f/phone-note-12.cnote').source, 'Phone');
+          expect(
+            note('/f/circuit-note-1760000000-4.cnote', board: 4).source,
+            'Circuit',
+          );
+          expect(
+            note(null, board: 9).source,
+            'Circuit',
+          ); // waiting to sync from the board
+          expect(note('/f/old.wav').source, isNull);
+          expect(
+            note('/f/clip.wav', kind: 'song').source,
+            'Circuit', // a song clip is always taken by Circuit
+          );
+        },
+      );
+
+      test("Circuit's totals leave out the phone's recordings", () {
+        final counts = boardNoteCounts([
+          note('/f/circuit-note-1-1.cnote', board: 1),
+          note('/f/circuit-note-2-2.cnote', board: 2),
+          note(null, board: 3), // still waiting to sync
+          note('/f/phone-note-100.cnote'),
+          note('/f/phone-note-200.cnote'),
+          note('/f/phone-note-300.cnote'),
+        ]);
+        expect(counts.synced, 2);
+        expect(counts.pending, 1);
+      });
+
+      test('no phone notes means the totals are unchanged', () {
+        final counts = boardNoteCounts([
+          note('/f/circuit-note-1-1.cnote', board: 1),
+          note(null, board: 2),
+        ]);
+        expect((counts.pending, counts.synced), (1, 1));
+        expect(boardNoteCounts(const []), (pending: 0, synced: 0));
+      });
+    },
+  );
+
   group('a phone recording and its parts', () {
     test('a long recording keeps every part, in order', () {
       final parts = [

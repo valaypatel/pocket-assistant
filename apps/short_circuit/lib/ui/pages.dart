@@ -335,8 +335,10 @@ extension _ScPages on _CircuitHomePageState {
 
   String _noteSubtitle(CircuitNote note) {
     final local = note.createdAt.toLocal();
+    final source = note.source;
     final when =
-        '${_dayLabel(note.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}';
+        '${_dayLabel(note.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}'
+        '${source == null ? '' : ' · $source'}';
     if (note.id == _syncingNoteId) return '$when · Syncing';
     final song = note.song;
     if (note.isSong && song != null) {

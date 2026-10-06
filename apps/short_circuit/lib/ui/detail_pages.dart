@@ -592,7 +592,8 @@ class _TranscriptPageState extends State<TranscriptPage> {
               label: 'Notes',
               onBack: () => Navigator.pop(context),
               eyebrow:
-                  '${_dayLabel(widget.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}',
+                  '${_dayLabel(widget.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}'
+                  '${noteSourceOf(widget.audioPath) == null ? '' : ' · ${noteSourceOf(widget.audioPath)}'}',
             ),
             ScTitle(live?.title ?? _title),
             const SizedBox(height: 8),
