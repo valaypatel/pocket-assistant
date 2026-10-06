@@ -48,6 +48,9 @@ jobs:
       - name: Analyze (errors and warnings fail; infos do not)
         run: flutter analyze --no-fatal-infos
       - run: flutter test
+      - name: Check the phone's note encryption against the shared test vectors
+        working-directory: apps/short_circuit/android
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
 
   apk:
     name: Build release APK

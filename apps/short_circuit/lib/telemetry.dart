@@ -27,6 +27,9 @@ class Telemetry {
     'song_identified',
     'pairing_repair_needed',
     'test_report',
+    'phone_record_started',
+    'phone_record_saved',
+    'phone_record_failed',
   };
   static final _word = RegExp(r'^[a-z0-9_]{1,24}$');
 

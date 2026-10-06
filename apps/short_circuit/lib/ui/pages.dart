@@ -88,6 +88,30 @@ extension _ScPages on _CircuitHomePageState {
       ? _wifiDetail.trim()
       : null;
 
+  /// Records on this phone, no Circuit needed. While a recording runs it shows the
+  /// time and reopens the controls.
+  Widget _phoneRecordButton() => ValueListenableBuilder<Map<String, dynamic>?>(
+    valueListenable: _phoneRecording,
+    builder: (context, recording, _) {
+      final active = recording != null;
+      final elapsed = (recording?['elapsedMs'] as num?)?.toInt() ?? 0;
+      final paused = recording?['state'] == 'paused';
+      return FilledButton.icon(
+        style: FilledButton.styleFrom(
+          minimumSize: const Size(0, 54),
+          backgroundColor: Sc.accent,
+        ),
+        onPressed: _startPhoneRecording,
+        icon: Icon(active ? LucideIcons.audioLines : LucideIcons.mic, size: 20),
+        label: Text(
+          active
+              ? '${paused ? 'Paused' : 'Recording'} ${phoneRecordingClock(elapsed)} · tap to open'
+              : 'Record on this phone',
+        ),
+      );
+    },
+  );
+
   Widget _deviceChip() {
     final wifiColor = _wifiState == 'connected'
         ? Sc.green
@@ -597,6 +621,8 @@ extension _ScPages on _CircuitHomePageState {
         ],
       ),
       const SizedBox(height: 22),
+      _phoneRecordButton(),
+      const SizedBox(height: 14),
       _syncHealthCard(),
       _syncBanner(),
       Container(

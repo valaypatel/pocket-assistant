@@ -22,6 +22,7 @@ import 'telemetry.dart';
 part 'backup.dart';
 part 'groups.dart';
 part 'music.dart';
+part 'phone_recording.dart';
 part 'secure_notes.dart';
 part 'ui/backup_page.dart';
 part 'ui/chat_page.dart';
@@ -879,7 +880,8 @@ class CircuitHomePage extends StatefulWidget {
   State<CircuitHomePage> createState() => _CircuitHomePageState();
 }
 
-class _CircuitHomePageState extends State<CircuitHomePage> {
+class _CircuitHomePageState extends State<CircuitHomePage>
+    with _PhoneRecordingState {
   final _wifiSsidController = TextEditingController();
   final _wifiPasswordController = TextEditingController();
   final _noteSearchController = TextEditingController();
@@ -992,7 +994,10 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       onError: (Object error) => _setStatus('Scan failed: $error'),
     );
     _restoreLastCircuit();
-    _loadNotes().then((_) => _reconcileSyncedNotes());
+    _loadNotes().then((_) {
+      _reconcileSyncedNotes();
+      _listenForPhoneRecording();
+    });
     unawaited(_loadGroups());
     unawaited(_relayChannel.invokeMethod<bool>('requestLocalNetwork'));
     _loadPreferences();
@@ -1034,6 +1039,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     _scanSubscription?.cancel();
     _connectionSubscription?.cancel();
     _relaySubscription?.cancel();
+    _phoneRecorderSubscription?.cancel();
+    _phoneRecording.dispose();
     _audioStatusSubscription?.cancel();
     _relayStatusTimer?.cancel();
     _homeStatusTimer?.cancel();
