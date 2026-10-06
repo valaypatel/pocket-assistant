@@ -92,9 +92,10 @@ class CircuitRelayService : Service() {
         }
 
         fun writeToCircuit(value: String): Boolean = activeService?.writeCommand(value) ?: false
-        fun playSyncedRecording(path: String): Boolean = activeService?.playRecording(path) ?: false
-        fun playWavBytes(bytes: ByteArray): Boolean = activeService?.playBytes(bytes) ?: false
-        fun stopPlayback() { activeService?.stopPlayback() }
+        // Playback does not need the relay to be running; see NotePlayer.
+        fun playSyncedRecording(path: String): Boolean = NotePlayer.playFile(path)
+        fun playWavBytes(bytes: ByteArray): Boolean = NotePlayer.playBytes(bytes)
+        fun stopPlayback() { NotePlayer.stop() }
         fun playLatestSyncedRecording(): Boolean = latestSyncedFile?.let(::playSyncedRecording) ?: false
         fun clearAudio(): Boolean = activeService?.clearAudioFiles() ?: false
 
@@ -151,7 +152,6 @@ class CircuitRelayService : Service() {
     private var syncExpectedBytes = 0L
     private var syncReceivedBytes = 0L
     private var syncCompleteStatus: String? = null
-    private var mediaPlayer: android.media.MediaPlayer? = null
     private val reconnectRunnable = Runnable { circuitAddress?.let(::connect) }
     // Turning Bluetooth off kills the connection without a callback, and nothing then
     // brought it back when Bluetooth returned. Follow the adapter instead.
@@ -740,55 +740,6 @@ class CircuitRelayService : Service() {
             ?.filter { isNoteFile(it) }
             ?.forEach { it.delete() }
         return writeCommand("@audio-clear")
-    }
-
-    private fun playRecording(path: String): Boolean = try {
-        val file = File(path)
-        if (!file.exists()) return false
-        stopPlayback()
-        mediaPlayer = android.media.MediaPlayer().apply {
-            setDataSource(file.absolutePath)
-            setOnCompletionListener {
-                release()
-                if (mediaPlayer === this) mediaPlayer = null
-            }
-            prepare()
-            start()
-        }
-        true
-    } catch (_: Exception) { false }
-
-    /** Plays a WAV held in memory (an encrypted note the app has opened), so no plain file is written. */
-    private fun playBytes(wav: ByteArray): Boolean = try {
-        stopPlayback()
-        val source = object : android.media.MediaDataSource() {
-            override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
-                if (position >= wav.size) return -1
-                val count = minOf(size, wav.size - position.toInt())
-                System.arraycopy(wav, position.toInt(), buffer, offset, count)
-                return count
-            }
-            override fun getSize(): Long = wav.size.toLong()
-            override fun close() {}
-        }
-        mediaPlayer = android.media.MediaPlayer().apply {
-            setDataSource(source)
-            setOnCompletionListener {
-                release()
-                if (mediaPlayer === this) mediaPlayer = null
-            }
-            prepare()
-            start()
-        }
-        true
-    } catch (_: Exception) { false }
-
-    private fun stopPlayback() {
-        mediaPlayer?.let {
-            try { it.stop() } catch (_: Exception) { }
-            it.release()
-        }
-        mediaPlayer = null
     }
 
     private fun hasBluetoothPermission() = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
