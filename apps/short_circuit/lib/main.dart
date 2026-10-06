@@ -57,6 +57,15 @@ bool shouldStartCircuitPairing({
   required bool userRequestedPairing,
 }) => !isBonded && userRequestedPairing;
 
+/// Tapping Connect on a Circuit found by scanning means "pair this one". If Android
+/// already lists it as paired, that record may be stale (the board forgot the phone, but
+/// the phone did not forget the board) and Samsung hides such devices from its settings,
+/// so the person cannot remove it by hand. The old record is replaced, as Repair does.
+bool shouldReplaceCircuitPairing({
+  required bool isBonded,
+  required bool userRequestedPairing,
+}) => isBonded && userRequestedPairing;
+
 /// Whether a note should get its AI review without being asked: only with an AI service set up
 /// and the Settings toggle on. The "Run AI review" button always works.
 bool shouldEnrichAutomatically({
@@ -1516,8 +1525,15 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     });
     try {
       await FlutterBluePlus.stopScan();
-      final isBonded =
-          await device.bondState.first == BluetoothBondState.bonded;
+      var isBonded = await device.bondState.first == BluetoothBondState.bonded;
+      if (shouldReplaceCircuitPairing(
+        isBonded: isBonded,
+        userRequestedPairing: userRequestedPairing,
+      )) {
+        _setStatus('Replacing the old pairing…');
+        await _removeAndroidPairing(device);
+        isBonded = false;
+      }
       if (!isBonded && !userRequestedPairing) {
         debugPrint('Short-Circuit: not bonded; waiting for Repair pairing');
         if (mounted) {
@@ -1607,6 +1623,18 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     }
   }
 
+  /// Removes Android's pairing record for this Circuit. Nothing on the board or in the
+  /// notes changes; the next pairing makes a new record.
+  Future<void> _removeAndroidPairing(BluetoothDevice device) async {
+    try {
+      if (await device.bondState.first == BluetoothBondState.bonded) {
+        await device.removeBond();
+      }
+    } catch (error) {
+      debugPrint('Short-Circuit: could not clear the old pairing: $error');
+    }
+  }
+
   /// The user's choice to pair again. Only Android's own pairing record is replaced:
   /// notes, keys and settings on the phone and the board are not touched.
   Future<void> _repairPairing() async {
@@ -1616,13 +1644,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       return;
     }
     final device = BluetoothDevice.fromId(deviceId);
-    try {
-      if (await device.bondState.first == BluetoothBondState.bonded) {
-        await device.removeBond();
-      }
-    } catch (error) {
-      debugPrint('Short-Circuit: could not clear the old pairing: $error');
-    }
+    await _removeAndroidPairing(device);
     await _connect(device, savedReconnect: true, userRequestedPairing: true);
   }
 

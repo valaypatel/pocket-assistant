@@ -17,6 +17,28 @@ void main() {
     );
   });
 
+  test('tapping Connect replaces an old pairing instead of reusing it', () {
+    // The record Android holds may be stale, and Samsung hides it from its settings.
+    expect(
+      shouldReplaceCircuitPairing(isBonded: true, userRequestedPairing: true),
+      isTrue,
+    );
+    // An automatic reconnect never touches pairing.
+    expect(
+      shouldReplaceCircuitPairing(isBonded: true, userRequestedPairing: false),
+      isFalse,
+    );
+    expect(
+      shouldReplaceCircuitPairing(isBonded: false, userRequestedPairing: true),
+      isFalse,
+    );
+    // After the old one is removed, pairing starts.
+    expect(
+      shouldStartCircuitPairing(isBonded: false, userRequestedPairing: true),
+      isTrue,
+    );
+  });
+
   test('extracts readable fields from Gemini JSON instead of showing JSON', () {
     final parsed = parseGeminiTranscriptionPayload(
       '```json\n{"category":"task","title":"Buy milk",'
