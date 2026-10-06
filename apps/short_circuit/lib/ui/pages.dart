@@ -1979,7 +1979,13 @@ extension _ScPages on _CircuitHomePageState {
       },
       child: Scaffold(
         body: SafeArea(bottom: false, child: body),
-        bottomNavigationBar: ScNavBar(index: tab, onSelect: _selectTab),
+        bottomNavigationBar: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _nowPlayingBar(),
+            ScNavBar(index: tab, onSelect: _selectTab),
+          ],
+        ),
       ),
     );
   }

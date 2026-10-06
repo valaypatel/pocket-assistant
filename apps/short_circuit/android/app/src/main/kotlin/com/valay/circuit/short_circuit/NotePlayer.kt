@@ -68,6 +68,40 @@ object NotePlayer {
     }
 
     @Synchronized
+    fun pause(): Boolean = try {
+        val current = player
+        if (current != null && state == "playing") {
+            current.pause()
+            state = "paused"
+            true
+        } else false
+    } catch (_: Exception) { false }
+
+    @Synchronized
+    fun resume(): Boolean = try {
+        val current = player
+        if (current != null && state == "paused") {
+            current.start()
+            state = "playing"
+            true
+        } else false
+    } catch (_: Exception) { false }
+
+    @Synchronized
+    fun seekTo(milliseconds: Int) {
+        try { player?.seekTo(milliseconds.coerceAtLeast(0)) } catch (_: Exception) { }
+    }
+
+    /** What the app's player bar shows: the state, where it is, and how long the note is. */
+    @Synchronized
+    fun status(): Map<String, Any> {
+        val current = player
+        val position = try { current?.currentPosition ?: 0 } catch (_: Exception) { 0 }
+        val duration = try { current?.duration ?: 0 } catch (_: Exception) { 0 }
+        return mapOf("state" to state, "positionMs" to position, "durationMs" to duration)
+    }
+
+    @Synchronized
     fun stop() {
         player?.let {
             try { it.stop() } catch (_: Exception) { }

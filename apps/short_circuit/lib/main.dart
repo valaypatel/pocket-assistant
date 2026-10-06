@@ -22,6 +22,7 @@ import 'telemetry.dart';
 part 'backup.dart';
 part 'groups.dart';
 part 'music.dart';
+part 'now_playing.dart';
 part 'phone_recording.dart';
 part 'secure_notes.dart';
 part 'ui/backup_page.dart';
@@ -890,7 +891,7 @@ class CircuitHomePage extends StatefulWidget {
 }
 
 class _CircuitHomePageState extends State<CircuitHomePage>
-    with _PhoneRecordingState {
+    with _PhoneRecordingState, _NowPlayingState {
   final _wifiSsidController = TextEditingController();
   final _wifiPasswordController = TextEditingController();
   final _noteSearchController = TextEditingController();
@@ -1050,6 +1051,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     _relaySubscription?.cancel();
     _phoneRecorderSubscription?.cancel();
     _phoneRecording.dispose();
+    _nowPlayingTimer?.cancel();
+    _nowPlaying.dispose();
     _audioStatusSubscription?.cancel();
     _relayStatusTimer?.cancel();
     _homeStatusTimer?.cancel();
@@ -2337,6 +2340,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     } on NoteSecurityException catch (error) {
       _setStatus('$error');
       return;
+    }
+    if (started == true) {
+      final note = _notes.where((n) => n.audioPath == path).firstOrNull;
+      _startNowPlaying(
+        (note?.title?.trim().isNotEmpty ?? false) ? note!.title! : 'Voice note',
+      );
     }
     _setStatus(
       started == true
