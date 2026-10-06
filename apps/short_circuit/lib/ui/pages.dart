@@ -1317,6 +1317,12 @@ extension _ScPages on _CircuitHomePageState {
     if (confirmed != true) return;
     if (_relayActive) await _stopPhoneRelay();
     await _device?.disconnect();
+    // Forget means forget: also drop Android's pairing record, which Samsung's own
+    // Bluetooth settings do not list for this kind of device.
+    final forgetId = _savedCircuitId ?? _device?.remoteId.str;
+    if (forgetId != null) {
+      await _removeAndroidPairing(BluetoothDevice.fromId(forgetId));
+    }
     final preferences = await SharedPreferences.getInstance();
     await preferences.remove(_savedCircuitIdKey);
     if (!mounted) return;
