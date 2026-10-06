@@ -4,14 +4,16 @@ on:
   pull_request:
     paths:
       - "apps/short_circuit/**"
-      - "docs/security/**" # the test vectors both sides check against
+      - "docs/security/test-vectors.json" # the vectors both sides check against; the README alone does not rebuild
+      - "docs/security/reference/**"
       - ".github/workflows/app.yml"
       - ".github/scripts/release-notes.sh"
   push:
     branches: [main, development]
     paths:
       - "apps/short_circuit/**"
-      - "docs/security/**" # the test vectors both sides check against
+      - "docs/security/test-vectors.json" # the vectors both sides check against; the README alone does not rebuild
+      - "docs/security/reference/**"
       - ".github/workflows/app.yml"
       - ".github/scripts/release-notes.sh"
     tags: ["app-v*"]

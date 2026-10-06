@@ -4,13 +4,15 @@ on:
   pull_request:
     paths:
       - "firmware/**"
-      - "docs/security/**" # the test vectors both sides check against
+      - "docs/security/test-vectors.json" # the vectors both sides check against; the README alone does not rebuild
+      - "docs/security/reference/**"
       - ".github/workflows/firmware.yml"
   push:
     branches: [main]
     paths:
       - "firmware/**"
-      - "docs/security/**" # the test vectors both sides check against
+      - "docs/security/test-vectors.json" # the vectors both sides check against; the README alone does not rebuild
+      - "docs/security/reference/**"
       - ".github/workflows/firmware.yml"
     tags: ["firmware-v*"]
   workflow_dispatch:
