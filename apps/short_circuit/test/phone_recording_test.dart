@@ -118,25 +118,24 @@ void main() {
             kind: kind,
           );
 
-      test(
-        'the source comes from the file, or from Circuit having numbered it',
-        () {
-          expect(note('/f/phone-note-12.cnote').source, 'Phone');
-          expect(
-            note('/f/circuit-note-1760000000-4.cnote', board: 4).source,
-            'Circuit',
-          );
-          expect(
-            note(null, board: 9).source,
-            'Circuit',
-          ); // waiting to sync from the board
-          expect(note('/f/old.wav').source, isNull);
-          expect(
-            note('/f/clip.wav', kind: 'song').source,
-            'Circuit', // a song clip is always taken by Circuit
-          );
-        },
-      );
+      test('the source comes from the file name', () {
+        expect(note('/f/phone-note-12.cnote').source, 'Phone');
+        expect(
+          note('/f/circuit-note-1760000000-4.cnote', board: 4).source,
+          'Circuit',
+        );
+        expect(
+          note(null, board: 9).source,
+          'Circuit',
+        ); // waiting to sync from the board
+        // Everything the phone did not record was made by Circuit.
+        expect(note('/f/old.wav').source, 'Circuit');
+        expect(noteSourceOf(null), 'Circuit');
+        expect(
+          note('/f/clip.wav', kind: 'song').source,
+          'Circuit', // a song clip is always taken by Circuit
+        );
+      });
 
       test("Circuit's totals leave out the phone's recordings", () {
         final counts = boardNoteCounts([

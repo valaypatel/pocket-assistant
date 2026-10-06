@@ -23,6 +23,7 @@ part 'backup.dart';
 part 'groups.dart';
 part 'long_notes.dart';
 part 'music.dart';
+part 'note_source.dart';
 part 'now_playing.dart';
 part 'phone_recording.dart';
 part 'secure_notes.dart';
@@ -68,17 +69,13 @@ bool shouldReplaceCircuitPairing({
   required bool userRequestedPairing,
 }) => isBonded && userRequestedPairing;
 
-/// 'Phone' or 'Circuit' from the recording's file: this phone's recorder names its files
-/// phone-note-<number>.cnote and Circuit's synced files circuit-note-<time>-<number>. A note
-/// Circuit has numbered, or a song clip (always taken by Circuit), is Circuit's.
-String? noteSourceOf(String? audioPath, {int? boardId, bool isSong = false}) {
-  final name = audioPath?.split('/').last ?? '';
-  if (name.startsWith('phone-note-')) return 'Phone';
-  if (name.startsWith('circuit-note-') || boardId != null || isSong) {
-    return 'Circuit';
-  }
-  return null;
-}
+/// 'Phone' or 'Circuit' from the recording's file. This phone's recorder names its files
+/// phone-note-<number>.cnote; everything else, from Circuit's synced files (circuit-note-...)
+/// to a recording still waiting to sync or a song clip, was made by the board.
+String noteSourceOf(String? audioPath) =>
+    (audioPath?.split('/').last ?? '').startsWith('phone-note-')
+    ? 'Phone'
+    : 'Circuit';
 
 /// The two counts Circuit shows on its own screen: notes still waiting to reach the phone,
 /// and notes that have. They are Circuit's notes only. A recording made on the phone never
@@ -798,10 +795,8 @@ class CircuitNote {
 
   bool get isSong => kind == 'song';
 
-  /// Where the recording was made: 'Phone' (this phone's own recorder), 'Circuit' (the board),
-  /// or null when it cannot be told (a note with no audio yet, or from an older version).
-  String? get source =>
-      noteSourceOf(audioPath, boardId: boardId, isSong: isSong);
+  /// Where the recording was made: 'Phone' (this phone's own recorder) or 'Circuit'.
+  String get source => noteSourceOf(audioPath);
 
   factory CircuitNote.fromJson(Map<String, dynamic> json) => CircuitNote(
     id: json['id'] as String,
@@ -1095,6 +1090,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       GlobalKey(); // where the recording pill grows from and folds back to
   bool _relayActive = false; // the background service is running
   RelayLink _relayLink = RelayLink.off; // what its link to Circuit is doing
+  String _noteSource =
+      noteSourceAll; // the Notes page filter: All, Phone or Circuit
   // Android no longer holds Circuit's pairing; the user chooses when to pair again.
   bool _needsPairingRepair = false;
   List<String> _wifiNetworks = [];

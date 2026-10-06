@@ -486,10 +486,14 @@ class ScTile extends StatelessWidget {
     this.onTap,
     this.footer,
     this.subtitleColor,
+    this.badge,
   });
   final IconData icon;
   final String title;
   final String subtitle;
+
+  /// A small marker for the corner of the icon, such as where a note was recorded.
+  final Widget? badge;
   final Widget? trailing;
   final VoidCallback? onTap;
   final Widget? footer;
@@ -512,14 +516,21 @@ class ScTile extends StatelessWidget {
           children: [
             Row(
               children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: Sc.tileBg,
-                    borderRadius: BorderRadius.circular(13),
-                  ),
-                  child: Icon(icon, size: 19, color: Sc.tileInk),
+                Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: Sc.tileBg,
+                        borderRadius: BorderRadius.circular(13),
+                      ),
+                      child: Icon(icon, size: 19, color: Sc.tileInk),
+                    ),
+                    if (badge != null)
+                      Positioned(right: -6, bottom: -6, child: badge!),
+                  ],
                 ),
                 const SizedBox(width: 12),
                 Expanded(

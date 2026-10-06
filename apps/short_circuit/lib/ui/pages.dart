@@ -335,10 +335,9 @@ extension _ScPages on _CircuitHomePageState {
 
   String _noteSubtitle(CircuitNote note) {
     final local = note.createdAt.toLocal();
-    final source = note.source;
     final when =
         '${_dayLabel(note.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}'
-        '${source == null ? '' : ' · $source'}';
+        ' · ${note.source}';
     if (note.id == _syncingNoteId) return '$when · Syncing';
     final song = note.song;
     if (note.isSong && song != null) {
@@ -496,6 +495,7 @@ extension _ScPages on _CircuitHomePageState {
           : note.title ??
                 (note.audioPath == null ? 'Voice recording' : 'Voice note'),
       subtitle: _noteSubtitle(note),
+      badge: NoteSourceBadge(source: note.source),
       subtitleColor: attention ? Sc.danger : null,
       onTap: _openNote(note),
       trailing: ScPlayButton(
@@ -658,9 +658,12 @@ extension _ScPages on _CircuitHomePageState {
 
   List<Widget> _notesPage() {
     final query = _noteSearchController.text.trim().toLowerCase();
+    final inSource = _notes
+        .where((note) => noteMatchesSource(note, _noteSource))
+        .toList();
     final visibleNotes = query.isEmpty
-        ? _notes
-        : _notes.where((note) {
+        ? inSource
+        : inSource.where((note) {
             final searchable = [
               note.title,
               note.transcript,
@@ -717,11 +720,23 @@ extension _ScPages on _CircuitHomePageState {
           ),
         ),
       ],
+      if (_notes.isNotEmpty) ...[
+        const SizedBox(height: 12),
+        NoteSourceFilter(
+          selected: _noteSource,
+          counts: {
+            noteSourceAll: _notes.length,
+            'Phone': _notes.where((n) => n.source == 'Phone').length,
+            'Circuit': _notes.where((n) => n.source == 'Circuit').length,
+          },
+          onChanged: (choice) => _update(() => _noteSource = choice),
+        ),
+      ],
       const SizedBox(height: 14),
       _syncHealthCard(),
       _syncBanner(),
       _groupsRow(),
-      if (_notes.any(_noteNeedsAttention)) ...[
+      if (visibleNotes.any(_noteNeedsAttention)) ...[
         const SizedBox(height: 18),
         const ScGroupLabel('Needs attention'),
         for (final note in visibleNotes.where(_noteNeedsAttention).take(5)) ...[
@@ -749,10 +764,14 @@ extension _ScPages on _CircuitHomePageState {
         const SizedBox(height: 10),
       ],
       if (visibleNotes.isEmpty)
-        const ScTile(
+        ScTile(
           icon: LucideIcons.mic,
-          title: 'No matching notes',
-          subtitle: 'Try another word or search tag.',
+          title: query.isEmpty && _noteSource != noteSourceAll
+              ? 'No $_noteSource notes'
+              : 'No matching notes',
+          subtitle: query.isEmpty && _noteSource != noteSourceAll
+              ? 'Choose All to see every note.'
+              : 'Try another word or search tag.',
         )
       else
         for (final note in libraryNotes) ...[
