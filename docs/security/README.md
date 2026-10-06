@@ -80,6 +80,16 @@ is lost. Audio is sealed as it arrives, so a crash keeps every finished part and
 the last fraction of a second of the one in progress. The Kotlin writer
 (`NoteSealer.kt`) is checked against the same test vectors as the board and the app.
 
+## The home-screen widget
+
+The widget starts a phone recording with the app closed, so the recorder needs the phone's
+recording key without the app. The app hands it over when it opens, and the recorder keeps its
+own copy sealed with an AES-256-GCM key that lives in the Android Keystore and never leaves it
+(`PhoneKeyStore.kt`), the same protection the app's own copy has. It is not readable without
+the Keystore, and backup and restore still carry the key as before. The recorder also picks
+note numbers itself with the same rule as the app (`PhoneNumbering`), so a recording made with
+the app closed can never reuse a number.
+
 ## What this protects against
 
 - **A lost, stolen or read SD card.** It holds only ciphertext.
