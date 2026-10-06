@@ -282,6 +282,19 @@ void main() {
       expect(result.notesAdded, 1);
     });
 
+    test('a recording name cannot escape the files folder', () async {
+      final inner = Directory('${dir.path}/files')..createSync();
+      final data = BackupData(
+        notes: [_note('n1', audio: '../evil.cnote')],
+        audio: [
+          BackupAudio('../evil.cnote', Uint8List.fromList([6, 6])),
+        ],
+      );
+      await BackupStore.restore(data, filesDir: inner);
+      expect(File('${dir.path}/evil.cnote').existsSync(), isFalse);
+      expect(File('${inner.path}/evil.cnote').readAsBytesSync(), [6, 6]);
+    });
+
     test('an existing recording file is not overwritten', () async {
       File('${dir.path}/a.cnote').writeAsBytesSync([7, 7]);
       final data = BackupData(

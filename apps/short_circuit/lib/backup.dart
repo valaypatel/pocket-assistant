@@ -369,7 +369,9 @@ class BackupStore {
     final idMap = <String, String>{};
     final added = <Map<String, dynamic>>[];
     var skipped = 0;
-    final audioByName = {for (final a in data.audio) a.name: a.bytes};
+    final audioByName = {
+      for (final a in data.audio) _basename(a.name): a.bytes,
+    };
     await filesDir.create(recursive: true);
     for (final note in data.notes) {
       final id = note['id'] as String?;

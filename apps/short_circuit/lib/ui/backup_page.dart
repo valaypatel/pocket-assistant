@@ -77,6 +77,8 @@ class _BackupPageState extends State<BackupPage> {
       final stamp = DateTime.now().toIso8601String().substring(0, 10);
       final saved = await widget.save('short-circuit-backup-$stamp.cbk', file);
       if (saved) {
+        _passphrase.clear();
+        _confirm.clear();
         _snack(
           'Backed up ${data.notes.length} notes'
           '${data.audio.isEmpty ? '' : ' and ${data.audio.length} recordings'}.',
@@ -103,6 +105,7 @@ class _BackupPageState extends State<BackupPage> {
         filesDir: await widget.filesDirectory(),
       );
       await widget.onRestored();
+      _restorePassphrase.clear();
       _snack(
         'Restored ${result.notesAdded} notes'
         '${result.notesSkipped > 0 ? ', ${result.notesSkipped} were already here' : ''}.',
