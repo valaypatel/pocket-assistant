@@ -6,20 +6,24 @@ import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:cryptography_flutter/cryptography_flutter.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'telemetry.dart';
+part 'backup.dart';
 part 'groups.dart';
 part 'music.dart';
 part 'secure_notes.dart';
+part 'ui/backup_page.dart';
 part 'ui/chat_page.dart';
 part 'ui/detail_pages.dart';
 part 'ui/pages.dart';
@@ -2839,6 +2843,13 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         _AppPage.settings,
       ][index];
     });
+  }
+
+  /// Shows what a restore brought back.
+  Future<void> _afterBackupRestore() async {
+    await _loadNotes();
+    await _loadGroups();
+    await _loadPreferences();
   }
 
   Future<void> _loadPreferences() async {
