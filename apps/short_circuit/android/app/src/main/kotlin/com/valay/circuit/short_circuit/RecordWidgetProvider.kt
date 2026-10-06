@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
+import android.util.TypedValue
 import android.view.View
 import android.widget.RemoteViews
 
@@ -72,6 +73,9 @@ class RecordWidgetProvider : AppWidgetProvider() {
                 views.setInt(R.id.widget_root, "setBackgroundResource", R.drawable.widget_bg_idle)
                 views.setImageViewResource(R.id.widget_icon, R.drawable.ic_widget_mic)
                 views.setTextViewText(R.id.widget_label, context.getString(R.string.widget_record))
+                views.setTextViewTextSize(R.id.widget_label, TypedValue.COMPLEX_UNIT_SP, 16f)
+                views.setTextColor(R.id.widget_label, 0xFF15171B.toInt())
+                views.setViewVisibility(R.id.widget_sub, View.VISIBLE)
                 views.setViewVisibility(R.id.widget_timer, View.GONE)
                 views.setViewVisibility(R.id.widget_pause, View.GONE)
                 views.setContentDescription(R.id.widget_main, context.getString(R.string.widget_record_description))
@@ -88,6 +92,9 @@ class RecordWidgetProvider : AppWidgetProvider() {
                 views.setInt(R.id.widget_root, "setBackgroundResource", R.drawable.widget_bg_active)
                 views.setImageViewResource(R.id.widget_icon, R.drawable.ic_widget_stop)
                 views.setTextViewText(R.id.widget_label, context.getString(if (paused) R.string.widget_paused else R.string.widget_recording))
+                views.setTextViewTextSize(R.id.widget_label, TypedValue.COMPLEX_UNIT_SP, 12f)
+                views.setTextColor(R.id.widget_label, if (paused) 0xFFB9B4AD.toInt() else 0xFFF7A08E.toInt())
+                views.setViewVisibility(R.id.widget_sub, View.GONE)
                 views.setViewVisibility(R.id.widget_timer, View.VISIBLE)
                 views.setChronometer(R.id.widget_timer, SystemClock.elapsedRealtime() - elapsed, null, !paused)
                 views.setViewVisibility(R.id.widget_pause, View.VISIBLE)

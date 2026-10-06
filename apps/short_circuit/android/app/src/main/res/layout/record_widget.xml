@@ -6,8 +6,8 @@
     android:background="@drawable/widget_bg_idle"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:paddingStart="6dp"
-    android:paddingEnd="6dp">
+    android:paddingStart="12dp"
+    android:paddingEnd="12dp">
 
     <LinearLayout
         android:id="@+id/widget_main"
@@ -15,21 +15,21 @@
         android:layout_height="match_parent"
         android:layout_weight="1"
         android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingStart="10dp"
-        android:paddingEnd="6dp">
+        android:orientation="horizontal">
 
         <ImageView
             android:id="@+id/widget_icon"
-            android:layout_width="26dp"
-            android:layout_height="26dp"
+            android:layout_width="52dp"
+            android:layout_height="52dp"
+            android:background="@drawable/widget_button_main"
             android:importantForAccessibility="no"
+            android:padding="14dp"
             android:src="@drawable/ic_widget_mic" />
 
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
+            android:layout_marginStart="12dp"
             android:layout_weight="1"
             android:orientation="vertical">
 
@@ -37,18 +37,29 @@
                 android:id="@+id/widget_label"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:drawablePadding="6dp"
                 android:maxLines="1"
                 android:text="@string/widget_record"
-                android:textColor="#FFFFFF"
-                android:textSize="15sp"
+                android:textColor="#15171B"
+                android:textSize="16sp"
                 android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_sub"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:maxLines="1"
+                android:text="@string/widget_tap_to_start"
+                android:textColor="#6F675F"
+                android:textSize="12sp" />
 
             <Chronometer
                 android:id="@+id/widget_timer"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:textColor="#FFFFFFCC"
-                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:textSize="22sp"
+                android:textStyle="bold"
                 android:visibility="gone" />
         </LinearLayout>
     </LinearLayout>
@@ -57,7 +68,8 @@
         android:id="@+id/widget_pause"
         android:layout_width="44dp"
         android:layout_height="44dp"
-        android:padding="10dp"
+        android:background="@drawable/widget_button_side"
+        android:padding="11dp"
         android:src="@drawable/ic_widget_pause"
         android:visibility="gone" />
 </LinearLayout>
