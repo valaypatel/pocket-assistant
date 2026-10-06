@@ -1545,6 +1545,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         }
         return;
       }
+      // Connect first: flutter_blue_plus can only pair a device that is connected, and
+      // createBond on a disconnected one fails at once with "device is not connected".
+      await device.connect(
+        license: License.nonprofit,
+        timeout: const Duration(seconds: 15),
+      );
       if (shouldStartCircuitPairing(
         isBonded: isBonded,
         userRequestedPairing: userRequestedPairing,
@@ -1552,22 +1558,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         _setStatus(
           'Enter Circuit’s six-digit code in the Android pairing prompt…',
         );
-        final paired = device.bondState
-            .where((state) => state == BluetoothBondState.bonded)
-            .first
-            .timeout(const Duration(seconds: 90));
-        try {
-          await device.createBond();
-          await paired;
-        } catch (_) {
-          paired.ignore(); // already timed out or failed: nothing is listening
-          rethrow;
-        }
+        // Waits (up to 90 s) until Android reports the pairing finished.
+        await device.createBond(timeout: 90);
       }
-      await device.connect(
-        license: License.nonprofit,
-        timeout: const Duration(seconds: 15),
-      );
       final preferences = await SharedPreferences.getInstance();
       _connectionSubscription?.cancel();
       _connectionSubscription = device.connectionState.listen((state) {
