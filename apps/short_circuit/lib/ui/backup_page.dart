@@ -5,7 +5,7 @@ typedef BackupPicker = Future<Uint8List?> Function();
 typedef FilesDirectory = Future<Directory> Function();
 
 Future<bool> _saveBackupFile(String fileName, Uint8List bytes) async =>
-    await FilePicker.saveFile(
+    await FilePicker.platform.saveFile(
       dialogTitle: 'Save backup',
       fileName: fileName,
       bytes: bytes,
@@ -13,7 +13,7 @@ Future<bool> _saveBackupFile(String fileName, Uint8List bytes) async =>
     null;
 
 Future<Uint8List?> _pickBackupFile() async {
-  final result = await FilePicker.pickFiles(withData: true);
+  final result = await FilePicker.platform.pickFiles(withData: true);
   return result?.files.single.bytes;
 }
 
