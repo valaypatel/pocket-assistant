@@ -1018,7 +1018,11 @@ class CircuitHomePage extends StatefulWidget {
 }
 
 class _CircuitHomePageState extends State<CircuitHomePage>
-    with _PhoneRecordingState, _NowPlayingState, _LongNoteState {
+    with
+        WidgetsBindingObserver,
+        _PhoneRecordingState,
+        _NowPlayingState,
+        _LongNoteState {
   final _wifiSsidController = TextEditingController();
   final _wifiPasswordController = TextEditingController();
   final _noteSearchController = TextEditingController();
@@ -1129,6 +1133,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _scanSubscription = FlutterBluePlus.onScanResults.listen(
       _onScanResults,
       onError: (Object error) => _setStatus('Scan failed: $error'),
@@ -1175,7 +1180,17 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Back on screen: the widget may have opened the app to record, or may have recorded
+    // while the app was away.
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_recoverPhoneRecording().then((_) => _checkLaunchAction()));
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _scanSubscription?.cancel();
     _connectionSubscription?.cancel();
     _relaySubscription?.cancel();

@@ -161,6 +161,49 @@ void main() {
     },
   );
 
+  group('recordings that ended while the app was away', () {
+    test('reads every queued recording, in order', () {
+      final list = PendingPhoneRecording.parseAll([
+        {
+          'parts': ['/f/phone-note-1.cnote', '/f/phone-note-2.cnote'],
+          'durationMs': 70000,
+          'startedAt': 1000,
+          'reason': 'stopped',
+        },
+        {
+          'parts': ['/f/phone-note-90.cnote'],
+          'durationMs': 5000,
+          'startedAt': 2000,
+          'reason': 'storage',
+        },
+      ]);
+      expect(list.length, 2);
+      expect(list.first.parts.length, 2);
+      expect(list.first.durationMs, 70000);
+      expect(list.last.reason, 'storage');
+    });
+
+    test('a damaged entry is skipped and the rest are still read', () {
+      final list = PendingPhoneRecording.parseAll([
+        'nonsense',
+        {'parts': []},
+        {'durationMs': 5},
+        {
+          'parts': ['/f/phone-note-7.cnote'],
+        },
+      ]);
+      expect(list.length, 1);
+      expect(list.single.parts, ['/f/phone-note-7.cnote']);
+      expect(list.single.durationMs, 0);
+    });
+
+    test('nothing pending, or something that is not a list, is empty', () {
+      expect(PendingPhoneRecording.parseAll(null), isEmpty);
+      expect(PendingPhoneRecording.parseAll(<dynamic>[]), isEmpty);
+      expect(PendingPhoneRecording.parseAll('x'), isEmpty);
+    });
+  });
+
   group('a phone recording and its parts', () {
     test('a long recording keeps every part, in order', () {
       final parts = [

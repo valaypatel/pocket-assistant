@@ -14,6 +14,27 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private var audioStatusEvents: EventChannel.EventSink? = null
 
+    /** What the person asked for by opening the app from the widget ("record"), until the app reads it. */
+    private var launchAction: String? = null
+
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        super.onCreate(savedInstanceState)
+        takeLaunchAction(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        takeLaunchAction(intent)
+    }
+
+    private fun takeLaunchAction(intent: Intent?) {
+        intent?.getStringExtra(RecordWidgetProvider.extraAction)?.let {
+            launchAction = it
+            intent.removeExtra(RecordWidgetProvider.extraAction)
+        }
+    }
+
     override fun onStart() {
         super.onStart()
         CircuitRelayService.resumeIfWanted(this)
@@ -70,7 +91,24 @@ class MainActivity : FlutterActivity() {
                     "discard" -> { PhoneRecorderService.send(this, PhoneRecorderService.actionDiscard); result.success(null) }
                     "snapshot" -> result.success(PhoneRecorderService.snapshot)
                     "pending" -> result.success(PhoneRecorderService.pending(this))
-                    "clearPending" -> { PhoneRecorderService.clearPending(this); result.success(null) }
+                    "clearPending" -> {
+                        PhoneRecorderService.clearPending(this, call.argument<String>("path"))
+                        result.success(null)
+                    }
+                    "saveKey" -> {
+                        val keyId = call.argument<Int>("keyId") ?: 0
+                        val key = call.argument<String>("key")?.let { android.util.Base64.decode(it, android.util.Base64.NO_WRAP) }
+                        if (keyId != 0 && key != null && key.size == 32) {
+                            PhoneKeyStore.save(this, keyId, key)
+                            // The widget may now start a recording on its own.
+                            RecordWidgetProvider.refresh(this)
+                        }
+                        result.success(null)
+                    }
+                    "launchAction" -> {
+                        result.success(launchAction)
+                        launchAction = null
+                    }
                     "directory" -> result.success(filesDir.absolutePath)
                     else -> result.notImplemented()
                 }
