@@ -105,6 +105,12 @@ not committed. Locally it lives at `apps/short_circuit/android/app/google-servic
 the build works and the app sends nothing. What is and is not sent is described at the top
 of `apps/short_circuit/lib/telemetry.dart`.
 
+**Release notes.** Each tester build's notes say which build it is, then the "How to test on the
+phone" section of the pull request(s) that produced it. The pull request template
+(`.github/pull_request_template.md`) has that section: write numbered steps a tester can follow,
+and they arrive in the notes (HTML comments are dropped). A build with no such section says so.
+The notes are made by `.github/scripts/release-notes.sh`, which never fails the build.
+
 **Firebase App Distribution.** A push to `development`, a release tag (`app-v*`) or a manual run
 of the App workflow sends the signed APK to the testers in Firebase. It is skipped until the repository
 variable `FIREBASE_APP_ID` exists. One-time setup:
