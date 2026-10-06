@@ -5,11 +5,16 @@ in its own area change, so an app change does not rebuild the firmware.
 
 | Workflow | Runs on | What it does |
 |---|---|---|
-| `app.yml` | `apps/short_circuit/**` | Format check, `flutter analyze`, `flutter test`, then builds the release APK. A tag `app-vX.Y.Z` publishes a GitHub release. |
+| `app.yml` | `apps/short_circuit/**` | Format check, `flutter analyze`, `flutter test`, then builds the release APK. A push to `development` sends that APK to the testers. A tag `app-vX.Y.Z` publishes a GitHub release. |
 | `firmware.yml` | `firmware/**` | Builds the ESP32-S3 firmware in the ESP-IDF 5.5.3 container and uploads the bootloader, partition table and app as separate files. A tag `firmware-vX.Y.Z` publishes a release. |
 | `lambda.yml` | `services/music-lambda/**` | Python tests, builds the Lambda package, `terraform fmt` and `validate`. On `main` it deploys the code to AWS and smoke-tests it. |
 
 Pull requests run the checks only. Nothing is deployed or released from a PR.
+
+**Branches.** `development` is where work lands: pull requests target it, and every push to it
+sends a signed build to the testers (below), so each change is tried on a phone first. `main` is
+production: it only receives `development` once that build has been tried, and a release is a tag
+on `main`. A push to `main` builds the APK but does not send it.
 Every action is pinned to a commit SHA, and Dependabot proposes updates weekly.
 
 ## Nothing to set up
@@ -100,8 +105,8 @@ not committed. Locally it lives at `apps/short_circuit/android/app/google-servic
 the build works and the app sends nothing. What is and is not sent is described at the top
 of `apps/short_circuit/lib/telemetry.dart`.
 
-**Firebase App Distribution.** A release tag (`app-v*`) or a manual run of the App workflow
-sends the signed APK to the testers in Firebase. It is skipped until the repository
+**Firebase App Distribution.** A push to `development`, a release tag (`app-v*`) or a manual run
+of the App workflow sends the signed APK to the testers in Firebase. It is skipped until the repository
 variable `FIREBASE_APP_ID` exists. One-time setup:
 
 1. Firebase console > Release & Monitor > App Distribution > Get started, and make a tester
