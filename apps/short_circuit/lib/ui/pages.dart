@@ -1202,6 +1202,22 @@ extension _ScPages on _CircuitHomePageState {
           : 'Needs an AI service above. Add one to review notes automatically',
       trailing: Switch(value: _autoEnrich, onChanged: _setAutoEnrich),
     ),
+    const SizedBox(height: 24),
+    const ScGroupLabel('Backup'),
+    ScRow(
+      title: 'Back up and restore',
+      caption: 'One encrypted file, opened with a passphrase you choose',
+      trailing: const Icon(
+        LucideIcons.chevronRight,
+        size: 18,
+        color: Sc.accent,
+      ),
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => BackupPage(onRestored: _afterBackupRestore),
+        ),
+      ),
+    ),
     if (Telemetry.available) ...[
       const SizedBox(height: 24),
       const ScGroupLabel('Diagnostics'),
