@@ -48,6 +48,18 @@ jobs:
       - name: Analyze (errors and warnings fail; infos do not)
         run: flutter analyze --no-fatal-infos
       - run: flutter test
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            apps/short_circuit/android/**/*.gradle*
+            apps/short_circuit/android/**/gradle-wrapper.properties
+      - name: Check the phone's note encryption against the shared test vectors
+        run: |
+          flutter build apk --config-only
+          cd android && ./gradlew :app:testDebugUnitTest --no-daemon
 
   apk:
     name: Build release APK

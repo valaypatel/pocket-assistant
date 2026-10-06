@@ -42,6 +42,39 @@ class MainActivity : FlutterActivity() {
                     CircuitRelayService.setAudioStatusListener(null)
                 }
             })
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, "circuit/phone_recorder_events")
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    PhoneRecorderService.listener = { data -> runOnUiThread { events?.success(data) } }
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    PhoneRecorderService.listener = null
+                }
+            })
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "circuit/phone_recorder")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "start" -> {
+                        PhoneRecorderService.send(this, PhoneRecorderService.actionStart) {
+                            putExtra("path", call.argument<String>("path"))
+                            putExtra("key", call.argument<String>("key"))
+                            putExtra("keyId", call.argument<Int>("keyId") ?: 0)
+                            putExtra("noteId", call.argument<Int>("noteId") ?: 0)
+                        }
+                        result.success(null)
+                    }
+                    "pause" -> { PhoneRecorderService.send(this, PhoneRecorderService.actionPause); result.success(null) }
+                    "resume" -> { PhoneRecorderService.send(this, PhoneRecorderService.actionResume); result.success(null) }
+                    "stop" -> { PhoneRecorderService.send(this, PhoneRecorderService.actionStop); result.success(null) }
+                    "discard" -> { PhoneRecorderService.send(this, PhoneRecorderService.actionDiscard); result.success(null) }
+                    "snapshot" -> result.success(PhoneRecorderService.snapshot)
+                    "pending" -> result.success(PhoneRecorderService.pending(this))
+                    "clearPending" -> { PhoneRecorderService.clearPending(this); result.success(null) }
+                    "directory" -> result.success(filesDir.absolutePath)
+                    else -> result.notImplemented()
+                }
+            }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "circuit/relay")
             .setMethodCallHandler { call, result ->
                 when (call.method) {

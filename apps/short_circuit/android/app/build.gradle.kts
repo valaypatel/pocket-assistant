@@ -80,6 +80,8 @@ dependencies {
     // as the FlutterFire plugins; without google-services.json nothing is sent.
     implementation(platform("com.google.firebase:firebase-bom:34.19.0"))
     implementation("com.google.firebase:firebase-analytics")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
 
 flutter {
