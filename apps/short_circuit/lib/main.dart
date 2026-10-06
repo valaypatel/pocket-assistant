@@ -67,6 +67,22 @@ bool shouldReplaceCircuitPairing({
   required bool userRequestedPairing,
 }) => isBonded && userRequestedPairing;
 
+/// What the phone's link to Circuit is doing, read from the background service's status.
+/// "Running" is not "connected": the service also runs while it is still trying.
+enum RelayLink { off, trying, connected, needsRepair }
+
+RelayLink relayLinkFromStatus(String? status) {
+  if (status == null || status == 'Stopped') return RelayLink.off;
+  if (status.startsWith('Circuit needs repair')) return RelayLink.needsRepair;
+  // Bluetooth is up in both; the second only means the phone has no internet to sync with.
+  if (status == 'Connected to Circuit' ||
+      status == 'Phone internet unavailable') {
+    return RelayLink.connected;
+  }
+  return RelayLink
+      .trying; // connecting, securing, waiting to reconnect, Bluetooth off
+}
+
 /// Whether a note should get its AI review without being asked: only with an AI service set up
 /// and the Settings toggle on. The "Run AI review" button always works.
 bool shouldEnrichAutomatically({
@@ -976,7 +992,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   bool _recordingAudio = false;
   final _deviceChipKey =
       GlobalKey(); // where the recording pill grows from and folds back to
-  bool _relayActive = false;
+  bool _relayActive = false; // the background service is running
+  RelayLink _relayLink = RelayLink.off; // what its link to Circuit is doing
   // Android no longer holds Circuit's pairing; the user chooses when to pair again.
   bool _needsPairingRepair = false;
   List<String> _wifiNetworks = [];
@@ -1073,6 +1090,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         Telemetry.event('pairing_repair_needed');
       }
       final active = status != 'Stopped' && !needsRepair;
+      final link = relayLinkFromStatus(status);
+      if (link != _relayLink) setState(() => _relayLink = link);
       if (active || _relayActive || needsRepair) {
         setState(() {
           _relayActive = active;
@@ -2681,6 +2700,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     if (mounted) {
       setState(() {
         _relayActive = false;
+        _relayLink = RelayLink.off;
         _status = 'Stay connected is off.';
       });
     }

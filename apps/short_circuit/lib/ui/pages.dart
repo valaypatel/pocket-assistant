@@ -58,7 +58,10 @@ Future<bool> _confirmDeleteNote(BuildContext context) async =>
     false;
 
 extension _ScPages on _CircuitHomePageState {
-  bool get _circuitAvailable => _textCharacteristic != null || _relayActive;
+  /// Circuit is connected right now. The background service merely running does not count:
+  /// it also runs while it is still trying, and then nothing can be sent or received.
+  bool get _circuitAvailable =>
+      _textCharacteristic != null || _relayLink == RelayLink.connected;
 
   void _toast(String message) {
     if (!mounted) return;
@@ -112,65 +115,14 @@ extension _ScPages on _CircuitHomePageState {
     },
   );
 
-  Widget _deviceChip() {
-    final wifiColor = _wifiState == 'connected'
-        ? Sc.green
-        : _wifiState == 'connecting'
-        ? Sc.orange
-        : const Color(0xffa6a9af);
-    final available = _circuitAvailable;
-    return Semantics(
-      button: true,
-      label: available ? 'Circuit, connected' : 'Circuit, not connected',
-      hint: 'Opens device settings',
-      excludeSemantics: true,
-      child: GestureDetector(
-        onTap: () => _goTo(_AppPage.circuit),
-        child: Container(
-          key: _deviceChipKey,
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
-          decoration: BoxDecoration(
-            color: Sc.chip,
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: available
-                      ? const Color(0xff3b9a68)
-                      : const Color(0xffa6a9af),
-                  boxShadow: available
-                      ? const [
-                          BoxShadow(color: Color(0x203b9a68), spreadRadius: 4),
-                        ]
-                      : null,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Icon(
-                _wifiState == 'failed' ? LucideIcons.wifiOff : LucideIcons.wifi,
-                size: 15,
-                color: wifiColor,
-              ),
-              const SizedBox(width: 6),
-              Icon(
-                LucideIcons.smartphone,
-                size: 15,
-                color: _relayActive ? Sc.orange : const Color(0xffa6a9af),
-              ),
-              const SizedBox(width: 8),
-              const ScDeviceMark(size: 22),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  Widget _deviceChip() => CircuitChip(
+    chipKey: _deviceChipKey,
+    connected: _circuitAvailable,
+    link: _relayLink,
+    wifiState: _wifiState,
+    stayConnected: _relayActive,
+    onTap: () => _goTo(_AppPage.circuit),
+  );
 
   String _ago(DateTime time) {
     final seconds = DateTime.now().difference(time).inSeconds;
@@ -1333,6 +1285,7 @@ extension _ScPages on _CircuitHomePageState {
       _textCharacteristic = null;
       _relayCharacteristic = null;
       _relayActive = false;
+      _relayLink = RelayLink.off;
       _wifiState = 'none';
       _status = 'Circuit forgotten. Scan to pair again.';
     });
@@ -1985,6 +1938,130 @@ extension _ScPages on _CircuitHomePageState {
             _nowPlayingBar(),
             ScNavBar(index: tab, onSelect: _selectTab),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The three indicators at the top of Home. Each says what is true now:
+///  - the dot: Circuit is connected (green), being reached (orange), or not (grey);
+///  - Wi-Fi: Circuit's own Wi-Fi, only while Circuit is connected, since otherwise it is old news;
+///  - the phone: Stay connected is on (green once it has a link, orange while it is trying).
+class CircuitChip extends StatelessWidget {
+  const CircuitChip({
+    super.key,
+    this.chipKey,
+    required this.connected,
+    required this.link,
+    required this.wifiState,
+    required this.stayConnected,
+    required this.onTap,
+  });
+
+  final Key? chipKey;
+  final bool connected;
+  final RelayLink link;
+  final String wifiState;
+  final bool stayConnected;
+  final VoidCallback onTap;
+
+  static const grey = Color(0xffa6a9af);
+
+  bool get _reaching =>
+      !connected && (link == RelayLink.trying || link == RelayLink.needsRepair);
+
+  Color get dotColor => connected
+      ? const Color(0xff3b9a68)
+      : _reaching
+      ? Sc.orange
+      : grey;
+
+  Color get wifiColor => !connected
+      ? grey
+      : wifiState == 'connected'
+      ? Sc.green
+      : wifiState == 'connecting'
+      ? Sc.orange
+      : grey;
+
+  Color get stayColor => !stayConnected
+      ? grey
+      : connected
+      ? Sc.green
+      : Sc.orange;
+
+  String get description {
+    final circuit = connected
+        ? 'Circuit, connected'
+        : link == RelayLink.needsRepair
+        ? 'Circuit, needs pairing again'
+        : link == RelayLink.trying
+        ? 'Circuit, connecting'
+        : 'Circuit, not connected';
+    final wifi = !connected
+        ? ''
+        : wifiState == 'connected'
+        ? '. Wi-Fi connected'
+        : wifiState == 'connecting'
+        ? '. Wi-Fi connecting'
+        : '. Wi-Fi not connected';
+    return '$circuit$wifi. Stay connected ${stayConnected ? 'on' : 'off'}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: description,
+      hint: 'Opens device settings',
+      excludeSemantics: true,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          key: chipKey,
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+          decoration: BoxDecoration(
+            color: Sc.chip,
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                key: const ValueKey('circuit-dot'),
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: dotColor,
+                  boxShadow: connected
+                      ? const [
+                          BoxShadow(color: Color(0x203b9a68), spreadRadius: 4),
+                        ]
+                      : null,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(
+                connected && wifiState == 'failed'
+                    ? LucideIcons.wifiOff
+                    : LucideIcons.wifi,
+                key: const ValueKey('circuit-wifi'),
+                size: 15,
+                color: wifiColor,
+              ),
+              const SizedBox(width: 6),
+              Icon(
+                LucideIcons.smartphone,
+                key: const ValueKey('circuit-stay'),
+                size: 15,
+                color: stayColor,
+              ),
+              const SizedBox(width: 8),
+              const ScDeviceMark(size: 22),
+            ],
+          ),
         ),
       ),
     );
