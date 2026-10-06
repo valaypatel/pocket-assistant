@@ -111,6 +111,13 @@ class MainActivity : FlutterActivity() {
                         val path = call.argument<String>("path")
                         result.success(path != null && CircuitRelayService.playSyncedRecording(path))
                     }
+                    "playbackStatus" -> result.success(NotePlayer.status())
+                    "pausePlayback" -> result.success(NotePlayer.pause())
+                    "resumePlayback" -> result.success(NotePlayer.resume())
+                    "seekPlayback" -> {
+                        NotePlayer.seekTo(call.argument<Int>("positionMs") ?: 0)
+                        result.success(null)
+                    }
                     "stopPlayback" -> {
                         CircuitRelayService.stopPlayback()
                         result.success(null)
