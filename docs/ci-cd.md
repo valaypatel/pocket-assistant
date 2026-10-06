@@ -9,6 +9,10 @@ in its own area change, so an app change does not rebuild the firmware.
 | `firmware.yml` | `firmware/**` | Builds the ESP32-S3 firmware in the ESP-IDF 5.5.3 container and uploads the bootloader, partition table and app as separate files. A tag `firmware-vX.Y.Z` publishes a release. |
 | `lambda.yml` | `services/music-lambda/**` | Python tests, builds the Lambda package, `terraform fmt` and `validate`. On `main` it deploys the code to AWS and smoke-tests it. |
 
+`app.yml` and `firmware.yml` also run when `docs/security/test-vectors.json` or `docs/security/reference/**`
+change, because both sides check themselves against those. Editing the rest of `docs/security`
+(the README) runs nothing, so a text edit does not cost a build.
+
 Pull requests run the checks only. Nothing is deployed or released from a PR.
 
 **Branches.** `development` is where work lands: pull requests target it, and every push to it
