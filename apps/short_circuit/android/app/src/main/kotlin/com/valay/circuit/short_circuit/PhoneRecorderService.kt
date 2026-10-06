@@ -309,8 +309,11 @@ class PhoneRecorderService : Service() {
             )
             snapshot = mapOf("state" to "idle")
             listener?.invoke(done)
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            // A new recording may already have started on this service; leave it running.
+            if (!running) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
         }
     }
 
@@ -318,8 +321,10 @@ class PhoneRecorderService : Service() {
         main.post {
             snapshot = mapOf("state" to "idle")
             listener?.invoke(mapOf("state" to "failed", "reason" to reason))
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            if (!running) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
         }
     }
 
