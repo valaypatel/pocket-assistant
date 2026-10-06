@@ -17,6 +17,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'telemetry.dart';
+part 'ai_mode.dart';
 part 'groups.dart';
 part 'music.dart';
 part 'secure_notes.dart';
@@ -59,7 +60,7 @@ bool shouldEnrichAutomatically({
   required bool autoEnrich,
 }) => aiConnected && autoEnrich;
 
-class GeminiClient {
+class GeminiClient implements Transcriber {
   const GeminiClient();
 
   Future<String?> apiKey() => _secureStorage.read(key: _geminiApiKey);
@@ -111,6 +112,7 @@ class GeminiClient {
     }
   }
 
+  @override
   Future<GeminiTranscription> transcribeWav(
     Uint8List wavBytes, {
     bool detectMusic = true,
@@ -1241,10 +1243,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     final timer = Stopwatch()..start();
     try {
       final audio = await readNoteAudio(path);
-      final transcription = await _gemini.transcribeWav(
-        audio,
-        detectMusic: !asSpeech,
-      );
+      final transcription = await transcriberFor(await AiModeStore.read())
+          .transcribeWav(audio, detectMusic: !asSpeech);
       Telemetry.event('transcription_done', {
         'ok': true,
         'seconds': timer.elapsed.inSeconds,

@@ -152,6 +152,7 @@ class _GeminiSettingsPageState extends State<GeminiSettingsPage> {
   bool _saving = false;
   bool _testing = false;
   bool _obscureKey = true;
+  AiMode _mode = AiMode.ownKey;
 
   @override
   void initState() {
@@ -162,7 +163,9 @@ class _GeminiSettingsPageState extends State<GeminiSettingsPage> {
   Future<void> _load() async {
     final key = await _gemini.apiKey();
     final model = await _gemini.model();
+    final mode = await AiModeStore.read();
     if (!mounted) return;
+    _mode = mode;
     _apiKeyController.text = key ?? '';
     _modelController.text = model;
     setState(() => _loading = false);
@@ -242,6 +245,35 @@ class _GeminiSettingsPageState extends State<GeminiSettingsPage> {
                     style: TextStyle(
                       color: Sc.muted,
                       fontSize: 12,
+                      height: 1.4,
+                    ),
+                  ),
+                  const SizedBox(height: 22),
+                  const ScGroupLabel('Transcription'),
+                  SegmentedButton<AiMode>(
+                    segments: const [
+                      ButtonSegment(
+                        value: AiMode.ownKey,
+                        label: Text('My own key'),
+                      ),
+                      ButtonSegment(
+                        value: AiMode.subscription,
+                        label: Text('Subscription'),
+                        enabled: false,
+                      ),
+                    ],
+                    selected: {_mode},
+                    onSelectionChanged: (selection) async {
+                      await AiModeStore.save(selection.first);
+                      if (mounted) setState(() => _mode = selection.first);
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Your own key is free and goes straight from this phone to Google. A paid subscription, with no key to set up, is not available yet.',
+                    style: TextStyle(
+                      color: Sc.faint,
+                      fontSize: 11,
                       height: 1.4,
                     ),
                   ),
