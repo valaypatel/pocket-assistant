@@ -55,6 +55,7 @@ class CircuitRelayService : Service() {
         private const val notificationId = 42
         private const val preferencesName = "circuit_relay"
         private const val addressKey = "circuit_address"
+        private const val stoppedKey = "stopped_by_user"
         private val serviceUuid = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb")
         private val commandUuid = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb")
         private val relayUuid = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb")
@@ -66,6 +67,30 @@ class CircuitRelayService : Service() {
         @Volatile var wifiStatus: String? = null
         @Volatile private var latestSyncedFile: String? = null
         @Volatile private var audioStatusListener: ((String) -> Unit)? = null
+        /**
+         * Brings the relay back after the system ended it (reboot, app update,
+         * the process being killed). A relay the person switched off stays off.
+         */
+        fun resumeIfWanted(context: Context) {
+            if (relayStatus != "Stopped") return
+            val prefs = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+            if (prefs.getString(addressKey, null) == null || prefs.getBoolean(stoppedKey, false)) return
+            try {
+                val intent = Intent(context, CircuitRelayService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+                else context.startService(intent)
+            } catch (error: Exception) {
+                // Android can refuse a background start; opening the app retries.
+                Log.w("CircuitRelay", "Could not resume the relay: ${error.message}")
+            }
+        }
+
+        /** Records the person's choice so a restart knows whether to resume. */
+        fun rememberChoice(context: Context, stopped: Boolean) {
+            context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+                .edit().putBoolean(stoppedKey, stopped).apply()
+        }
+
         fun writeToCircuit(value: String): Boolean = activeService?.writeCommand(value) ?: false
         fun playSyncedRecording(path: String): Boolean = activeService?.playRecording(path) ?: false
         fun playWavBytes(bytes: ByteArray): Boolean = activeService?.playBytes(bytes) ?: false
@@ -189,7 +214,8 @@ class CircuitRelayService : Service() {
             return START_NOT_STICKY
         }
         shouldReconnect = true
-        getSharedPreferences(preferencesName, MODE_PRIVATE).edit().putString(addressKey, circuitAddress).apply()
+        getSharedPreferences(preferencesName, MODE_PRIVATE).edit()
+            .putString(addressKey, circuitAddress).putBoolean(stoppedKey, false).apply()
         reconnectHandler.removeCallbacks(reconnectRunnable)
         relayStatus = "Connecting to Circuit…"
         startAsForeground(relayStatus)

@@ -14,6 +14,11 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private var audioStatusEvents: EventChannel.EventSink? = null
 
+    override fun onStart() {
+        super.onStart()
+        CircuitRelayService.resumeIfWanted(this)
+    }
+
     override fun onPause() {
         CircuitRelayService.stopPlayback()
         super.onPause()
@@ -52,6 +57,7 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     "stop" -> {
+                        CircuitRelayService.rememberChoice(this, stopped = true)
                         stopService(Intent(this, CircuitRelayService::class.java))
                         result.success(null)
                     }
