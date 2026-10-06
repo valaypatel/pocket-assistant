@@ -136,9 +136,16 @@ extension _LongNotes on _CircuitHomePageState {
     try {
       final texts = await transcribeParts(
         count: files.length,
-        // Asking again for a note that already has its transcript means start over; after
-        // a failure there is no transcript yet, and it carries on from the saved parts.
-        done: note!.transcript == null ? note.partTexts : const [],
+        // Asking again for a note that already has its transcript means start over. After a
+        // failure there is no transcript yet, so it carries on from the parts that have
+        // text; a part saved as blank is asked for again, since the blank may have been a
+        // failed attempt and not real silence.
+        done: note!.transcript == null
+            ? [
+                for (final text in note.partTexts)
+                  (text == null || text.isEmpty) ? null : text,
+              ]
+            : const [],
         transcribe: (part) async {
           await _setNoteStatus(
             id,

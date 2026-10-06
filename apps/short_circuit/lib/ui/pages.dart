@@ -398,6 +398,7 @@ extension _ScPages on _CircuitHomePageState {
           onForceTranscribe: _transcribeNote,
           audioPath: note.audioPath,
           onPlayNote: _playSyncedNote,
+          playerBar: _nowPlayingBar,
           onDeleteNote: _deleteNote,
           onCreateReminder: _extractReminder,
           onAddTask: (title, detail) => _addTask(title, detail: detail),

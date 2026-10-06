@@ -105,6 +105,59 @@ void main() {
     );
   });
 
+  group('a phone recording and its parts', () {
+    test('a long recording keeps every part, in order', () {
+      final parts = [
+        '/f/phone-note-100.cnote',
+        '/f/phone-note-101.cnote',
+        '/f/phone-note-102.cnote',
+      ];
+      final note = noteForPhoneRecording(
+        id: 'n',
+        parts: parts,
+        startedAt: DateTime.utc(2026, 10, 6, 20, 29),
+      );
+      expect(note.audioPath, parts.first);
+      expect(note.audioParts, parts);
+      expect(note.audioFiles, parts);
+      expect(note.createdAt, DateTime.utc(2026, 10, 6, 20, 29));
+    });
+
+    test('a short recording is a single file with no parts list', () {
+      final note = noteForPhoneRecording(
+        id: 'n',
+        parts: ['/f/phone-note-7.cnote'],
+        startedAt: DateTime.utc(2026),
+      );
+      expect(note.audioPath, '/f/phone-note-7.cnote');
+      expect(note.audioParts, isEmpty);
+      expect(note.audioFiles, ['/f/phone-note-7.cnote']);
+    });
+
+    test('finds the later parts of a note that listed only the first', () {
+      final files = {
+        '/f/phone-note-100.cnote',
+        '/f/phone-note-101.cnote',
+        '/f/phone-note-102.cnote',
+        '/f/phone-note-104.cnote', // a gap ends the recording
+      };
+      expect(consecutivePartPaths('/f/phone-note-100.cnote', files.contains), [
+        '/f/phone-note-100.cnote',
+        '/f/phone-note-101.cnote',
+        '/f/phone-note-102.cnote',
+      ]);
+      expect(consecutivePartPaths('/f/phone-note-104.cnote', files.contains), [
+        '/f/phone-note-104.cnote',
+      ]);
+    });
+
+    test('a note from Circuit has no phone parts to find', () {
+      expect(consecutivePartPaths('/f/circuit-note-1-2.cnote', (_) => true), [
+        '/f/circuit-note-1-2.cnote',
+      ]);
+    });
+  });
+
   test('clock text', () {
     expect(phoneRecordingClock(0), '0:00');
     expect(phoneRecordingClock(61000), '1:01');

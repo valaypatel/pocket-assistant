@@ -13,6 +13,65 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
+  group('reading the answer from Gemini', () {
+    Map<String, dynamic> answer(String text, {String? finish = 'STOP'}) => {
+      'candidates': [
+        {
+          'content': {
+            'parts': [
+              {'text': text},
+            ],
+          },
+          'finishReason': ?finish,
+        },
+      ],
+    };
+
+    test(
+      'returns the text, and an empty answer to a request that went through',
+      () {
+        expect(geminiAnswerText(answer('Hello there.')), 'Hello there.');
+        expect(geminiAnswerText(answer('  ')), '');
+        // Silence is still silence: the caller reads it as no speech.
+        expect(
+          () => GeminiClient.parseTranscriptionText(
+            geminiAnswerText(answer('[[NOISE]]')),
+          ),
+          throwsA(isA<NoSpeechDetected>()),
+        );
+      },
+    );
+
+    test('no answer at all is an error, not silence', () {
+      expect(
+        () => geminiAnswerText({'candidates': []}),
+        throwsA(predicate((e) => e.toString().contains('no answer'))),
+      );
+      expect(
+        () => geminiAnswerText({
+          'promptFeedback': {'blockReason': 'OTHER'},
+        }),
+        throwsA(predicate((e) => e.toString().contains('blocked: OTHER'))),
+      );
+    });
+
+    test('an answer cut short without text is an error', () {
+      expect(
+        () => geminiAnswerText({
+          'candidates': [
+            {'finishReason': 'MAX_TOKENS'},
+          ],
+        }),
+        throwsA(predicate((e) => e.toString().contains('MAX_TOKENS'))),
+      );
+      // Text that was cut short is still text.
+      expect(
+        geminiAnswerText(answer('Half a sentence', finish: 'MAX_TOKENS')),
+        'Half a sentence',
+      );
+    });
+  });
+
   group('joining the text of the parts', () {
     test('joins in order and skips silent parts', () {
       expect(
@@ -175,6 +234,39 @@ void main() {
       );
       expect(played, ['a']);
     });
+
+    test(
+      'pausing in the middle waits instead of ending the sequence',
+      () async {
+        final played = <String>[];
+        var state = 'idle';
+        var checks = 0;
+        await playPartsInOrder(
+          parts: ['a', 'b'],
+          poll: Duration.zero,
+          isCurrent: () => true,
+          play: (part) async {
+            played.add(part);
+            checks = 0;
+            state = 'playing';
+            return true;
+          },
+          state: () async {
+            checks++;
+            // Part a: playing, then paused for a while, then resumed and finished.
+            if (played.length == 1) {
+              if (checks == 2) state = 'paused';
+              if (checks == 6) state = 'playing';
+              if (checks == 8) state = 'completed';
+            } else if (checks == 2) {
+              state = 'completed';
+            }
+            return state;
+          },
+        );
+        expect(played, ['a', 'b']);
+      },
+    );
 
     test('a part that cannot start ends the sequence', () async {
       final played = <String>[];

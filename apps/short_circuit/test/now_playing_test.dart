@@ -81,6 +81,31 @@ void main() {
       expect(find.byTooltip('Resume'), findsNothing);
     });
 
+    testWidgets('a long note says which part is playing', (tester) async {
+      await _pump(
+        tester,
+        const NowPlaying(
+          title: 'Long meeting',
+          positionMs: 12000,
+          durationMs: 60000,
+          part: 2,
+          parts: 4,
+        ),
+      );
+      expect(find.text('Part 2 of 4 · 0:12 / 1:00'), findsOneWidget);
+    });
+
+    test('the part is kept as the player reports back', () {
+      const start = NowPlaying(title: 'T', part: 3, parts: 5);
+      final next = nextNowPlaying(start, {
+        'state': 'playing',
+        'positionMs': 1000,
+        'durationMs': 60000,
+      });
+      expect(next?.part, 3);
+      expect(next?.parts, 5);
+    });
+
     testWidgets('while paused it says so and offers Resume', (tester) async {
       final calls = await _pump(
         tester,

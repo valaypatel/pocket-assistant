@@ -320,6 +320,7 @@ class TranscriptPage extends StatefulWidget {
     required this.onForceTranscribe,
     required this.audioPath,
     required this.onPlayNote,
+    this.playerBar,
     required this.onDeleteNote,
     required this.onCreateReminder,
     required this.onAddTask,
@@ -345,6 +346,10 @@ class TranscriptPage extends StatefulWidget {
   final Future<GeminiTranscription?> Function(String noteId) onForceTranscribe;
   final String? audioPath;
   final Future<void> Function(String? path) onPlayNote;
+
+  /// The player bar (pause, stop, position) shown at the bottom while a note plays, built by
+  /// the app so it is the same bar as on Home and Notes. It appears only while something plays.
+  final Widget Function()? playerBar;
   final Future<void> Function(String noteId) onDeleteNote;
   final Future<ReminderDraft?> Function(String transcript) onCreateReminder;
   final Future<void> Function(String title, String? detail) onAddTask;
@@ -559,7 +564,8 @@ class _TranscriptPageState extends State<TranscriptPage> {
   @override
   void dispose() {
     _ticker?.cancel();
-    unawaited(_relayChannel.invokeMethod<void>('stopPlayback'));
+    // Playback carries on when this page closes: the player bar has the Stop button, and
+    // leaving the app still stops it.
     super.dispose();
   }
 
@@ -577,6 +583,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
     final enriching = live?.enrichmentStatus == 'enriching';
     final hasTranscript = _transcript.trim().isNotEmpty;
     return Scaffold(
+      bottomNavigationBar: widget.playerBar?.call(),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),

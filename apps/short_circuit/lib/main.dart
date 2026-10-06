@@ -91,6 +91,38 @@ bool shouldEnrichAutomatically({
   required bool autoEnrich,
 }) => aiConnected && autoEnrich;
 
+/// The text of Gemini's answer. An answer with no text because the request was blocked or
+/// cut short is an error to report, not "no speech": silence comes back as an empty or
+/// [[NOISE]] answer to a request that went through.
+String? geminiAnswerText(Map<String, dynamic> decoded) {
+  final candidates = decoded['candidates'] as List<dynamic>?;
+  if (candidates == null || candidates.isEmpty) {
+    final blocked =
+        (decoded['promptFeedback'] as Map<String, dynamic>?)?['blockReason'];
+    throw Exception(
+      'Gemini gave no answer${blocked == null ? '' : ' (blocked: $blocked)'}.',
+    );
+  }
+  final candidate = candidates.first as Map<String, dynamic>;
+  final parts =
+      (candidate['content'] as Map<String, dynamic>?)?['parts']
+          as List<dynamic>?;
+  final text = parts
+      ?.whereType<Map<String, dynamic>>()
+      .map((part) => part['text'])
+      .whereType<String>()
+      .join()
+      .trim();
+  final reason = candidate['finishReason'] as String?;
+  if ((text == null || text.isEmpty) &&
+      reason != null &&
+      reason != 'STOP' &&
+      reason != 'FINISH_REASON_UNSPECIFIED') {
+    throw Exception('Gemini stopped without an answer ($reason).');
+  }
+  return text;
+}
+
 class GeminiClient {
   const GeminiClient();
 
@@ -190,19 +222,10 @@ class GeminiClient {
       throw Exception('Gemini ${response.statusCode}: ${response.body}');
     }
     final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-    final candidates = decoded['candidates'] as List<dynamic>?;
-    final content = candidates?.isNotEmpty == true
-        ? (candidates!.first as Map<String, dynamic>)['content']
-              as Map<String, dynamic>?
-        : null;
-    final text = content?['parts'] as List<dynamic>?;
-    final result = text
-        ?.whereType<Map<String, dynamic>>()
-        .map((part) => part['text'])
-        .whereType<String>()
-        .join()
-        .trim();
-    return parseTranscriptionText(result, allowMusic: detectMusic);
+    return parseTranscriptionText(
+      geminiAnswerText(decoded),
+      allowMusic: detectMusic,
+    );
   }
 
   /// For one part of a long recording: where it sits, and the text before it, so the

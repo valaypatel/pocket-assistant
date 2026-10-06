@@ -96,6 +96,46 @@ class PhoneRecordingIds {
   }
 }
 
+/// The note for a finished phone recording. The audio is set at creation, because a note
+/// without audio is treated as lost, and every part is listed: a long recording is several
+/// files, and a note that lists only the first would silently drop the rest.
+CircuitNote noteForPhoneRecording({
+  required String id,
+  required List<String> parts,
+  required DateTime startedAt,
+}) {
+  assert(parts.isNotEmpty);
+  return CircuitNote(
+    id: id,
+    createdAt: startedAt,
+    status: 'Saved on this phone.',
+    audioPath: parts.first,
+    audioParts: parts.length > 1 ? parts : const [],
+  );
+}
+
+/// A long phone recording's files in order: the first, then each next number while that
+/// file exists (phone-note-<n>.cnote, <n>+1, ...). [exists] says whether a path is a file.
+/// Used to find the parts of a note saved before notes listed them.
+List<String> consecutivePartPaths(
+  String firstPath,
+  bool Function(String path) exists,
+) {
+  final first = PhoneRecordingIds.numberOfPart(firstPath);
+  if (first == null) return [firstPath];
+  final folder = firstPath.substring(
+    0,
+    firstPath.length - 'phone-note-$first.cnote'.length,
+  );
+  final parts = [firstPath];
+  for (var next = first + 1; ; next++) {
+    final path = '${folder}phone-note-$next.cnote';
+    if (!exists(path)) break;
+    parts.add(path);
+  }
+  return parts;
+}
+
 String phoneRecordingClock(int milliseconds) {
   final seconds = milliseconds ~/ 1000;
   final rest = (seconds % 60).toString().padLeft(2, '0');
@@ -135,11 +175,58 @@ mixin _PhoneRecordingState {
 extension _PhoneRecording on _CircuitHomePageState {
   bool get _phoneRecordingActive => _phoneRecording.value != null;
 
+  /// Notes saved before they listed their parts point at the first minute only; the rest of
+  /// the recording is on the phone but unused. Link it back, once, without touching any note
+  /// that already lists its parts or any file another note owns.
+  Future<void> _repairPhoneNoteParts() async {
+    final owned = {for (final note in _notes) ...note.audioFiles};
+    var changed = false;
+    final repaired = <CircuitNote>[];
+    for (final note in _notes) {
+      final first = note.audioPath;
+      if (first == null ||
+          note.audioParts.isNotEmpty ||
+          PhoneRecordingIds.numberOfPart(first) == null) {
+        repaired.add(note);
+        continue;
+      }
+      final parts = consecutivePartPaths(
+        first,
+        (path) => !owned.contains(path) && File(path).existsSync(),
+      );
+      if (parts.length > 1) {
+        changed = true;
+        owned.addAll(parts);
+        repaired.add(
+          note.copyWith(
+            audioParts: parts,
+            partTexts: const [],
+            // A note with no transcript yet can now be transcribed in full; one that has
+            // a transcript keeps it (and its status) until the person asks again.
+            status: note.transcript == null
+                ? 'Saved. Ready to transcribe.'
+                : note.status,
+          ),
+        );
+      } else {
+        repaired.add(note);
+      }
+    }
+    if (!changed) return;
+    final preferences = await SharedPreferences.getInstance();
+    await _writeSecret(
+      preferences,
+      _notesKey,
+      jsonEncode(repaired.map((item) => item.toJson()).toList()),
+    );
+    if (mounted) _update(() => _notes = repaired);
+  }
+
   void _listenForPhoneRecording() {
     _phoneRecorderSubscription = _phoneRecorderEvents
         .receiveBroadcastStream()
         .listen(_handlePhoneRecorderEvent, onError: (Object _) {});
-    unawaited(_recoverPhoneRecording());
+    unawaited(_repairPhoneNoteParts().then((_) => _recoverPhoneRecording()));
   }
 
   /// A recording that ended while the app was closed (stopped from the notification,
@@ -338,14 +425,12 @@ extension _PhoneRecording on _CircuitHomePageState {
       await _phoneRecorder.invokeMethod<void>('clearPending');
       return;
     }
-    final note = CircuitNote(
+    final note = noteForPhoneRecording(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
-      createdAt: startedAt > 0
+      parts: present,
+      startedAt: startedAt > 0
           ? DateTime.fromMillisecondsSinceEpoch(startedAt)
           : DateTime.now(),
-      status: 'Saved on this phone.',
-      audioPath:
-          path, // set at creation: a note without audio is treated as lost
     );
     final notes = [note, ..._notes];
     final preferences = await SharedPreferences.getInstance();
