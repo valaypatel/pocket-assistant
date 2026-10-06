@@ -135,8 +135,10 @@ class PhoneRecorderService : Service() {
             actionResume -> { interrupted = false; pauseRequested = false }
             actionStop -> finishReason = "stopped"
             actionDiscard -> { discard = true; finishReason = "discarded" }
-            else -> if (!running) stopSelf()
+            else -> {}
         }
+        // A button tapped after the recording already ended must not leave an idle service.
+        if (!running && intent?.action != actionStart) stopSelf()
         return START_NOT_STICKY
     }
 
@@ -337,7 +339,7 @@ class PhoneRecorderService : Service() {
         val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
             .setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build(),
             )
