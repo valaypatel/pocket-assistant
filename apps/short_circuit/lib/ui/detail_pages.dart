@@ -333,6 +333,7 @@ class TranscriptPage extends StatefulWidget {
     this.noteById,
     this.onEnrich,
     this.onOpenChat,
+    this.onEditNote,
   });
 
   final DateTime createdAt;
@@ -365,6 +366,10 @@ class TranscriptPage extends StatefulWidget {
 
   /// Opens the chat about this note.
   final VoidCallback? onOpenChat;
+
+  /// Saves a hand-edited title and transcript. Hides the edit button when null.
+  final Future<void> Function(String noteId, String title, String transcript)?
+  onEditNote;
 
   @override
   State<TranscriptPage> createState() => _TranscriptPageState();
@@ -520,6 +525,30 @@ class _TranscriptPageState extends State<TranscriptPage> {
     }
   }
 
+  Future<void> _edit() async {
+    final live = _live;
+    final edited = await showDialog<(String, String)>(
+      context: context,
+      builder: (_) => _EditNoteDialog(
+        title: live?.title ?? _title,
+        transcript: live?.transcript ?? _transcript,
+      ),
+    );
+    if (edited == null || !mounted) return;
+    final (title, transcript) = edited;
+    if (title.isEmpty) {
+      _snack('A note needs a title.');
+      return;
+    }
+    await widget.onEditNote!(widget.noteId, title, transcript);
+    if (!mounted) return;
+    setState(() {
+      _title = title;
+      _transcript = transcript;
+    });
+    _snack('Note updated.');
+  }
+
   Future<void> _delete() async {
     final confirmed = await _confirmDeleteNote(context);
     if (!confirmed || !mounted) return;
@@ -570,6 +599,16 @@ class _TranscriptPageState extends State<TranscriptPage> {
             ),
             const SizedBox(height: 22),
             const ScGroupLabel('Transcript'),
+            if (widget.onEditNote != null)
+              Align(
+                alignment: Alignment.centerRight,
+                child: ScIconButton(
+                  size: 40,
+                  icon: LucideIcons.pencil,
+                  tooltip: 'Edit note',
+                  onPressed: _edit,
+                ),
+              ),
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(16),
@@ -776,4 +815,60 @@ class _TranscriptPageState extends State<TranscriptPage> {
       ),
     );
   }
+}
+
+/// Edits a note's title and transcript; pops a (title, transcript) pair on save.
+class _EditNoteDialog extends StatefulWidget {
+  const _EditNoteDialog({required this.title, required this.transcript});
+
+  final String title;
+  final String transcript;
+
+  @override
+  State<_EditNoteDialog> createState() => _EditNoteDialogState();
+}
+
+class _EditNoteDialogState extends State<_EditNoteDialog> {
+  late final _title = TextEditingController(text: widget.title);
+  late final _transcript = TextEditingController(text: widget.transcript);
+
+  @override
+  void dispose() {
+    _title.dispose();
+    _transcript.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Edit note'),
+    content: SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _title,
+            decoration: const InputDecoration(labelText: 'Title'),
+            textCapitalization: TextCapitalization.sentences,
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _transcript,
+            decoration: const InputDecoration(labelText: 'Transcript'),
+            minLines: 4,
+            maxLines: 12,
+            textCapitalization: TextCapitalization.sentences,
+          ),
+        ],
+      ),
+    ),
+    actions: scDialogActions(
+      context,
+      confirmIcon: LucideIcons.check,
+      confirmTooltip: 'Save changes',
+      onCancel: () => Navigator.pop(context),
+      onConfirm: () =>
+          Navigator.pop(context, (_title.text.trim(), _transcript.text.trim())),
+    ),
+  );
 }

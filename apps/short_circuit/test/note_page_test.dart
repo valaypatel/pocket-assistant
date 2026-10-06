@@ -20,6 +20,7 @@ TranscriptPage _page(List<NoteActionSuggestion> suggestions) => TranscriptPage(
 );
 
 void main() {
+  _editTests();
   // A button inside a Row must not demand infinite width. When it did, the whole
   // page failed to lay out and rendered blank, so notes with a pending suggestion
   // (the ones in the Review queue) could not be opened.
@@ -220,5 +221,69 @@ void chatTests() {
     await tester.pump();
     expect(task, 'Call the vendor');
     await tester.pumpAndSettle(const Duration(seconds: 5));
+  });
+}
+
+void _editTests() {
+  testWidgets('editing a note saves the new title and transcript', (
+    tester,
+  ) async {
+    String? savedTitle;
+    String? savedTranscript;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildScTheme(),
+        home: TranscriptPage(
+          createdAt: DateTime(2026, 10, 4, 21, 53),
+          noteId: 'n1',
+          category: 'note',
+          title: 'Old title',
+          status: 'Transcription ready',
+          transcript: 'old words',
+          onForceTranscribe: (_) async => null,
+          audioPath: null,
+          onPlayNote: (_) async {},
+          onDeleteNote: (_) async {},
+          onCreateReminder: (_) async => null,
+          onAddTask: (_, _) async {},
+          onSuggestionState: (_, _, _) async {},
+          onEditNote: (id, title, transcript) async {
+            savedTitle = title;
+            savedTranscript = transcript;
+          },
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('Edit note'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Title'),
+      'New title',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Transcript'),
+      'new words',
+    );
+    await tester.tap(find.byTooltip('Save changes'));
+    await tester.pumpAndSettle();
+
+    expect(savedTitle, 'New title');
+    expect(savedTranscript, 'new words');
+    expect(find.text('new words'), findsOneWidget);
+  });
+
+  test('a hand-edited title survives a JSON round trip', () {
+    final note = CircuitNote(
+      id: 'n1',
+      createdAt: DateTime(2026, 10, 4),
+      status: 'ok',
+      title: 'Mine',
+      titleEdited: true,
+    );
+    final back = CircuitNote.fromJson(note.toJson());
+    expect(back.titleEdited, isTrue);
+    expect(back.title, 'Mine');
   });
 }
