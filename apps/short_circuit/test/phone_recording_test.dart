@@ -78,15 +78,43 @@ void main() {
     });
   });
 
+  test('the last part of a recording is remembered as used', () async {
+    final preferences = await SharedPreferences.getInstance();
+    final now = DateTime.utc(2026, 10, 6, 12);
+    final first = await PhoneRecordingIds.nextNote(preferences, now: now);
+    final parts = [
+      for (var i = 0; i < 30; i++) '/f/phone-note-${first + i}.cnote',
+    ];
+    await PhoneRecordingIds.markUsed(preferences, parts);
+    // Even with the clock set back to before the recording, nothing is reused.
+    final next = await PhoneRecordingIds.nextNote(
+      preferences,
+      now: now.subtract(const Duration(hours: 1)),
+    );
+    expect(next, first + 30);
+    expect(PhoneRecordingIds.numberOfPart('/x/phone-note-77.cnote'), 77);
+    expect(PhoneRecordingIds.numberOfPart('/x/circuit-note-1-2.cnote'), isNull);
+  });
+
+  test('a cut-short file is measured from its size', () {
+    expect(PhoneRecordingIds.audioMillisecondsForFile(28), 0);
+    // 10 whole chunks: 10 x 4096 bytes of audio = 1.28 s.
+    expect(
+      PhoneRecordingIds.audioMillisecondsForFile(28 + 10 * (4096 + 16)),
+      1280,
+    );
+  });
+
   test('clock text', () {
     expect(phoneRecordingClock(0), '0:00');
     expect(phoneRecordingClock(61000), '1:01');
     expect(phoneRecordingClock(600000), '10:00');
+    expect(phoneRecordingClock(3723000), '1:02:03');
   });
 
   test('says why a recording ended when it was not the person', () {
     expect(phoneRecordingEndMessage('stopped'), isNull);
-    expect(phoneRecordingEndMessage('limit'), contains('10 minutes'));
+    expect(phoneRecordingEndMessage('limit'), contains('longest'));
     expect(phoneRecordingEndMessage('storage'), contains('saved'));
     expect(phoneRecordingEndMessage('error'), contains('saved'));
     expect(phoneRecordingFailureMessage('storage'), contains('storage'));
@@ -132,7 +160,10 @@ void sheetTests() {
       final recording = _recording('recording', 83000);
       final calls = await _pumpSheet(tester, recording);
       expect(find.text('1:23'), findsOneWidget);
-      expect(find.text('Stops by itself at 10:00'), findsOneWidget);
+      expect(
+        find.text('Saved as you go. There is no time limit.'),
+        findsOneWidget,
+      );
 
       await tester.tap(find.text('Pause'));
       recording.value = {'state': 'paused', 'elapsedMs': 83000, 'level': 0.0};

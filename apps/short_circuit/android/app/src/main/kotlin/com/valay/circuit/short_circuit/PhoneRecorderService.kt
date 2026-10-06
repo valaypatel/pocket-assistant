@@ -30,9 +30,10 @@ import kotlin.math.abs
  * microphone foreground service so it keeps going with the screen off, and seals the
  * audio into the encrypted note format as it arrives (see NoteSealer).
  *
- * The person's controls are Pause/Resume, Stop (keeps the note) and Discard. The
- * recording stops by itself at [limitSeconds], when storage runs low, or on an error;
- * in each case what was recorded is kept and the reason is reported.
+ * The person's controls are Pause/Resume, Stop (keeps the note) and Discard. There is no
+ * length limit: the audio is stored as one-minute parts (see PartedNoteWriter) so memory
+ * stays small however long it runs. It stops by itself only when storage runs low or on
+ * an error; what was recorded is kept and the reason is reported.
  */
 class PhoneRecorderService : Service() {
     companion object {
@@ -42,7 +43,8 @@ class PhoneRecorderService : Service() {
         const val actionStop = "com.valay.circuit.short_circuit.PHONE_RECORD_STOP"
         const val actionDiscard = "com.valay.circuit.short_circuit.PHONE_RECORD_DISCARD"
 
-        const val limitSeconds = 600
+        const val partSeconds = 60
+        const val maxParts = 9999 // about 166 hours; note numbers are one per part
         private const val sampleRate = 16000
         private const val minFreeBytes = 30L * 1024 * 1024
         private const val channelId = "phone_recorder"
@@ -57,10 +59,11 @@ class PhoneRecorderService : Service() {
         /** A recording that ended while the app was not listening, until the app saves it. */
         fun pending(context: Context): Map<String, Any?>? {
             val prefs = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-            val path = prefs.getString("path", null) ?: return null
+            val parts = prefs.getString("parts", null)?.split('\n')?.filter { it.isNotEmpty() } ?: return null
+            if (parts.isEmpty()) return null
             if (snapshot["state"] == "recording" || snapshot["state"] == "paused") return null
             return mapOf(
-                "path" to path,
+                "parts" to parts,
                 "keyId" to prefs.getInt("keyId", 0),
                 "startedAt" to prefs.getLong("startedAt", 0L),
                 "durationMs" to prefs.getLong("durationMs", 0L),
@@ -84,8 +87,8 @@ class PhoneRecorderService : Service() {
 
     private val main = Handler(Looper.getMainLooper())
     private var thread: Thread? = null
-    private var writer: EncryptedNoteWriter? = null
-    private var file: File? = null
+    private var writer: PartedNoteWriter? = null
+    private var directory: File? = null
     private var startedAt = 0L
     private var notifiedSecond = -1L
     private var notifiedPaused = false
@@ -156,8 +159,9 @@ class PhoneRecorderService : Service() {
             return
         }
         val target = File(path)
-        target.parentFile?.mkdirs()
-        if (target.parentFile?.usableSpace ?: 0L < minFreeBytes) {
+        val folder = target.parentFile ?: filesDir
+        folder.mkdirs()
+        if (folder.usableSpace < minFreeBytes) {
             fail("storage")
             return
         }
@@ -168,17 +172,15 @@ class PhoneRecorderService : Service() {
             fail("microphone")
             return
         }
-        file = target
+        directory = folder
         startedAt = System.currentTimeMillis()
-        getSharedPreferences(preferencesName, MODE_PRIVATE).edit().clear()
-            .putString("path", path).putInt("keyId", keyId).putLong("startedAt", startedAt).apply()
-        writer = try {
-            EncryptedNoteWriter(target, NoteSealer(key, keyId, noteId, sampleRate))
-        } catch (error: Exception) {
-            record.release()
-            fail("storage")
-            return
-        }
+        val prefs = getSharedPreferences(preferencesName, MODE_PRIVATE)
+        prefs.edit().clear().putInt("keyId", keyId).putLong("startedAt", startedAt).apply()
+        // Remember every part as it opens, so a recording cut short can still be saved.
+        writer = PartedNoteWriter(folder, key, keyId, noteId, sampleRate, partSeconds, onPartOpened = { part ->
+            val known = prefs.getString("parts", "") ?: ""
+            prefs.edit().putString("parts", if (known.isEmpty()) part.absolutePath else known + "\n" + part.absolutePath).commit()
+        })
         samples = 0
         pauseRequested = false
         paused = false
@@ -238,14 +240,14 @@ class PhoneRecorderService : Service() {
                     samples += read / 2
                     level = peak(buffer, read)
                 }
-                if (samples >= limitSeconds.toLong() * sampleRate) {
+                if ((writer?.partCount ?: 0) >= maxParts) {
                     reason = "limit"
                     break
                 }
                 val now = System.currentTimeMillis()
                 if (now - lastSpaceCheck > 5000) {
                     lastSpaceCheck = now
-                    if ((file?.parentFile?.usableSpace ?: Long.MAX_VALUE) < minFreeBytes / 2) {
+                    if ((directory?.usableSpace ?: Long.MAX_VALUE) < minFreeBytes / 2) {
                         reason = "storage"
                         break
                     }
@@ -275,22 +277,23 @@ class PhoneRecorderService : Service() {
 
     private fun finish(reason: String) {
         running = false
-        val target = file
         val durationMs = samples * 1000 / sampleRate
+        var parts: List<String> = emptyList()
         try {
             if (discard) {
                 writer?.abort()
-                target?.delete()
+                writer?.files?.forEach { it.delete() }
             } else {
-                writer?.finish()
+                parts = writer?.finish()?.map { it.absolutePath } ?: emptyList()
             }
         } catch (error: Exception) {
             Log.w("PhoneRecorder", "Could not finish the note: ${error.message}")
+            parts = writer?.files?.map { it.absolutePath } ?: emptyList()
         }
         writer = null
         abandonFocus()
         val prefs = getSharedPreferences(preferencesName, MODE_PRIVATE)
-        if (discard || target == null) {
+        if (discard || parts.isEmpty()) {
             prefs.edit().clear().apply()
         } else {
             prefs.edit().putLong("durationMs", durationMs).putString("reason", reason).apply()
@@ -300,7 +303,7 @@ class PhoneRecorderService : Service() {
             val done = mapOf(
                 "state" to if (discard) "discarded" else "stopped",
                 "reason" to reason,
-                "path" to if (discard) null else target?.absolutePath,
+                "parts" to if (discard) emptyList<String>() else parts,
                 "durationMs" to durationMs,
                 "startedAt" to startedAt,
             )
@@ -325,7 +328,7 @@ class PhoneRecorderService : Service() {
             "state" to state,
             "elapsedMs" to samples * 1000 / sampleRate,
             "level" to level.toDouble(),
-            "limitMs" to limitSeconds * 1000L,
+            "parts" to (writer?.partCount ?: 0),
             "interrupted" to interrupted,
             "startedAt" to startedAt,
         )

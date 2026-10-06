@@ -21,6 +21,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'telemetry.dart';
 part 'backup.dart';
 part 'groups.dart';
+part 'long_notes.dart';
 part 'music.dart';
 part 'now_playing.dart';
 part 'phone_recording.dart';
@@ -145,6 +146,7 @@ class GeminiClient {
   Future<GeminiTranscription> transcribeWav(
     Uint8List wavBytes, {
     bool detectMusic = true,
+    PartContext? part,
   }) async {
     final key = await apiKey();
     if (key == null || key.trim().isEmpty) {
@@ -168,7 +170,8 @@ class GeminiClient {
                         'Transcribe this voice note exactly. Preserve Gujarati script, English, and mixed Gujarati-English. Return the complete transcription only. Do not summarise, classify, translate, or add a title.'
                         '${detectMusic ? ' Exception: if the recording is mainly music or a song playing, with no one speaking to record a note, reply with exactly [[MUSIC]] and nothing else.' : ''}'
                         ' If two or more different people clearly speak, start each change of speaker on a new line labelled "Speaker 1:", "Speaker 2:" and so on, using the same label for the same voice throughout. If only one person speaks, add no label.'
-                        ' If it is only silence or background noise, reply with exactly [[NOISE]].',
+                        ' If it is only silence or background noise, reply with exactly [[NOISE]].'
+                        '${_partInstruction(part)}',
                   },
                   {
                     'inline_data': {
@@ -202,6 +205,24 @@ class GeminiClient {
     return parseTranscriptionText(result, allowMusic: detectMusic);
   }
 
+  /// For one part of a long recording: where it sits, and the text before it, so the
+  /// model carries names, topics and speaker labels on without repeating anything.
+  static String _partInstruction(PartContext? part) {
+    if (part == null) return '';
+    final buffer = StringBuffer(
+      ' This is part ${part.number} of ${part.count} of one longer recording, in order. '
+      'It may begin or end in the middle of a sentence: transcribe exactly what is said in this part only.',
+    );
+    if (part.earlier.isNotEmpty) {
+      buffer.write(
+        ' The transcript so far ends with the text between the markers, for context only; '
+        'do not repeat it, and keep the same speaker labels for the same voices.'
+        '\n<<<\n${part.earlier}\n>>>',
+      );
+    }
+    return buffer.toString();
+  }
+
   /// Turns Gemini's plain-text answer into a transcription. A recording of
   /// music comes back as the [[MUSIC]] marker and silence as [[NOISE]].
   static GeminiTranscription parseTranscriptionText(
@@ -212,7 +233,7 @@ class GeminiClient {
     if (result.isEmpty ||
         result.startsWith('[[NOISE]]') ||
         (!allowMusic && result.startsWith('[[MUSIC]]'))) {
-      throw Exception('No speech detected.');
+      throw const NoSpeechDetected();
     }
     if (result.startsWith('[[MUSIC]]')) {
       return const GeminiTranscription(
@@ -683,6 +704,8 @@ class CircuitNote {
     this.kind = 'voice',
     this.song,
     this.titleEdited = false,
+    this.audioParts = const [],
+    this.partTexts = const [],
   });
 
   final String id;
@@ -711,6 +734,19 @@ class CircuitNote {
 
   /// True once the user has chosen the title; AI review then leaves it alone.
   final bool titleEdited;
+
+  /// A long recording is stored as an ordered series of one-minute files. This lists all
+  /// of them (the first is also [audioPath]); it is empty for a note with a single file.
+  final List<String> audioParts;
+
+  /// The text of each part, in order, kept as transcription goes so that a failure
+  /// resumes at the first part still missing. null = not done yet, '' = silent part.
+  final List<String?> partTexts;
+
+  /// Every audio file the note owns, in playing order.
+  List<String> get audioFiles => audioParts.isNotEmpty
+      ? audioParts
+      : (audioPath == null ? const [] : [audioPath!]);
 
   bool get isSong => kind == 'song';
 
@@ -742,6 +778,12 @@ class CircuitNote {
         ? SongResult.fromJson(json['song'] as Map<String, dynamic>)
         : null,
     titleEdited: json['titleEdited'] == true,
+    audioParts: (json['audioParts'] as List<dynamic>? ?? const [])
+        .map((value) => value.toString())
+        .toList(),
+    partTexts: (json['partTexts'] as List<dynamic>? ?? const [])
+        .map((value) => value?.toString())
+        .toList(),
   );
 
   CircuitNote copyWith({
@@ -761,6 +803,8 @@ class CircuitNote {
     SongResult? song,
     String? kind,
     bool? titleEdited,
+    List<String>? audioParts,
+    List<String?>? partTexts,
     bool clearSong = false,
   }) => CircuitNote(
     id: id,
@@ -781,6 +825,8 @@ class CircuitNote {
     kind: kind ?? this.kind,
     song: clearSong ? null : (song ?? this.song),
     titleEdited: titleEdited ?? this.titleEdited,
+    audioParts: audioParts ?? this.audioParts,
+    partTexts: partTexts ?? this.partTexts,
   );
 
   Map<String, dynamic> toJson() => {
@@ -805,6 +851,8 @@ class CircuitNote {
     if (isSong) 'kind': kind,
     if (song != null) 'song': song!.toJson(),
     if (titleEdited) 'titleEdited': true,
+    if (audioParts.isNotEmpty) 'audioParts': audioParts,
+    if (partTexts.isNotEmpty) 'partTexts': partTexts,
   };
 }
 
@@ -907,7 +955,7 @@ class CircuitHomePage extends StatefulWidget {
 }
 
 class _CircuitHomePageState extends State<CircuitHomePage>
-    with _PhoneRecordingState, _NowPlayingState {
+    with _PhoneRecordingState, _NowPlayingState, _LongNoteState {
   final _wifiSsidController = TextEditingController();
   final _wifiPasswordController = TextEditingController();
   final _noteSearchController = TextEditingController();
@@ -1273,6 +1321,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   }) async {
     if (_transcribingNoteId != null) return null;
     final note = _notes.where((item) => item.id == id).firstOrNull;
+    if ((note?.audioFiles.length ?? 0) > 1) return _transcribeLongNote(id);
     final path = note?.audioPath;
     if (path == null || ((note?.isSong ?? false) && !asSpeech)) return null;
     if (asSpeech && (note?.isSong ?? false)) {
@@ -2342,6 +2391,19 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _setStatus('This note has not finished syncing yet.');
       return;
     }
+    _playbackToken++; // a new request replaces any part-by-part playback in progress
+    _sequencePlaying = false;
+    final playedNote = _notes
+        .where((note) => note.audioPath == path)
+        .firstOrNull;
+    final parts = playedNote?.audioFiles;
+    final title = (playedNote?.title?.trim().isNotEmpty ?? false)
+        ? playedNote!.title!
+        : 'Voice note';
+    if (parts != null && parts.length > 1) {
+      await _playNoteParts(parts, title);
+      return;
+    }
     bool? started;
     try {
       final bytes = await File(path).readAsBytes();
@@ -2360,12 +2422,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _setStatus('$error');
       return;
     }
-    if (started == true) {
-      final note = _notes.where((n) => n.audioPath == path).firstOrNull;
-      _startNowPlaying(
-        (note?.title?.trim().isNotEmpty ?? false) ? note!.title! : 'Voice note',
-      );
-    }
+    if (started == true) _startNowPlaying(title);
     _setStatus(
       started == true
           ? 'Playing this voice note on your phone.'
@@ -2483,9 +2540,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _lastBoardDeleteSent = null;
       _processBoardDeletes();
     }
-    if (note?.audioPath != null) {
+    for (final path in note?.audioFiles ?? const <String>[]) {
       try {
-        await File(note!.audioPath!).delete();
+        await File(path).delete();
       } catch (_) {
         // The file may already have been removed.
       }

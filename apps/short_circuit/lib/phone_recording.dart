@@ -48,9 +48,15 @@ class PhoneRecordingIds {
     return (keyId: id, key: key);
   }
 
+  /// A recording is stored as parts numbered first, first + 1, ... (one per minute). The
+  /// next recording starts at the larger of "last used + 1" and the seconds since 2026,
+  /// and a recording of N parts took at least 60 x N seconds, so the clock alone keeps
+  /// the numbers apart even if the saved counter were lost. [markUsed] also records the
+  /// last part's number, which covers a clock that was set back.
   static int numberAfter(int last, DateTime now) =>
       max(last + 1, now.toUtc().difference(_epoch).inSeconds);
 
+  /// The number of a new recording's first part.
   static Future<int> nextNote(
     SharedPreferences preferences, {
     DateTime? now,
@@ -62,18 +68,46 @@ class PhoneRecordingIds {
     await preferences.setInt(lastNotePreference, number);
     return number;
   }
+
+  /// The number inside a part's file name (phone-note-<number>.cnote), or null.
+  static int? numberOfPart(String path) => int.tryParse(
+    RegExp(r'phone-note-(\d+)\.cnote$').firstMatch(path)?.group(1) ?? '',
+  );
+
+  /// Notes that a recording used up to this part, so no later recording reuses its numbers.
+  static Future<void> markUsed(
+    SharedPreferences preferences,
+    Iterable<String> parts,
+  ) async {
+    var last = preferences.getInt(lastNotePreference) ?? 0;
+    for (final part in parts) {
+      last = max(last, numberOfPart(part) ?? 0);
+    }
+    await preferences.setInt(lastNotePreference, last);
+  }
+
+  /// About how long a note file's audio is, from its size: a 28-byte header, then
+  /// 4096-byte chunks of 16 kHz 16-bit audio each followed by a 16-byte tag. Used for a
+  /// recording cut short, whose length was never written down.
+  static int audioMillisecondsForFile(int fileBytes) {
+    if (fileBytes <= 28) return 0;
+    final audio = (fileBytes - 28) * 4096 ~/ (4096 + 16);
+    return audio * 1000 ~/ 32000;
+  }
 }
 
 String phoneRecordingClock(int milliseconds) {
   final seconds = milliseconds ~/ 1000;
-  final minutes = seconds ~/ 60;
   final rest = (seconds % 60).toString().padLeft(2, '0');
-  return '$minutes:$rest';
+  if (seconds < 3600) return '${seconds ~/ 60}:$rest';
+  final minutes = ((seconds % 3600) ~/ 60).toString().padLeft(2, '0');
+  return '${seconds ~/ 3600}:$minutes:$rest';
 }
 
 /// What the person is told when a recording ends for a reason other than their Stop.
 String? phoneRecordingEndMessage(String? reason) => switch (reason) {
-  'limit' => 'Stopped at 10 minutes. Your note is saved.',
+  'limit' =>
+    'This is the longest recording the app can make. Your note is saved.',
   'storage' =>
     'Storage is nearly full, so the recording stopped. Your note is saved.',
   'error' ||
@@ -125,7 +159,9 @@ extension _PhoneRecording on _CircuitHomePageState {
       );
       if (pending == null) return;
       await _saveFinishedPhoneRecording(
-        path: pending['path'] as String?,
+        parts: (pending['parts'] as List<dynamic>? ?? const [])
+            .map((part) => part.toString())
+            .toList(),
         durationMs: (pending['durationMs'] as num?)?.toInt() ?? 0,
         startedAt: (pending['startedAt'] as num?)?.toInt() ?? 0,
         reason: pending['reason'] as String?,
@@ -229,7 +265,9 @@ extension _PhoneRecording on _CircuitHomePageState {
         _phoneRecording.value = null;
         _closePhoneRecorderSheet();
         await _saveFinishedPhoneRecording(
-          path: data['path'] as String?,
+          parts: (data['parts'] as List<dynamic>? ?? const [])
+              .map((part) => part.toString())
+              .toList(),
           durationMs: (data['durationMs'] as num?)?.toInt() ?? 0,
           startedAt: (data['startedAt'] as num?)?.toInt() ?? 0,
           reason: data['reason'] as String?,
@@ -239,34 +277,50 @@ extension _PhoneRecording on _CircuitHomePageState {
 
   /// Turns a finished recording into a note, then starts transcription if it is on.
   Future<void> _saveFinishedPhoneRecording({
-    required String? path,
+    required List<String> parts,
     required int durationMs,
     required int startedAt,
     required String? reason,
   }) async {
-    if (path == null || !_phoneSaving.add(path)) return;
+    if (parts.isEmpty || !_phoneSaving.add(parts.first)) return;
     try {
       await _saveFinishedPhoneRecordingNow(
-        path: path,
+        parts: parts,
         durationMs: durationMs,
         startedAt: startedAt,
         reason: reason,
       );
     } finally {
-      _phoneSaving.remove(path);
+      _phoneSaving.remove(parts.first);
     }
   }
 
   Future<void> _saveFinishedPhoneRecordingNow({
-    required String path,
+    required List<String> parts,
     required int durationMs,
     required int startedAt,
     required String? reason,
   }) async {
-    final file = File(path);
-    final exists = await file.exists();
-    if (!exists || durationMs < _shortestPhoneRecording.inMilliseconds) {
-      if (exists) await file.delete();
+    // Only parts that are on disk and hold audio count.
+    final present = <String>[];
+    var measuredMs = 0;
+    for (final path in parts) {
+      final file = File(path);
+      if (!await file.exists()) continue;
+      final length = await file.length();
+      if (length <= NoteCrypto.headerBytes) {
+        await file.delete();
+        continue;
+      }
+      present.add(path);
+      measuredMs += PhoneRecordingIds.audioMillisecondsForFile(length);
+    }
+    // A recording cut short by the system has no length written down: use the files.
+    final lengthMs = durationMs > 0 ? durationMs : measuredMs;
+    if (present.isEmpty || lengthMs < _shortestPhoneRecording.inMilliseconds) {
+      for (final path in present) {
+        await File(path).delete();
+      }
       await _phoneRecorder.invokeMethod<void>('clearPending');
       if (mounted && reason == 'stopped') {
         ScaffoldMessenger.of(
@@ -275,6 +329,11 @@ extension _PhoneRecording on _CircuitHomePageState {
       }
       return;
     }
+    final path = present.first;
+    await PhoneRecordingIds.markUsed(
+      await SharedPreferences.getInstance(),
+      parts,
+    );
     if (_notes.any((note) => note.audioPath == path)) {
       await _phoneRecorder.invokeMethod<void>('clearPending');
       return;
@@ -299,7 +358,7 @@ extension _PhoneRecording on _CircuitHomePageState {
     await _phoneRecorder.invokeMethod<void>('clearPending');
     if (mounted) _update(() => _notes = notes);
     Telemetry.event('phone_record_saved', {
-      'minutes': (durationMs / 60000).round(),
+      'minutes': (lengthMs / 60000).round(),
       'ended': reason ?? 'stopped',
     });
     final message = phoneRecordingEndMessage(reason);
@@ -394,7 +453,6 @@ class PhoneRecorderSheet extends StatelessWidget {
         );
         final paused = state == 'paused';
         final interrupted = data?['interrupted'] == true;
-        final limitMs = (data?['limitMs'] as num?)?.toInt() ?? 600000;
         return Container(
           margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
           padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
@@ -434,7 +492,7 @@ class PhoneRecorderSheet extends StatelessWidget {
                   child: Text(
                     interrupted
                         ? 'Paused because another app is using the microphone.'
-                        : 'Stops by itself at ${phoneRecordingClock(limitMs)}',
+                        : 'Saved as you go. There is no time limit.',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: interrupted ? Sc.orange : Sc.muted),
                   ),
