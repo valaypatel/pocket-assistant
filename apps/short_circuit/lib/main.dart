@@ -21,7 +21,9 @@ import 'package:url_launcher/url_launcher.dart';
 import 'telemetry.dart';
 part 'backup.dart';
 part 'groups.dart';
+part 'long_notes.dart';
 part 'music.dart';
+part 'note_source.dart';
 part 'now_playing.dart';
 part 'phone_recording.dart';
 part 'secure_notes.dart';
@@ -67,6 +69,42 @@ bool shouldReplaceCircuitPairing({
   required bool userRequestedPairing,
 }) => isBonded && userRequestedPairing;
 
+/// 'Phone' or 'Circuit' from the recording's file. This phone's recorder names its files
+/// phone-note-<number>.cnote; everything else, from Circuit's synced files (circuit-note-...)
+/// to a recording still waiting to sync or a song clip, was made by the board.
+String noteSourceOf(String? audioPath) =>
+    (audioPath?.split('/').last ?? '').startsWith('phone-note-')
+    ? 'Phone'
+    : 'Circuit';
+
+/// The two counts Circuit shows on its own screen: notes still waiting to reach the phone,
+/// and notes that have. They are Circuit's notes only. A recording made on the phone never
+/// went through the board, so it must not appear in the board's totals.
+({int pending, int synced}) boardNoteCounts(Iterable<CircuitNote> notes) {
+  var pending = 0;
+  var synced = 0;
+  for (final note in notes) {
+    if (note.source == 'Phone') continue;
+    note.audioPath == null ? pending++ : synced++;
+  }
+  return (pending: pending, synced: synced);
+}
+
+/// How far along a note is, from its audio to its AI review. "Transcribed" means the text is
+/// there but the AI review has not run; once it has, the note says so.
+String noteStageLabel(CircuitNote note) {
+  if (note.enrichmentStatus == 'enriching') return 'AI reviewing';
+  if (note.enrichmentStatus == 'failed') return 'AI review failed';
+  if (note.actionSuggestions.any((item) => item.state == 'pending')) {
+    return 'Action to review';
+  }
+  if (note.transcript != null) {
+    return note.enrichmentStatus == 'ready' ? 'AI reviewed' : 'Transcribed';
+  }
+  if (note.audioPath != null) return 'Ready to transcribe';
+  return 'Waiting to sync';
+}
+
 /// What the phone's link to Circuit is doing, read from the background service's status.
 /// "Running" is not "connected": the service also runs while it is still trying.
 enum RelayLink { off, trying, connected, needsRepair }
@@ -89,6 +127,38 @@ bool shouldEnrichAutomatically({
   required bool aiConnected,
   required bool autoEnrich,
 }) => aiConnected && autoEnrich;
+
+/// The text of Gemini's answer. An answer with no text because the request was blocked or
+/// cut short is an error to report, not "no speech": silence comes back as an empty or
+/// [[NOISE]] answer to a request that went through.
+String? geminiAnswerText(Map<String, dynamic> decoded) {
+  final candidates = decoded['candidates'] as List<dynamic>?;
+  if (candidates == null || candidates.isEmpty) {
+    final blocked =
+        (decoded['promptFeedback'] as Map<String, dynamic>?)?['blockReason'];
+    throw Exception(
+      'Gemini gave no answer${blocked == null ? '' : ' (blocked: $blocked)'}.',
+    );
+  }
+  final candidate = candidates.first as Map<String, dynamic>;
+  final parts =
+      (candidate['content'] as Map<String, dynamic>?)?['parts']
+          as List<dynamic>?;
+  final text = parts
+      ?.whereType<Map<String, dynamic>>()
+      .map((part) => part['text'])
+      .whereType<String>()
+      .join()
+      .trim();
+  final reason = candidate['finishReason'] as String?;
+  if ((text == null || text.isEmpty) &&
+      reason != null &&
+      reason != 'STOP' &&
+      reason != 'FINISH_REASON_UNSPECIFIED') {
+    throw Exception('Gemini stopped without an answer ($reason).');
+  }
+  return text;
+}
 
 class GeminiClient {
   const GeminiClient();
@@ -145,6 +215,7 @@ class GeminiClient {
   Future<GeminiTranscription> transcribeWav(
     Uint8List wavBytes, {
     bool detectMusic = true,
+    PartContext? part,
   }) async {
     final key = await apiKey();
     if (key == null || key.trim().isEmpty) {
@@ -168,7 +239,8 @@ class GeminiClient {
                         'Transcribe this voice note exactly. Preserve Gujarati script, English, and mixed Gujarati-English. Return the complete transcription only. Do not summarise, classify, translate, or add a title.'
                         '${detectMusic ? ' Exception: if the recording is mainly music or a song playing, with no one speaking to record a note, reply with exactly [[MUSIC]] and nothing else.' : ''}'
                         ' If two or more different people clearly speak, start each change of speaker on a new line labelled "Speaker 1:", "Speaker 2:" and so on, using the same label for the same voice throughout. If only one person speaks, add no label.'
-                        ' If it is only silence or background noise, reply with exactly [[NOISE]].',
+                        ' If it is only silence or background noise, reply with exactly [[NOISE]].'
+                        '${_partInstruction(part)}',
                   },
                   {
                     'inline_data': {
@@ -187,19 +259,28 @@ class GeminiClient {
       throw Exception('Gemini ${response.statusCode}: ${response.body}');
     }
     final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-    final candidates = decoded['candidates'] as List<dynamic>?;
-    final content = candidates?.isNotEmpty == true
-        ? (candidates!.first as Map<String, dynamic>)['content']
-              as Map<String, dynamic>?
-        : null;
-    final text = content?['parts'] as List<dynamic>?;
-    final result = text
-        ?.whereType<Map<String, dynamic>>()
-        .map((part) => part['text'])
-        .whereType<String>()
-        .join()
-        .trim();
-    return parseTranscriptionText(result, allowMusic: detectMusic);
+    return parseTranscriptionText(
+      geminiAnswerText(decoded),
+      allowMusic: detectMusic,
+    );
+  }
+
+  /// For one part of a long recording: where it sits, and the text before it, so the
+  /// model carries names, topics and speaker labels on without repeating anything.
+  static String _partInstruction(PartContext? part) {
+    if (part == null) return '';
+    final buffer = StringBuffer(
+      ' This is part ${part.number} of ${part.count} of one longer recording, in order. '
+      'It may begin or end in the middle of a sentence: transcribe exactly what is said in this part only.',
+    );
+    if (part.earlier.isNotEmpty) {
+      buffer.write(
+        ' The transcript so far ends with the text between the markers, for context only; '
+        'do not repeat it, and keep the same speaker labels for the same voices.'
+        '\n<<<\n${part.earlier}\n>>>',
+      );
+    }
+    return buffer.toString();
   }
 
   /// Turns Gemini's plain-text answer into a transcription. A recording of
@@ -212,7 +293,7 @@ class GeminiClient {
     if (result.isEmpty ||
         result.startsWith('[[NOISE]]') ||
         (!allowMusic && result.startsWith('[[MUSIC]]'))) {
-      throw Exception('No speech detected.');
+      throw const NoSpeechDetected();
     }
     if (result.startsWith('[[MUSIC]]')) {
       return const GeminiTranscription(
@@ -683,6 +764,8 @@ class CircuitNote {
     this.kind = 'voice',
     this.song,
     this.titleEdited = false,
+    this.audioParts = const [],
+    this.partTexts = const [],
   });
 
   final String id;
@@ -712,7 +795,23 @@ class CircuitNote {
   /// True once the user has chosen the title; AI review then leaves it alone.
   final bool titleEdited;
 
+  /// A long recording is stored as an ordered series of one-minute files. This lists all
+  /// of them (the first is also [audioPath]); it is empty for a note with a single file.
+  final List<String> audioParts;
+
+  /// The text of each part, in order, kept as transcription goes so that a failure
+  /// resumes at the first part still missing. null = not done yet, '' = silent part.
+  final List<String?> partTexts;
+
+  /// Every audio file the note owns, in playing order.
+  List<String> get audioFiles => audioParts.isNotEmpty
+      ? audioParts
+      : (audioPath == null ? const [] : [audioPath!]);
+
   bool get isSong => kind == 'song';
+
+  /// Where the recording was made: 'Phone' (this phone's own recorder) or 'Circuit'.
+  String get source => noteSourceOf(audioPath);
 
   factory CircuitNote.fromJson(Map<String, dynamic> json) => CircuitNote(
     id: json['id'] as String,
@@ -742,6 +841,12 @@ class CircuitNote {
         ? SongResult.fromJson(json['song'] as Map<String, dynamic>)
         : null,
     titleEdited: json['titleEdited'] == true,
+    audioParts: (json['audioParts'] as List<dynamic>? ?? const [])
+        .map((value) => value.toString())
+        .toList(),
+    partTexts: (json['partTexts'] as List<dynamic>? ?? const [])
+        .map((value) => value?.toString())
+        .toList(),
   );
 
   CircuitNote copyWith({
@@ -761,6 +866,8 @@ class CircuitNote {
     SongResult? song,
     String? kind,
     bool? titleEdited,
+    List<String>? audioParts,
+    List<String?>? partTexts,
     bool clearSong = false,
   }) => CircuitNote(
     id: id,
@@ -781,6 +888,8 @@ class CircuitNote {
     kind: kind ?? this.kind,
     song: clearSong ? null : (song ?? this.song),
     titleEdited: titleEdited ?? this.titleEdited,
+    audioParts: audioParts ?? this.audioParts,
+    partTexts: partTexts ?? this.partTexts,
   );
 
   Map<String, dynamic> toJson() => {
@@ -805,6 +914,8 @@ class CircuitNote {
     if (isSong) 'kind': kind,
     if (song != null) 'song': song!.toJson(),
     if (titleEdited) 'titleEdited': true,
+    if (audioParts.isNotEmpty) 'audioParts': audioParts,
+    if (partTexts.isNotEmpty) 'partTexts': partTexts,
   };
 }
 
@@ -907,7 +1018,7 @@ class CircuitHomePage extends StatefulWidget {
 }
 
 class _CircuitHomePageState extends State<CircuitHomePage>
-    with _PhoneRecordingState, _NowPlayingState {
+    with _PhoneRecordingState, _NowPlayingState, _LongNoteState {
   final _wifiSsidController = TextEditingController();
   final _wifiPasswordController = TextEditingController();
   final _noteSearchController = TextEditingController();
@@ -994,6 +1105,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       GlobalKey(); // where the recording pill grows from and folds back to
   bool _relayActive = false; // the background service is running
   RelayLink _relayLink = RelayLink.off; // what its link to Circuit is doing
+  String _noteSource =
+      noteSourceAll; // the Notes page filter: All, Phone or Circuit
   // Android no longer holds Circuit's pairing; the user chooses when to pair again.
   bool _needsPairingRepair = false;
   List<String> _wifiNetworks = [];
@@ -1273,6 +1386,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   }) async {
     if (_transcribingNoteId != null) return null;
     final note = _notes.where((item) => item.id == id).firstOrNull;
+    if ((note?.audioFiles.length ?? 0) > 1) return _transcribeLongNote(id);
     final path = note?.audioPath;
     if (path == null || ((note?.isSong ?? false) && !asSpeech)) return null;
     if (asSpeech && (note?.isSong ?? false)) {
@@ -2342,6 +2456,19 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _setStatus('This note has not finished syncing yet.');
       return;
     }
+    _playbackToken++; // a new request replaces any part-by-part playback in progress
+    _sequencePlaying = false;
+    final playedNote = _notes
+        .where((note) => note.audioPath == path)
+        .firstOrNull;
+    final parts = playedNote?.audioFiles;
+    final title = (playedNote?.title?.trim().isNotEmpty ?? false)
+        ? playedNote!.title!
+        : 'Voice note';
+    if (parts != null && parts.length > 1) {
+      await _playNoteParts(parts, title);
+      return;
+    }
     bool? started;
     try {
       final bytes = await File(path).readAsBytes();
@@ -2360,12 +2487,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _setStatus('$error');
       return;
     }
-    if (started == true) {
-      final note = _notes.where((n) => n.audioPath == path).firstOrNull;
-      _startNowPlaying(
-        (note?.title?.trim().isNotEmpty ?? false) ? note!.title! : 'Voice note',
-      );
-    }
+    if (started == true) _startNowPlaying(title);
     _setStatus(
       started == true
           ? 'Playing this voice note on your phone.'
@@ -2483,9 +2605,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _lastBoardDeleteSent = null;
       _processBoardDeletes();
     }
-    if (note?.audioPath != null) {
+    for (final path in note?.audioFiles ?? const <String>[]) {
       try {
-        await File(note!.audioPath!).delete();
+        await File(path).delete();
       } catch (_) {
         // The file may already have been removed.
       }
@@ -2525,8 +2647,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
     final date =
         '${weekdays[now.weekday - 1]} ${now.day.toString().padLeft(2, '0')} ${months[now.month - 1]}';
-    final synced = _notes.where((note) => note.audioPath != null).length;
-    final pending = _notes.length - synced;
+    final (:pending, :synced) = boardNoteCounts(_notes);
     // Saving a note triggers this, and a sync saves one many times a second.
     // Each message makes Circuit redraw, so only send when the counts changed or
     // the periodic refresh is due.

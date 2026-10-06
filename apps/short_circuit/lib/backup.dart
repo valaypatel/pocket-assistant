@@ -297,6 +297,10 @@ class BackupStore {
     for (final note in _maps(await _readSecret(preferences, _notesKey))) {
       final copy = Map<String, dynamic>.from(note);
       final path = copy.remove('audioPath') as String?;
+      final partPaths =
+          (copy.remove('audioParts') as List<dynamic>? ?? const [])
+              .map((part) => part.toString())
+              .toList();
       if (path != null && includeAudio) {
         final file = File(path);
         if (await file.exists()) {
@@ -306,6 +310,18 @@ class BackupStore {
             audio.add(BackupAudio(name, await file.readAsBytes()));
           }
         }
+        // A long note is several files; each goes in, in order.
+        final partNames = <String>[];
+        for (final partPath in partPaths) {
+          final part = File(partPath);
+          if (!await part.exists()) continue;
+          final name = _basename(partPath);
+          partNames.add(name);
+          if (names.add(name)) {
+            audio.add(BackupAudio(name, await part.readAsBytes()));
+          }
+        }
+        if (partNames.length > 1) copy['audioParts'] = partNames;
       }
       notes.add(copy);
     }
@@ -389,11 +405,26 @@ class BackupStore {
       }
       final copy = Map<String, dynamic>.from(note);
       final name = copy.remove('audioPath') as String?;
+      final partNames =
+          (copy.remove('audioParts') as List<dynamic>? ?? const [])
+              .map((part) => part.toString())
+              .toList();
       final bytes = name == null ? null : audioByName[_basename(name)];
       if (bytes != null) {
         final target = File('${filesDir.path}/${_basename(name!)}');
         if (!await target.exists()) await target.writeAsBytes(bytes);
         copy['audioPath'] = target.path;
+        final restored = <String>[];
+        for (final partName in partNames) {
+          final partBytes = audioByName[_basename(partName)];
+          if (partBytes == null) continue;
+          final part = File('${filesDir.path}/${_basename(partName)}');
+          if (!await part.exists()) await part.writeAsBytes(partBytes);
+          restored.add(part.path);
+        }
+        if (restored.length > 1) copy['audioParts'] = restored;
+        // Saved text lines up with the parts; if any part is missing it no longer does.
+        if (restored.length != partNames.length) copy.remove('partTexts');
       }
       idMap[id] = id;
       added.add(copy);

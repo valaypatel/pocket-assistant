@@ -78,15 +78,152 @@ void main() {
     });
   });
 
+  test('the last part of a recording is remembered as used', () async {
+    final preferences = await SharedPreferences.getInstance();
+    final now = DateTime.utc(2026, 10, 6, 12);
+    final first = await PhoneRecordingIds.nextNote(preferences, now: now);
+    final parts = [
+      for (var i = 0; i < 30; i++) '/f/phone-note-${first + i}.cnote',
+    ];
+    await PhoneRecordingIds.markUsed(preferences, parts);
+    // Even with the clock set back to before the recording, nothing is reused.
+    final next = await PhoneRecordingIds.nextNote(
+      preferences,
+      now: now.subtract(const Duration(hours: 1)),
+    );
+    expect(next, first + 30);
+    expect(PhoneRecordingIds.numberOfPart('/x/phone-note-77.cnote'), 77);
+    expect(PhoneRecordingIds.numberOfPart('/x/circuit-note-1-2.cnote'), isNull);
+  });
+
+  test('a cut-short file is measured from its size', () {
+    expect(PhoneRecordingIds.audioMillisecondsForFile(28), 0);
+    // 10 whole chunks: 10 x 4096 bytes of audio = 1.28 s.
+    expect(
+      PhoneRecordingIds.audioMillisecondsForFile(28 + 10 * (4096 + 16)),
+      1280,
+    );
+  });
+
+  group(
+    'which notes Circuit counts and which are marked as from the phone',
+    () {
+      CircuitNote note(String? audio, {int? board, String kind = 'voice'}) =>
+          CircuitNote(
+            id: '${audio ?? 'x'}$board',
+            createdAt: DateTime.utc(2026, 10, 6),
+            status: 'ok',
+            audioPath: audio,
+            boardId: board,
+            kind: kind,
+          );
+
+      test('the source comes from the file name', () {
+        expect(note('/f/phone-note-12.cnote').source, 'Phone');
+        expect(
+          note('/f/circuit-note-1760000000-4.cnote', board: 4).source,
+          'Circuit',
+        );
+        expect(
+          note(null, board: 9).source,
+          'Circuit',
+        ); // waiting to sync from the board
+        // Everything the phone did not record was made by Circuit.
+        expect(note('/f/old.wav').source, 'Circuit');
+        expect(noteSourceOf(null), 'Circuit');
+        expect(
+          note('/f/clip.wav', kind: 'song').source,
+          'Circuit', // a song clip is always taken by Circuit
+        );
+      });
+
+      test("Circuit's totals leave out the phone's recordings", () {
+        final counts = boardNoteCounts([
+          note('/f/circuit-note-1-1.cnote', board: 1),
+          note('/f/circuit-note-2-2.cnote', board: 2),
+          note(null, board: 3), // still waiting to sync
+          note('/f/phone-note-100.cnote'),
+          note('/f/phone-note-200.cnote'),
+          note('/f/phone-note-300.cnote'),
+        ]);
+        expect(counts.synced, 2);
+        expect(counts.pending, 1);
+      });
+
+      test('no phone notes means the totals are unchanged', () {
+        final counts = boardNoteCounts([
+          note('/f/circuit-note-1-1.cnote', board: 1),
+          note(null, board: 2),
+        ]);
+        expect((counts.pending, counts.synced), (1, 1));
+        expect(boardNoteCounts(const []), (pending: 0, synced: 0));
+      });
+    },
+  );
+
+  group('a phone recording and its parts', () {
+    test('a long recording keeps every part, in order', () {
+      final parts = [
+        '/f/phone-note-100.cnote',
+        '/f/phone-note-101.cnote',
+        '/f/phone-note-102.cnote',
+      ];
+      final note = noteForPhoneRecording(
+        id: 'n',
+        parts: parts,
+        startedAt: DateTime.utc(2026, 10, 6, 20, 29),
+      );
+      expect(note.audioPath, parts.first);
+      expect(note.audioParts, parts);
+      expect(note.audioFiles, parts);
+      expect(note.createdAt, DateTime.utc(2026, 10, 6, 20, 29));
+    });
+
+    test('a short recording is a single file with no parts list', () {
+      final note = noteForPhoneRecording(
+        id: 'n',
+        parts: ['/f/phone-note-7.cnote'],
+        startedAt: DateTime.utc(2026),
+      );
+      expect(note.audioPath, '/f/phone-note-7.cnote');
+      expect(note.audioParts, isEmpty);
+      expect(note.audioFiles, ['/f/phone-note-7.cnote']);
+    });
+
+    test('finds the later parts of a note that listed only the first', () {
+      final files = {
+        '/f/phone-note-100.cnote',
+        '/f/phone-note-101.cnote',
+        '/f/phone-note-102.cnote',
+        '/f/phone-note-104.cnote', // a gap ends the recording
+      };
+      expect(consecutivePartPaths('/f/phone-note-100.cnote', files.contains), [
+        '/f/phone-note-100.cnote',
+        '/f/phone-note-101.cnote',
+        '/f/phone-note-102.cnote',
+      ]);
+      expect(consecutivePartPaths('/f/phone-note-104.cnote', files.contains), [
+        '/f/phone-note-104.cnote',
+      ]);
+    });
+
+    test('a note from Circuit has no phone parts to find', () {
+      expect(consecutivePartPaths('/f/circuit-note-1-2.cnote', (_) => true), [
+        '/f/circuit-note-1-2.cnote',
+      ]);
+    });
+  });
+
   test('clock text', () {
     expect(phoneRecordingClock(0), '0:00');
     expect(phoneRecordingClock(61000), '1:01');
     expect(phoneRecordingClock(600000), '10:00');
+    expect(phoneRecordingClock(3723000), '1:02:03');
   });
 
   test('says why a recording ended when it was not the person', () {
     expect(phoneRecordingEndMessage('stopped'), isNull);
-    expect(phoneRecordingEndMessage('limit'), contains('10 minutes'));
+    expect(phoneRecordingEndMessage('limit'), contains('longest'));
     expect(phoneRecordingEndMessage('storage'), contains('saved'));
     expect(phoneRecordingEndMessage('error'), contains('saved'));
     expect(phoneRecordingFailureMessage('storage'), contains('storage'));
@@ -132,7 +269,10 @@ void sheetTests() {
       final recording = _recording('recording', 83000);
       final calls = await _pumpSheet(tester, recording);
       expect(find.text('1:23'), findsOneWidget);
-      expect(find.text('Stops by itself at 10:00'), findsOneWidget);
+      expect(
+        find.text('Saved as you go. There is no time limit.'),
+        findsOneWidget,
+      );
 
       await tester.tap(find.text('Pause'));
       recording.value = {'state': 'paused', 'elapsedMs': 83000, 'level': 0.0};

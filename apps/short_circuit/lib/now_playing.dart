@@ -11,9 +11,15 @@ class NowPlaying {
     this.state = 'playing',
     this.positionMs = 0,
     this.durationMs = 0,
+    this.part,
+    this.parts,
   });
 
   final String title;
+
+  /// For a long note stored as several parts: which one is playing, of how many.
+  final int? part;
+  final int? parts;
 
   /// 'playing' or 'paused'.
   final String state;
@@ -28,6 +34,8 @@ class NowPlaying {
         state: state ?? this.state,
         positionMs: positionMs ?? this.positionMs,
         durationMs: durationMs ?? this.durationMs,
+        part: part,
+        parts: parts,
       );
 }
 
@@ -46,11 +54,15 @@ NowPlaying? nextNowPlaying(NowPlaying current, Map<String, dynamic>? status) {
 mixin _NowPlayingState {
   final ValueNotifier<NowPlaying?> _nowPlaying = ValueNotifier(null);
   Timer? _nowPlayingTimer;
+
+  /// A long note is playing as a series of parts: between two of them the player reports
+  /// "completed", which must not take the bar down.
+  bool _sequencePlaying = false;
 }
 
 extension _NowPlayingControls on _CircuitHomePageState {
-  void _startNowPlaying(String title) {
-    _nowPlaying.value = NowPlaying(title: title);
+  void _startNowPlaying(String title, {int? part, int? parts}) {
+    _nowPlaying.value = NowPlaying(title: title, part: part, parts: parts);
     _nowPlayingTimer?.cancel();
     _nowPlayingTimer = Timer.periodic(
       const Duration(milliseconds: 300),
@@ -70,6 +82,7 @@ extension _NowPlayingControls on _CircuitHomePageState {
         'playbackStatus',
       );
       final next = nextNowPlaying(current, status);
+      if (next == null && _sequencePlaying) return; // between two parts
       _nowPlaying.value = next;
       if (next == null) _nowPlayingTimer?.cancel();
     } on PlatformException {
@@ -89,6 +102,8 @@ extension _NowPlayingControls on _CircuitHomePageState {
   }
 
   Future<void> _stopNowPlaying() async {
+    _playbackToken++; // ends a part-by-part playback too
+    _sequencePlaying = false;
     _nowPlaying.value = null;
     _nowPlayingTimer?.cancel();
     await _relayChannel.invokeMethod<void>('stopPlayback');
@@ -175,6 +190,7 @@ class _NowPlayingBarState extends State<NowPlayingBar> {
                       style: const TextStyle(fontWeight: FontWeight.w600),
                     ),
                     Text(
+                      '${playing.parts == null ? '' : 'Part ${playing.part} of ${playing.parts} · '}'
                       '${nowPlayingClock(position.round())} / '
                       '${nowPlayingClock(playing.durationMs)}'
                       '${playing.paused ? ' · Paused' : ''}',
