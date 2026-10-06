@@ -362,13 +362,7 @@ extension _ScPages on _CircuitHomePageState {
     }
     if (note.status.startsWith('Waiting for Wi-Fi'))
       return '$when · Waiting for Wi-Fi';
-    if (note.enrichmentStatus == 'enriching') return '$when · AI reviewing';
-    if (note.enrichmentStatus == 'failed') return '$when · AI review failed';
-    if (note.actionSuggestions.any((item) => item.state == 'pending'))
-      return '$when · Action to review';
-    if (note.transcript != null) return '$when · Transcribed';
-    if (note.audioPath != null) return '$when · Ready to transcribe';
-    return '$when · Waiting to sync';
+    return '$when · ${noteStageLabel(note)}';
   }
 
   VoidCallback? _openNote(CircuitNote note) {

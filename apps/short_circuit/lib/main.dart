@@ -90,6 +90,21 @@ String noteSourceOf(String? audioPath) =>
   return (pending: pending, synced: synced);
 }
 
+/// How far along a note is, from its audio to its AI review. "Transcribed" means the text is
+/// there but the AI review has not run; once it has, the note says so.
+String noteStageLabel(CircuitNote note) {
+  if (note.enrichmentStatus == 'enriching') return 'AI reviewing';
+  if (note.enrichmentStatus == 'failed') return 'AI review failed';
+  if (note.actionSuggestions.any((item) => item.state == 'pending')) {
+    return 'Action to review';
+  }
+  if (note.transcript != null) {
+    return note.enrichmentStatus == 'ready' ? 'AI reviewed' : 'Transcribed';
+  }
+  if (note.audioPath != null) return 'Ready to transcribe';
+  return 'Waiting to sync';
+}
+
 /// What the phone's link to Circuit is doing, read from the background service's status.
 /// "Running" is not "connected": the service also runs while it is still trying.
 enum RelayLink { off, trying, connected, needsRepair }

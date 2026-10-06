@@ -128,4 +128,63 @@ void main() {
       expect(find.text('Today · 21:03 · Phone'), findsOneWidget);
     });
   });
+
+  group('how far along a note is', () {
+    CircuitNote note({
+      String? transcript,
+      String enrichment = 'pending',
+      String? audio = '/f/phone-note-1.cnote',
+      List<NoteActionSuggestion> actions = const [],
+    }) => CircuitNote(
+      id: 'n',
+      createdAt: DateTime.utc(2026, 10, 6),
+      status: 'ok',
+      audioPath: audio,
+      transcript: transcript,
+      enrichmentStatus: enrichment,
+      actionSuggestions: actions,
+    );
+
+    test('from the audio, through the text, to the AI review', () {
+      expect(noteStageLabel(note(audio: null)), 'Waiting to sync');
+      expect(noteStageLabel(note()), 'Ready to transcribe');
+      expect(noteStageLabel(note(transcript: 'Hello')), 'Transcribed');
+      expect(
+        noteStageLabel(note(transcript: 'Hello', enrichment: 'enriching')),
+        'AI reviewing',
+      );
+      expect(
+        noteStageLabel(note(transcript: 'Hello', enrichment: 'ready')),
+        'AI reviewed',
+      );
+    });
+
+    test(
+      'a failed review is named, and a note awaiting your choice says so',
+      () {
+        expect(
+          noteStageLabel(note(transcript: 'Hello', enrichment: 'failed')),
+          'AI review failed',
+        );
+        expect(
+          noteStageLabel(
+            note(
+              transcript: 'Hello',
+              enrichment: 'ready',
+              actions: const [
+                NoteActionSuggestion(
+                  id: 'a',
+                  type: 'task',
+                  title: 'Do it',
+                  details: '',
+                  state: 'pending',
+                ),
+              ],
+            ),
+          ),
+          'Action to review',
+        );
+      },
+    );
+  });
 }
