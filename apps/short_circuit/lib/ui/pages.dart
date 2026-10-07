@@ -1426,7 +1426,7 @@ extension _ScPages on _CircuitHomePageState {
       ),
       ScRow(
         title: 'Notes waiting',
-        caption: 'Syncs automatically on Wi‑Fi',
+        caption: 'Hold Circuit\'s button 2 s to sync',
         value: (_boardWaiting ?? waiting) == 0
             ? 'All synced'
             : '${_boardWaiting ?? waiting} on Circuit',
@@ -1616,7 +1616,7 @@ extension _ScPages on _CircuitHomePageState {
         'Connected to $_wifiSsid',
         _wifiDetail.isEmpty
             ? 'Circuit is online.'
-            : 'Online at $_wifiDetail. Notes sync automatically when your phone is on this network.',
+            : 'Online at $_wifiDetail. Hold Circuit\'s button for 2 seconds to sync notes when your phone is on this network.',
       ),
       'connecting' => (
         LucideIcons.wifi,

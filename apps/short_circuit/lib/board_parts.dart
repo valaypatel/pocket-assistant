@@ -117,18 +117,29 @@ BoardPartsArrived collectBoardParts(Map<String, BoardPart> described) {
 }
 
 extension _BoardParts on _CircuitHomePageState {
-  /// Files sitting in the notes of this recording, with what the sync said about each.
-  Future<Map<String, BoardPart>> _describedParts(Iterable<String> paths) async {
+  /// The downloaded files that belong to the recording whose first part is [first], with what
+  /// the sync said about each. They sit in the app's folder until the recording is whole.
+  Future<Map<String, BoardPart>> _arrivedBoardFiles(int first) async {
     final described = <String, BoardPart>{};
-    for (final path in paths) {
-      final part = await readBoardPart(path);
-      if (part != null) described[path] = part;
+    try {
+      final files = await _relayChannel.invokeListMethod<String>('syncedNotes');
+      for (final entry in files ?? const <String>[]) {
+        final path = entry.split('|').first;
+        final part = await readBoardPart(path);
+        if (part != null && part.first == first) described[path] = part;
+      }
+    } catch (_) {
+      // Listing is best-effort; the next part to arrive tries again.
     }
     return described;
   }
 
   /// A downloaded file that is one part of a longer recording. Returns false if the file is
   /// not usable as a part (the caller then treats it as a plain note).
+  ///
+  /// The recording stays a waiting note, with no audio and no transcript, until the last part
+  /// and every part before it have arrived: a recording is never shown, played or sent to the
+  /// AI with only some of it. Then it becomes one note.
   Future<bool> _attachBoardPart(
     String path,
     int? epochSeconds,
@@ -154,41 +165,46 @@ extension _BoardParts on _CircuitHomePageState {
       return recordedAt == null ||
           n.createdAt.difference(recordedAt).abs() < const Duration(hours: 12);
     }).firstOrNull;
-    if (note != null && note.audioParts.contains(path)) return true;
+    if (note != null && note.audioParts.contains(path))
+      return true; // already joined
+    final described = await _arrivedBoardFiles(part.first);
+    described[path] = part;
+    final arrived = collectBoardParts(described);
     final noteId =
         note?.id ??
         await _addPendingNote(
-          'Receiving a long recording from Circuit…',
+          arrived.statusText,
           createdAt: recordedAt,
           boardId: part.first,
         );
-    final known = <String>{...?note?.audioParts};
-    final firstPath = note?.audioPath;
-    if (known.isEmpty && firstPath != null) known.add(firstPath);
-    final described = await _describedParts({...known, path});
-    described[path] = part;
-    final arrived = collectBoardParts(described);
+    if (!arrived.complete) {
+      await _setNoteStatus(noteId, arrived.statusText);
+      return true;
+    }
     final ordered = arrived.ordered;
     await _updateNote(
       noteId,
-      (n) => n.copyWith(
-        audioParts: ordered,
-        audioPath: ordered.first,
-        status: arrived.statusText,
-      ),
+      (n) => n.copyWith(audioParts: ordered, audioPath: ordered.first),
     );
-    if (!arrived.complete) return true;
     await _transcribeAfterSync(noteId, ordered.first);
     return true;
   }
 
   /// Every number Circuit gave the parts of this note, so deleting the note deletes them all
-  /// on the board.
-  Set<int> _boardPartIds(CircuitNote? note) {
+  /// on the board. A recording still arriving has no audio in the note yet; its parts are
+  /// found in the app's folder.
+  Future<Set<int>> _boardPartIds(CircuitNote? note) async {
     final ids = <int>{};
     for (final path in note?.audioFiles ?? const <String>[]) {
       final id = boardFileId(path);
       if (id != null) ids.add(id);
+    }
+    final first = note?.boardId;
+    if (first != null) {
+      for (final path in (await _arrivedBoardFiles(first)).keys) {
+        final id = boardFileId(path);
+        if (id != null) ids.add(id);
+      }
     }
     return ids;
   }

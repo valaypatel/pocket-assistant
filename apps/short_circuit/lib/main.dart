@@ -1972,7 +1972,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       final isSong = _songClipArmed;
       _songClipArmed = false;
       _addPendingNote(
-        'Recording saved on Circuit. It syncs automatically when Circuit and this phone are on the same Wi-Fi.',
+        'Recording saved on Circuit. Hold Circuit\'s button for 2 seconds to bring it to this phone (same Wi-Fi).',
         boardId: boardId,
         song: isSong,
       );
@@ -2205,7 +2205,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   /// before Circuit kept every note). Remove those instead of leaving a card
   /// that can never sync.
   Iterable<CircuitNote> _notesWithoutAudio(DateTime cutoff) => _notes.where(
-    (note) => note.audioPath == null && note.createdAt.isBefore(cutoff),
+    (note) =>
+        note.audioPath == null &&
+        note.createdAt.isBefore(cutoff) &&
+        // A long recording whose parts are still arriving has none of its audio in the note yet.
+        !note.status.startsWith('Receiving') &&
+        !note.status.startsWith('Waiting for part'),
   );
 
   Future<void> _pruneLostNotes() async {
@@ -2614,14 +2619,19 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     if (boardId != null) {
       _pendingBoardDeletes.add(boardId);
       // A recording made of parts is deleted on Circuit part by part.
-      _pendingBoardDeletes.addAll(_boardPartIds(note));
+      _pendingBoardDeletes.addAll(await _boardPartIds(note));
       unawaited(_saveBoardDeletes());
       _lastBoardDeleteSent = null;
       _processBoardDeletes();
     }
-    for (final path in note?.audioFiles ?? const <String>[]) {
+    final firstPart = note?.boardId;
+    final arriving = firstPart == null
+        ? const <String>[]
+        : (await _arrivedBoardFiles(firstPart)).keys.toList();
+    for (final path in {...?note?.audioFiles, ...arriving}) {
       try {
         await File(path).delete();
+        await _boardPartFile(path)?.delete();
       } catch (_) {
         // The file may already have been removed.
       }
