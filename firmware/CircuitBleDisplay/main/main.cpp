@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
@@ -18,6 +19,7 @@
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_sntp.h"
 #include "esp_vfs_fat.h"
 #include "esp_wifi.h"
@@ -75,6 +77,10 @@ constexpr gpio_num_t kRecordButtonPin = GPIO_NUM_0;
 constexpr TickType_t kButtonPollInterval = pdMS_TO_TICKS(20);
 constexpr TickType_t kButtonDebounceDelay = pdMS_TO_TICKS(50);
 constexpr TickType_t kForceSyncHoldTime = pdMS_TO_TICKS(2000);
+// While recording, the same key stops and saves when held this long.
+constexpr TickType_t kStopHoldTime = pdMS_TO_TICKS(1000);
+// A recording left paused this long is saved, so the board is never stuck in a pause.
+constexpr int64_t kMaxPausedMs = 600000;
 constexpr uint16_t kServiceHandles = 6;
 
 const char *kTag = "Circuit";
@@ -100,10 +106,14 @@ uint16_t relay_handle;
 uint16_t connection_id = UINT16_MAX;
 sdmmc_card_t *sd_card = nullptr;
 bool audio_ready = false;
-bool audio_busy = false;
+// One thing at a time uses the microphone, speaker and the note being sent. It is claimed with
+// claim_audio() so two requests arriving together (the key and the app) cannot both win.
+std::atomic<bool> audio_busy{false};
 TaskHandle_t audio_sync_task_handle = nullptr;
 volatile bool recording_active = false;
 volatile bool recording_stop_requested = false;
+volatile bool recording_paused = false;
+volatile uint32_t recording_audio_ms = 0;  // audio recorded so far; a pause does not count
 enum class DeviceScreen : uint8_t { Idle, Recording, Saved, Syncing, Pairing };
 volatile DeviceScreen active_screen = DeviceScreen::Idle;
 volatile TickType_t recording_started_at = 0;
@@ -145,6 +155,8 @@ bool sntp_started = false;
 constexpr time_t kMinValidEpoch = 1704067200;  // 2024-01-01
 
 void send_relay_request(const char *request);
+void show_busy_notice();
+bool claim_audio() { return !audio_busy.exchange(true); }
 esp_err_t send_audio_data(const uint8_t *data, size_t length);
 
 struct TextMessage {
@@ -495,14 +507,23 @@ void demo_animation_task(void *) {
                 if (active_screen == DeviceScreen::Recording) {
                     // Four stepped frames (waveform changes, the dot alternates filled and hollow)
                     // at the e-paper's cadence; it shows recording is on, not the sound level.
-                    const uint32_t elapsed_ticks = xTaskGetTickCount() - recording_started_at;
-                    lv_img_set_src(recording_icon, circuit_recording_frame(elapsed_ticks * 1000 / configTICK_RATE_HZ));
-                    const uint32_t elapsed = elapsed_ticks / configTICK_RATE_HZ;
+                    // The timer counts recorded audio, so it stops during a pause: the picture
+                    // freezes and the time blinks.
+                    const uint32_t audio_ms = recording_audio_ms;
+                    lv_img_set_src(recording_icon, circuit_recording_frame(audio_ms));
+                    const uint32_t elapsed = audio_ms / 1000;
                     char elapsed_text[12];
                     snprintf(elapsed_text, sizeof(elapsed_text), "%02lu:%02lu",
                         static_cast<unsigned long>(elapsed / 60),
                         static_cast<unsigned long>(elapsed % 60));
                     lv_label_set_text(recording_timer_label, elapsed_text);
+                    static bool blink_off = false;
+                    blink_off = recording_paused && !blink_off;
+                    if (blink_off) {
+                        lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+                    } else {
+                        lv_obj_clear_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+                    }
                     lv_obj_clear_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
                 }
                 Lvgl_unlock();
@@ -634,8 +655,11 @@ void init_sd_card() {
 }
 
 void finish_audio_task() {
-    audio_busy = false;
+    // The task deletes itself below, so a handle left behind would point at nothing.
+    audio_sync_task_handle = nullptr;
+    recording_paused = false;
     recording_active = false;
+    audio_busy = false;
     vTaskDelete(nullptr);
 }
 
@@ -749,6 +773,8 @@ void record_audio_task(void *argument) {
         return;
     }
 
+    recording_audio_ms = 0;
+    recording_paused = false;
     show_device_screen(DeviceScreen::Recording);
 
     char note_path[48];
@@ -780,12 +806,34 @@ void record_audio_task(void *argument) {
     uint32_t recorded_bytes = 0;
     update_storage_status("Recording audio…\nPlease speak near Circuit");
     report_audio_status("Recording started: speak near Circuit");
+    // Wall-clock time spent recording (not paused) against the audio that came back. A gap
+    // between the two means samples were lost, for example while the card was busy.
+    const int64_t started_us = esp_timer_get_time();
+    int64_t paused_us = 0;
+    int64_t pause_began_us = 0;
+    bool synced_meanwhile = false;
     while (recorded_bytes < target_bytes && !recording_stop_requested) {
         const size_t mono_bytes = (target_bytes - recorded_bytes) < (kAudioBufferBytes / kCodecCaptureChannels)
             ? target_bytes - recorded_bytes : (kAudioBufferBytes / kCodecCaptureChannels);
         const size_t stereo_bytes = mono_bytes * kCodecCaptureChannels;
+        // The microphone keeps running through a pause so it resumes without a gap in the
+        // hardware buffers; what it hears while paused is thrown away.
         if (Codec_RecordData(buffer, stereo_bytes) != ESP_OK) {
             break;
+        }
+        if (circuit_sync::is_open()) synced_meanwhile = true;
+        if (recording_paused) {
+            if (pause_began_us == 0) pause_began_us = esp_timer_get_time();
+            if ((esp_timer_get_time() - pause_began_us) / 1000 > kMaxPausedMs) {
+                ESP_LOGW(kTag, "Paused for too long: saving the recording");
+                recording_paused = false;
+                break;
+            }
+            continue;
+        }
+        if (pause_began_us != 0) {
+            paused_us += esp_timer_get_time() - pause_began_us;
+            pause_began_us = 0;
         }
         // The board codec delivers stereo 16-bit samples. Voice notes retain
         // the first microphone channel only, halving both storage and BLE sync.
@@ -795,6 +843,15 @@ void record_audio_task(void *argument) {
         }
         if (!writer->append(buffer, mono_bytes)) break;
         recorded_bytes += mono_bytes;
+        recording_audio_ms = static_cast<uint32_t>(static_cast<uint64_t>(recorded_bytes) * 1000 / header.byte_rate);
+    }
+    if (pause_began_us != 0) paused_us += esp_timer_get_time() - pause_began_us;
+    {
+        const int64_t wall_ms = (esp_timer_get_time() - started_us - paused_us) / 1000;
+        const int64_t audio_ms = static_cast<int64_t>(recorded_bytes) * 1000 / header.byte_rate;
+        ESP_LOGW(kTag, "RECSTAT audio=%lld ms, recording time=%lld ms, lost=%lld ms, paused=%lld ms, wifi sync open=%s",
+            static_cast<long long>(audio_ms), static_cast<long long>(wall_ms), static_cast<long long>(wall_ms - audio_ms),
+            static_cast<long long>(paused_us / 1000), synced_meanwhile ? "yes" : "no");
     }
     heap_caps_free(buffer);
 
@@ -908,8 +965,7 @@ void start_recording(char *command) {
         return;
     }
     if (audio_busy) {
-        update_storage_status("Audio is busy\nPlease wait");
-        report_audio_status("Audio is busy");
+        show_busy_notice();
         return;
     }
     if (!crypto_self_test_ok) {
@@ -922,8 +978,12 @@ void start_recording(char *command) {
         report_audio_status("Recording failed: pair Circuit with the app first");
         return;
     }
-    audio_busy = true;
+    if (!claim_audio()) {  // another request took the microphone a moment ago
+        show_busy_notice();
+        return;
+    }
     recording_active = true;
+    recording_paused = false;
     recording_stop_requested = false;
     xTaskCreate(record_audio_task, "audio_record", 6144,
                 reinterpret_cast<void *>(static_cast<uintptr_t>(seconds)), 5, nullptr);
@@ -936,6 +996,15 @@ void stop_recording() {
     }
     recording_stop_requested = true;
     report_audio_status("Stopping recording…");
+}
+
+// Pauses a recording, or carries it on. The note stays open: it is one note, with the pause
+// left out of it.
+void toggle_pause_recording() {
+    if (!recording_active || recording_stop_requested) return;
+    recording_paused = !recording_paused;
+    ESP_LOGI(kTag, "Recording %s", recording_paused ? "paused" : "resumed");
+    report_audio_status(recording_paused ? "Recording paused" : "Recording resumed");
 }
 
 // Slow BLE fallback, used only for a force sync with no Wi-Fi sync available.
@@ -1152,6 +1221,9 @@ void wifi_sync_progress(uint32_t percent) { sync_ui_percent = static_cast<int32_
 void sync_ui_tick() {
     const int32_t percent = sync_ui_percent;
     if (percent < 0 || percent == sync_ui_shown) return;
+    // A Wi-Fi sync can run while a note is being recorded: the recording screen stays up, and
+    // the sync figure is drawn again once the recording is saved.
+    if (recording_active || active_screen == DeviceScreen::Recording) return;
     if (active_screen != DeviceScreen::Syncing) show_device_screen(DeviceScreen::Syncing);
     if (Lvgl_lock(-1)) {
         char text[16];
@@ -1200,6 +1272,41 @@ void flash_sync_result(const char *text) {
         Lvgl_unlock();
     }
     return_to_idle_after(DeviceScreen::Syncing, 2500);
+}
+
+// Puts the sync figure back after a short notice, unless a newer figure replaced the notice.
+void restore_sync_label_task(void *argument) {
+    char *previous = static_cast<char *>(argument);
+    vTaskDelay(pdMS_TO_TICKS(2500));
+    if (active_screen == DeviceScreen::Syncing && Lvgl_lock(-1)) {
+        if (strcmp(lv_label_get_text(sync_progress_label), "BUSY") == 0) {
+            lv_label_set_text(sync_progress_label, previous);
+        }
+        Lvgl_unlock();
+    }
+    delete[] previous;
+    vTaskDelete(nullptr);
+}
+
+// The key (or the app) asked to record while the microphone is taken. Say so on the screen
+// and to the phone: a press must always get an answer, never silence.
+void show_busy_notice() {
+    const bool syncing_over_bluetooth = audio_sync_task_handle != nullptr;
+    update_storage_status("Audio is busy\nPlease wait");
+    report_audio_status(syncing_over_bluetooth ? "Can't record: a sync over Bluetooth is running, try again when it ends"
+                                               : "Audio is busy");
+    if (recording_active) return;  // the recording screen is already up
+    if (active_screen == DeviceScreen::Syncing && Lvgl_lock(-1)) {
+        char *previous = new (std::nothrow) char[16];
+        if (previous != nullptr) {
+            snprintf(previous, 16, "%s", lv_label_get_text(sync_progress_label));
+            lv_label_set_text(sync_progress_label, "BUSY");
+            if (xTaskCreate(restore_sync_label_task, "busy_notice", 3072, previous, 2, nullptr) != pdPASS) delete[] previous;
+        }
+        Lvgl_unlock();
+        return;
+    }
+    flash_sync_result("BUSY");
 }
 
 void end_wifi_sync() {
@@ -1302,13 +1409,16 @@ void start_audio_sync(bool forced) {
         report_audio_status("Sync needs Wi-Fi: connect Circuit and your phone to the same network");
         return;
     }
-    audio_busy = true;
+    if (!claim_audio()) {
+        report_audio_status("Audio is busy");
+        return;
+    }
     xTaskCreate(audio_sync_task, "audio_sync", 6144, nullptr, 4, &audio_sync_task_handle);
 }
 
-// The upper side button (BOOT, GPIO0) does two things:
-//   tap (released within 2 s)  start or stop a recording
-//   hold for 2 s               force a sync (Bluetooth fallback when Wi-Fi is not available)
+// The upper side button (BOOT, GPIO0) is the only key, and it does different things by state:
+//   idle       tap: start a recording      hold 2 s: force a sync (Bluetooth if there is no Wi-Fi)
+//   recording  tap: pause, or carry on     hold 1 s: stop and save
 // The lower button is wired to power, so holding it switches the board off.
 void record_button_task(void *) {
     // GPIO0 is active-low. Waiting for a released state avoids treating a
@@ -1328,10 +1438,14 @@ void record_button_task(void *) {
                 continue;
             }
         }
-        if (is_pressed && !hold_handled && xTaskGetTickCount() - pressed_at >= kForceSyncHoldTime) {
+        const TickType_t hold_needed = recording_active ? kStopHoldTime : kForceSyncHoldTime;
+        if (is_pressed && !hold_handled && xTaskGetTickCount() - pressed_at >= hold_needed) {
             hold_handled = true;
-            ESP_LOGI(kTag, "BOOT held: force sync");
-            if (!recording_active) {
+            if (recording_active) {
+                ESP_LOGI(kTag, "BOOT held: stop and save");
+                stop_recording();
+            } else {
+                ESP_LOGI(kTag, "BOOT held: force sync");
                 update_storage_status("Force sync requested\nStarting sync…");
                 report_audio_status("Force sync requested");
                 start_audio_sync(true);
@@ -1339,9 +1453,9 @@ void record_button_task(void *) {
         }
         if (!is_pressed && was_pressed && !hold_handled) {  // released: it was a tap
             if (recording_active) {
-                stop_recording();
+                toggle_pause_recording();
             } else {
-                // Records until the button is pressed again or the cap is hit.
+                // Records until stopped or the cap is hit.
                 char command[32];
                 snprintf(command, sizeof(command), "@audio-record\n%lu", static_cast<unsigned long>(kMaxRecordingSeconds));
                 start_recording(command);
@@ -1370,7 +1484,10 @@ void start_playback() {
         report_audio_status("Audio is busy");
         return;
     }
-    audio_busy = true;
+    if (!claim_audio()) {
+        report_audio_status("Audio is busy");
+        return;
+    }
     xTaskCreate(play_audio_task, "audio_play", 6144, nullptr, 5, nullptr);
 }
 
