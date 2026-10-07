@@ -49,6 +49,9 @@ namespace circuit_sync {
 inline volatile uint32_t download_stops = 0;
 
 constexpr uint32_t kIdleTimeoutMs = 120000;
+// Once the phone has started downloading, silence this long means it has gone (Wi-Fi lost, app
+// closed): the session ends so the screen shows the result and the board is free again.
+constexpr uint32_t kClientGoneMs = 25000;
 constexpr uint32_t kLockoutMs = 30000;
 constexpr int kMaxBadAttempts = 3;
 constexpr size_t kChunkBytes = 4096;
@@ -333,7 +336,8 @@ inline bool is_open() { return state.server != nullptr; }
 inline bool locked_out() { return now_ms() < state.lockout_until_ms; }
 inline bool expired() {
     return is_open() && (state.bad_attempts >= kMaxBadAttempts ||
-                         now_ms() - state.last_activity_ms > kIdleTimeoutMs);
+                         now_ms() - state.last_activity_ms >
+                             (state.first_request_ms != 0 ? kClientGoneMs : kIdleTimeoutMs));
 }
 
 inline void close_session() {

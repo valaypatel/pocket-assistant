@@ -576,6 +576,15 @@ class CircuitRelayService : Service() {
         }
     }
 
+    private fun waitForWifi(timeoutMs: Long): Network? {
+        val until = SystemClock.elapsedRealtime() + timeoutMs
+        while (true) {
+            wifiNetwork()?.let { return it }
+            if (SystemClock.elapsedRealtime() >= until) return null
+            Thread.sleep(500)
+        }
+    }
+
     private fun pinnedSocketFactory(fingerprint: String): SSLSocketFactory {
         val trust = object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) =
@@ -594,7 +603,7 @@ class CircuitRelayService : Service() {
 
     private fun runWifiSync(host: String, port: Int, token: String, fingerprint: String, generation: Int) {
         fun superseded() = generation != syncGeneration
-        val network = wifiNetwork()
+        var network = wifiNetwork()
         Log.i("CircuitSync", "Wi-Fi network available: ${network != null}")
         if (network == null) {
             publishAudioStatus("Sync needs Wi-Fi: connect your phone to the same network as Circuit")
@@ -602,7 +611,7 @@ class CircuitRelayService : Service() {
         }
         val factory = pinnedSocketFactory(fingerprint)
         fun open(path: String, method: String = "GET", from: Long = 0): HttpsURLConnection =
-            (network.openConnection(URL("https://$host:$port$path")) as HttpsURLConnection).apply {
+            (network!!.openConnection(URL("https://$host:$port$path")) as HttpsURLConnection).apply {
                 sslSocketFactory = factory
                 hostnameVerifier = HostnameVerifier { _, _ -> true }  // identity is the pinned fingerprint
                 requestMethod = method
@@ -651,6 +660,10 @@ class CircuitRelayService : Service() {
                             attempts = 0
                         }
                         if (++attempts > 4) throw IOException("Connection to Circuit kept dropping")
+                        // A phone that lost Wi-Fi comes back with a new network, and the old one can no
+                        // longer be used (the socket cannot be bound to it). Wait briefly for Wi-Fi to
+                        // return and carry on with the new one; give up at once if it does not.
+                        network = waitForWifi(20000) ?: throw IOException("Wi-Fi connection lost")
                         try {
                             val have = partial.length()
                             val connection = open("/notes/$id", from = have)
@@ -718,6 +731,7 @@ class CircuitRelayService : Service() {
                     error is javax.net.ssl.SSLException -> "certificate"
                     error is java.net.SocketTimeoutException || error is java.net.ConnectException ||
                         error is java.net.NoRouteToHostException -> "unreachable"
+                    error.message?.contains("Wi-Fi connection lost") == true -> "wifi_lost"
                     error.message?.contains("kept dropping") == true -> "dropping"
                     error.message?.contains("incomplete") == true -> "incomplete"
                     else -> "other"
@@ -727,7 +741,13 @@ class CircuitRelayService : Service() {
                 is javax.net.ssl.SSLException -> "Circuit's certificate did not match this phone"
                 is java.net.SocketTimeoutException, is java.net.ConnectException, is java.net.NoRouteToHostException ->
                     "Circuit is not reachable on this Wi-Fi. Check both are on the same network and that Short-Circuit has Local network access in Android settings"
-                else -> "${error.javaClass.simpleName}: ${error.message ?: "no details"}"
+                else -> when {
+                    error.message?.contains("Wi-Fi connection lost") == true ->
+                        "The phone lost its Wi-Fi connection. Reconnect to the same network as Circuit and sync again; what already arrived is kept"
+                    error.message?.contains("kept dropping") == true ->
+                        "The connection to Circuit kept dropping. Sync again; what already arrived is kept"
+                    else -> "${error.javaClass.simpleName}: ${error.message ?: "no details"}"
+                }
             }
             publishAudioStatus("Sync failed: $reason (${error.javaClass.simpleName})")
         }
