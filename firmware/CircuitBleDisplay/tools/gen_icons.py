@@ -12,7 +12,7 @@ HERE = Path(__file__).resolve().parent
 # name -> (pixel size, stroke width in the 24-unit grid)
 ICONS = {"wifi": (20, 1.9), "wifi-off": (20, 1.9), "wifi-low": (20, 1.9), "wifi-high": (20, 1.9),
          "wifi-zero": (20, 1.9), "phone": (18, 2.3), "hard-drive": (18, 2.3),
-         "clock": (14, 2.4), "check": (14, 2.8), "bluetooth": (18, 2.0)}
+         "clock": (14, 2.4), "check": (14, 2.8), "bluetooth": (18, 2.0), "mic-off": (28, 2.2)}
 
 
 def polylines(svg_file):

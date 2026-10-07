@@ -1076,7 +1076,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   String _displayName = '';
   DateTime? _recordingStartedAt;
   Timer? _clockTicker;
-  bool _pruneRequested = false;
   // Automatic retry of AI review: how often each note was tried, and when.
   final Map<String, int> _enrichAttempts = {};
   final Map<String, DateTime> _enrichLastAttempt = {};
@@ -1155,7 +1154,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     });
     _wifiPollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _requestWifiStatus();
-      _checkForLostNotes();
       _checkSyncHealth();
       _processBoardDeletes();
       _retryEnrichmentIfDue();
@@ -2237,18 +2235,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
           ? 'Removed a note whose recording was lost'
           : 'Removed ${lost.length} notes whose recordings were lost',
     );
-  }
-
-  /// Once per session, if old notes are still waiting for audio, ask Circuit
-  /// whether it has anything left to send. Its answer decides their fate.
-  void _checkForLostNotes() {
-    if (_pruneRequested || !_circuitAvailable) return;
-    final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
-    if (_notesWithoutAudio(cutoff).isEmpty) return;
-    _pruneRequested = true;
-    _writeCircuit('@audio-sync').catchError((Object _) {
-      _pruneRequested = false;
-    });
   }
 
   /// A synced file belongs to the oldest note still waiting for audio; if the

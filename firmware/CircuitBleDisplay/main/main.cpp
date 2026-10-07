@@ -92,6 +92,7 @@ lv_obj_t *pairing_code_label;
 lv_obj_t *recording_timer_label;
 lv_obj_t *recording_icon;  // the animated device icon on the recording screen (64x64)
 lv_obj_t *sync_progress_label;
+lv_obj_t *busy_icon_obj;  // "cannot record now" (a microphone crossed out), drawn where the sync figure is
 lv_obj_t *idle_date_label;
 lv_obj_t *idle_time_label;
 lv_obj_t *idle_ampm_label;
@@ -478,6 +479,7 @@ void show_device_screen(DeviceScreen screen) {
     lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
     lv_img_set_src(wordmark_image, kScreens[static_cast<size_t>(screen)]);
     lv_obj_center(wordmark_image);
     apply_persistent_labels(screen);
@@ -562,6 +564,7 @@ void show_pairing_code() {
     lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
     apply_persistent_labels(DeviceScreen::Pairing);
     lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
     Lvgl_unlock();
@@ -1278,38 +1281,42 @@ void flash_sync_result(const char *text) {
     return_to_idle_after(DeviceScreen::Syncing, 2500);
 }
 
-// Puts the sync figure back after a short notice, unless a newer figure replaced the notice.
-void restore_sync_label_task(void *argument) {
-    char *previous = static_cast<char *>(argument);
-    vTaskDelay(pdMS_TO_TICKS(2500));
-    if (active_screen == DeviceScreen::Syncing && Lvgl_lock(-1)) {
-        if (strcmp(lv_label_get_text(sync_progress_label), "BUSY") == 0) {
-            lv_label_set_text(sync_progress_label, previous);
-        }
-        Lvgl_unlock();
+// Swaps the sync figure for the "cannot record" icon, or back.
+void show_busy_icon(bool on) {
+    if (!Lvgl_lock(-1)) return;
+    if (on) {
+        lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     }
-    delete[] previous;
+    Lvgl_unlock();
+}
+
+// Puts the sync figure back after a short notice, if the sync screen is still up.
+void restore_sync_label_task(void *) {
+    vTaskDelay(pdMS_TO_TICKS(2500));
+    if (active_screen == DeviceScreen::Syncing) show_busy_icon(false);
     vTaskDelete(nullptr);
 }
 
-// The key (or the app) asked to record while the microphone is taken. Say so on the screen
-// and to the phone: a press must always get an answer, never silence.
+// The key (or the app) asked to record while something else has the microphone, such as a
+// sync. Say so on the screen, with an icon, and to the phone: a press must always get an
+// answer, never silence.
 void show_busy_notice() {
     const bool syncing = audio_sync_task_handle != nullptr || circuit_sync::is_open();
     update_storage_status(syncing ? "Sync is running\nRecord when it ends" : "Audio is busy\nPlease wait");
     report_audio_status(syncing ? "Can't record: a sync is running, try again when it ends" : "Audio is busy");
     if (recording_active) return;  // the recording screen is already up
-    if (active_screen == DeviceScreen::Syncing && Lvgl_lock(-1)) {
-        char *previous = new (std::nothrow) char[16];
-        if (previous != nullptr) {
-            snprintf(previous, 16, "%s", lv_label_get_text(sync_progress_label));
-            lv_label_set_text(sync_progress_label, "BUSY");
-            if (xTaskCreate(restore_sync_label_task, "busy_notice", 3072, previous, 2, nullptr) != pdPASS) delete[] previous;
-        }
-        Lvgl_unlock();
+    if (active_screen == DeviceScreen::Syncing) {
+        show_busy_icon(true);
+        xTaskCreate(restore_sync_label_task, "busy_notice", 3072, nullptr, 2, nullptr);
         return;
     }
-    flash_sync_result("BUSY");
+    show_device_screen(DeviceScreen::Syncing);  // the sync screen, with the icon in place of the figure
+    show_busy_icon(true);
+    return_to_idle_after(DeviceScreen::Syncing, 2500);
 }
 
 void end_wifi_sync() {
@@ -2011,6 +2018,12 @@ void init_display() {
         lv_img_set_src(recording_icon, circuit_recording_frame(0));
         lv_obj_align(recording_icon, LV_ALIGN_TOP_LEFT, 36, 105);
         lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
+
+        // The "cannot record now" icon sits where the sync figure is (see show_busy_notice()).
+        busy_icon_obj = lv_img_create(lv_screen_active());
+        lv_img_set_src(busy_icon_obj, &circuit_icon_mic_off);
+        lv_obj_align(busy_icon_obj, LV_ALIGN_TOP_LEFT, 116, 124);
+        lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
 
         // Header icons: positioned and shown by refresh_status_icons().
         icon_wifi_obj = lv_img_create(lv_screen_active());
