@@ -77,8 +77,8 @@ constexpr gpio_num_t kRecordButtonPin = GPIO_NUM_0;
 constexpr TickType_t kButtonPollInterval = pdMS_TO_TICKS(20);
 constexpr TickType_t kButtonDebounceDelay = pdMS_TO_TICKS(50);
 constexpr TickType_t kForceSyncHoldTime = pdMS_TO_TICKS(2000);
-// While recording, the same key stops and saves when held this long.
-constexpr TickType_t kStopHoldTime = pdMS_TO_TICKS(1000);
+// While recording, the same key pauses (or resumes) when held this long.
+constexpr TickType_t kPauseHoldTime = pdMS_TO_TICKS(1000);
 // A recording left paused this long is saved, so the board is never stuck in a pause.
 constexpr int64_t kMaxPausedMs = 600000;
 constexpr uint16_t kServiceHandles = 6;
@@ -1418,7 +1418,7 @@ void start_audio_sync(bool forced) {
 
 // The upper side button (BOOT, GPIO0) is the only key, and it does different things by state:
 //   idle       tap: start a recording      hold 2 s: force a sync (Bluetooth if there is no Wi-Fi)
-//   recording  tap: pause, or carry on     hold 1 s: stop and save
+//   recording  tap: stop and save          hold 1 s: pause, or carry on
 // The lower button is wired to power, so holding it switches the board off.
 void record_button_task(void *) {
     // GPIO0 is active-low. Waiting for a released state avoids treating a
@@ -1438,12 +1438,12 @@ void record_button_task(void *) {
                 continue;
             }
         }
-        const TickType_t hold_needed = recording_active ? kStopHoldTime : kForceSyncHoldTime;
+        const TickType_t hold_needed = recording_active ? kPauseHoldTime : kForceSyncHoldTime;
         if (is_pressed && !hold_handled && xTaskGetTickCount() - pressed_at >= hold_needed) {
             hold_handled = true;
             if (recording_active) {
-                ESP_LOGI(kTag, "BOOT held: stop and save");
-                stop_recording();
+                ESP_LOGI(kTag, "BOOT held: pause or resume");
+                toggle_pause_recording();
             } else {
                 ESP_LOGI(kTag, "BOOT held: force sync");
                 update_storage_status("Force sync requested\nStarting sync…");
@@ -1453,7 +1453,7 @@ void record_button_task(void *) {
         }
         if (!is_pressed && was_pressed && !hold_handled) {  // released: it was a tap
             if (recording_active) {
-                toggle_pause_recording();
+                stop_recording();
             } else {
                 // Records until stopped or the cap is hit.
                 char command[32];
