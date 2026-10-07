@@ -617,21 +617,17 @@ class CircuitRelayService : Service() {
                 if (responseCode != 200) throw IOException("Circuit refused the sync (HTTP $responseCode)")
                 inputStream.bufferedReader().use { it.readText() }
             }
-            val notes = listing.lines().filter { it.isNotBlank() }.mapNotNull { line ->
-                val f = line.split(',')
-                if (f.size < 3) null else Triple(f[0].toLongOrNull() ?: return@mapNotNull null,
-                    f[1].toLongOrNull() ?: return@mapNotNull null, f[2].toLongOrNull() ?: 0L)
-            }
+            val notes = NoteListing.parse(listing)
             if (notes.isEmpty()) {
                 publishAudioStatus("Sync complete: no new notes")
                 return
             }
-            val totalBytes = notes.sumOf { it.second }
+            val totalBytes = notes.sumOf { it.bytes }
             var doneBytes = 0L
             var lastPercent = -1
             Log.i("CircuitSync", "Listing ok: ${notes.size} notes, $totalBytes bytes")
             publishAudioStatus("Sync started\n$totalBytes bytes")
-            for ((id, bytes, epoch) in notes) {
+            for ((id, bytes, epoch, group) in notes) {
                 if (superseded()) return
                 // The same recording may already be here under a different time stamp
                 // (an acknowledgement was lost and Circuit offered it again). Reuse it
@@ -702,6 +698,9 @@ class CircuitRelayService : Service() {
                         "kb_s" to bytes / 1024 / seconds,
                     )
                 }
+                // One minute of a longer recording: remember which one and which part, so the app can
+                // join the parts. Written before the app is told the file is here.
+                if (group != null) File(filesDir, "${NoteListing.groupPrefix}$id.txt").writeText(group)
                 doneBytes += bytes
                 Log.i("CircuitSync", "Saved note $id as ${target.name} ($bytes B)")  // the extension says whether it is encrypted
                 val ack = open("/ack/$id", "POST")
@@ -737,7 +736,7 @@ class CircuitRelayService : Service() {
     private fun clearAudioFiles(): Boolean {
         latestSyncedFile = null
         filesDir.listFiles()
-            ?.filter { isNoteFile(it) }
+            ?.filter { isNoteFile(it) || it.name.startsWith(NoteListing.groupPrefix) }
             ?.forEach { it.delete() }
         return writeCommand("@audio-clear")
     }

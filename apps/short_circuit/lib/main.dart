@@ -20,6 +20,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'telemetry.dart';
 part 'backup.dart';
+part 'board_parts.dart';
 part 'groups.dart';
 part 'long_notes.dart';
 part 'music.dart';
@@ -2244,7 +2245,11 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   bool _knownBoardNote(int boardId, DateTime around) => _notes.any(
     (note) =>
         note.boardId == boardId &&
-        note.createdAt.difference(around).abs() < const Duration(minutes: 10),
+        note.createdAt.difference(around).abs() <
+            // A recording made of parts is dated by its first part, which can be hours earlier.
+            (note.audioParts.isEmpty
+                ? const Duration(minutes: 10)
+                : const Duration(hours: 12)),
   );
 
   Future<void> _attachSyncedFile(
@@ -2271,6 +2276,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       try {
         await File(path).delete();
       } catch (_) {}
+      return;
+    }
+    // One minute of a longer recording made on Circuit: collected into one note.
+    final boardPart = await readBoardPart(path);
+    if (boardPart != null &&
+        await _attachBoardPart(path, epochSeconds, boardPart)) {
       return;
     }
     final recordedAt = epochSeconds != null && epochSeconds > 0
@@ -2602,6 +2613,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     final boardId = _boardIdOf(note);
     if (boardId != null) {
       _pendingBoardDeletes.add(boardId);
+      // A recording made of parts is deleted on Circuit part by part.
+      _pendingBoardDeletes.addAll(_boardPartIds(note));
       unawaited(_saveBoardDeletes());
       _lastBoardDeleteSent = null;
       _processBoardDeletes();

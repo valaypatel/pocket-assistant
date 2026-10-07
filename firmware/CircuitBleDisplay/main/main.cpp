@@ -67,7 +67,9 @@ constexpr uint16_t kAudioBitsPerSample = 16;
 constexpr size_t kAudioBufferBytes = 4096;
 // Default cap for a single recording. Kept as one value so a phone setting can
 // replace it later. 16 kHz mono 16-bit is ~1.9 MB/min on the SD card.
-constexpr uint32_t kMaxRecordingSeconds = 600;
+constexpr uint32_t kMaxRecordingSeconds = 8 * 3600;  // a safety stop; the card fills first (1.9 MB a minute)
+constexpr uint32_t kPartSeconds = 60;                // one part of a longer recording
+constexpr uint64_t kMinFreeCardBytes = 8ull * 1024 * 1024;  // less than this and a recording stops
 // Use the established relay characteristic for binary audio packets too. This
 // avoids requiring Android to discard a bonded device's cached GATT table.
 constexpr size_t kAudioPacketBytes = 158;
@@ -763,11 +765,27 @@ void send_note_key_to_phone(const char *request) {
 }
 
 
+// Free room on the card, in bytes (0 if it cannot be read).
+uint64_t sd_free_bytes() {
+    uint64_t total = 0, free_bytes = 0;
+    return esp_vfs_fat_info(kSdMountPath, &total, &free_bytes) == ESP_OK ? free_bytes : 0;
+}
+
+// A recording is stored as one-minute parts: ordinary encrypted notes with consecutive numbers,
+// each marked (circuit_notes.h, .PRT) with the number of the recording's first part, its own
+// position and whether it is the last. The phone joins them into one note. A short recording
+// is a single plain note, exactly as before. The card's free room is the limit, not the clock.
 void record_audio_task(void *argument) {
     const uint32_t seconds = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(argument));
     if (!audio_ready || sd_card == nullptr) {
         update_storage_status("MicroSD required\nCannot record audio");
         report_audio_status("Recording failed: MicroSD unavailable");
+        finish_audio_task();
+        return;
+    }
+    if (sd_free_bytes() < kMinFreeCardBytes) {
+        update_storage_status("Card is full\nFree some space");
+        report_audio_status("Recording failed: the card is full");
         finish_audio_task();
         return;
     }
@@ -777,11 +795,15 @@ void record_audio_task(void *argument) {
     show_device_screen(DeviceScreen::Recording);
 
     char note_path[48];
-    const uint32_t note_id = circuit_notes::allocate_id();
-    circuit_notes::path_for(note_id, "ENC", note_path, sizeof(note_path));
+    const uint32_t first_id = circuit_notes::allocate_id();
+    uint32_t current_id = first_id;
+    uint32_t previous_id = 0;  // the part before the current one, once there is one
+    uint32_t part = 1;
+    uint32_t part_bytes = 0;
+    circuit_notes::path_for(current_id, "ENC", note_path, sizeof(note_path));
     // The sealing buffers are too big for this task's stack, so the writer lives on the heap.
     auto *writer = new (std::nothrow) circuit_secure::Writer();
-    if (writer == nullptr || !writer->open(note_path, note_key, note_id, kAudioSampleRate, kAudioChannels, kAudioBitsPerSample)) {
+    if (writer == nullptr || !writer->open(note_path, note_key, current_id, kAudioSampleRate, kAudioChannels, kAudioBitsPerSample)) {
         delete writer;
         update_storage_status("Audio record failed\nCannot create file");
         report_audio_status("Recording failed: cannot create file");
@@ -802,6 +824,7 @@ void record_audio_task(void *argument) {
     }
 
     const uint32_t target_bytes = seconds * header.byte_rate;
+    const uint32_t part_limit_bytes = kPartSeconds * header.byte_rate;
     uint32_t recorded_bytes = 0;
     update_storage_status("Recording audio…\nPlease speak near Circuit");
     report_audio_status("Recording started: speak near Circuit");
@@ -810,6 +833,10 @@ void record_audio_task(void *argument) {
     const int64_t started_us = esp_timer_get_time();
     int64_t paused_us = 0;
     int64_t pause_began_us = 0;
+    int64_t longest_join_us = 0;  // closing one part and opening the next, where audio could be lost
+    bool writer_open = true;      // false once the current part has been closed at a join
+    bool card_full = false;
+    bool close_failed = false;  // a part could not be sealed at a join
     while (recorded_bytes < target_bytes && !recording_stop_requested) {
         const size_t mono_bytes = (target_bytes - recorded_bytes) < (kAudioBufferBytes / kCodecCaptureChannels)
             ? target_bytes - recorded_bytes : (kAudioBufferBytes / kCodecCaptureChannels);
@@ -838,44 +865,111 @@ void record_audio_task(void *argument) {
         for (size_t frame = 0; frame < mono_bytes / sizeof(int16_t); ++frame) {
             samples[frame] = samples[frame * kCodecCaptureChannels];
         }
+        if (part_bytes >= part_limit_bytes) {
+            // A minute is full: close this part and carry straight on in the next, with the
+            // audio already read going into it. The next part is only opened when there is
+            // audio for it, so a recording never ends in an empty part.
+            const int64_t join_began_us = esp_timer_get_time();
+            const bool closed = writer->finish();
+            writer_open = false;
+            if (!closed) {
+                close_failed = true;
+                break;
+            }
+            circuit_notes::write_group(current_id, {first_id, part, false});
+            previous_id = current_id;
+            if (sd_free_bytes() < kMinFreeCardBytes) {
+                card_full = true;
+                break;
+            }
+            const uint32_t next_id = circuit_notes::allocate_id();
+            char next_path[48];
+            circuit_notes::path_for(next_id, "ENC", next_path, sizeof(next_path));
+            if (!writer->open(next_path, note_key, next_id, kAudioSampleRate, kAudioChannels, kAudioBitsPerSample)) {
+                break;  // the closed part is the last one; what was recorded is kept
+            }
+            writer_open = true;
+            current_id = next_id;
+            ++part;
+            part_bytes = 0;
+            memcpy(note_path, next_path, sizeof(note_path));
+            // Marked as soon as it exists: if the power fails, the recording is still known as parts.
+            circuit_notes::write_group(current_id, {first_id, part, false});
+            const int64_t join_us = esp_timer_get_time() - join_began_us;
+            if (join_us > longest_join_us) longest_join_us = join_us;
+        }
         if (!writer->append(buffer, mono_bytes)) break;
         recorded_bytes += mono_bytes;
+        part_bytes += mono_bytes;
         recording_audio_ms = static_cast<uint32_t>(static_cast<uint64_t>(recorded_bytes) * 1000 / header.byte_rate);
     }
     if (pause_began_us != 0) paused_us += esp_timer_get_time() - pause_began_us;
     {
         const int64_t wall_ms = (esp_timer_get_time() - started_us - paused_us) / 1000;
         const int64_t audio_ms = static_cast<int64_t>(recorded_bytes) * 1000 / header.byte_rate;
-        ESP_LOGW(kTag, "RECSTAT audio=%lld ms, recording time=%lld ms, lost=%lld ms, paused=%lld ms",
+        ESP_LOGW(kTag, "RECSTAT audio=%lld ms, recording time=%lld ms, lost=%lld ms, paused=%lld ms, parts=%lu, longest join=%lld ms",
             static_cast<long long>(audio_ms), static_cast<long long>(wall_ms), static_cast<long long>(wall_ms - audio_ms),
-            static_cast<long long>(paused_us / 1000));
+            static_cast<long long>(paused_us / 1000), static_cast<unsigned long>(part),
+            static_cast<long long>(longest_join_us / 1000));
     }
     heap_caps_free(buffer);
 
-    // Seals the last chunk. A note that cannot be finished is not kept as if it were fine.
-    const bool sealed_ok = writer->finish();
+    // Seals the last chunk. A part that cannot be finished is not kept as if it were fine: the
+    // recording then ends at the part before it.
+    uint32_t last_id = current_id;
+    uint32_t parts = part;
+    bool whole_recording_lost = false;
+    const auto drop_current_part = [&]() {
+        circuit_notes::remove_note(current_id);
+        if (part > 1) {
+            last_id = previous_id;
+            parts = part - 1;
+        } else {
+            whole_recording_lost = true;
+        }
+    };
+    if (writer_open) {
+        if (part_bytes == 0 && part > 1) {
+            writer->abort();  // opened for audio that never came
+            drop_current_part();
+        } else if (!writer->finish()) {
+            drop_current_part();
+        }
+    } else if (close_failed) {
+        drop_current_part();
+    }
     delete writer;
-    if (!sealed_ok) {
-        remove(note_path);
+    if (whole_recording_lost) {
         update_storage_status("Audio record failed\nCould not save note");
         report_audio_status("Recording failed: could not save the note");
         finish_audio_task();
         return;
     }
+    if (parts > 1) {
+        circuit_notes::write_group(last_id, {first_id, parts, true});
+    } else {  // a single part is a plain note
+        char marker[48];
+        circuit_notes::path_for(first_id, "PRT", marker, sizeof(marker));
+        remove(marker);
+    }
+    const uint32_t saved_parts = parts;
 
-    ESP_LOGI(kTag, "Saved note %lu as %s (%lu bytes of audio, encrypted)", static_cast<unsigned long>(note_id),
-        note_path, static_cast<unsigned long>(recorded_bytes));
+    ESP_LOGI(kTag, "Saved recording %lu as %lu part(s), last part %s (%lu bytes of audio, encrypted)",
+        static_cast<unsigned long>(first_id), static_cast<unsigned long>(saved_parts), note_path,
+        static_cast<unsigned long>(recorded_bytes));
     const bool completed = recorded_bytes == target_bytes;
     show_device_screen(DeviceScreen::Saved);
     return_to_idle_after(DeviceScreen::Saved, 3000);
-    update_storage_status(completed
-        ? "Recording saved\nReady to play"
-        : "Recording stopped\nReady to play");
-    // The note number lets the phone recognise this recording exactly once.
+    update_storage_status(card_full ? "Card is full\nRecording saved"
+                          : completed ? "Recording saved\nReady to play"
+                                      : "Recording stopped\nReady to play");
+    // The number of the first part is the recording's number: it lets the phone recognise this
+    // recording exactly once, however many parts it has.
     char saved_status[64];
     snprintf(saved_status, sizeof(saved_status), "%s: ready to play #%lu",
-        completed ? "Recording saved" : "Recording stopped", static_cast<unsigned long>(note_id));
+        completed ? "Recording saved" : "Recording stopped", static_cast<unsigned long>(first_id));
     report_audio_status(saved_status);
+    if (card_full) report_audio_status("Card is full: the recording was stopped");  // not "Recording stopped…": the app reads that as a new note
     finish_audio_task();
 }
 
@@ -891,10 +985,9 @@ bool play_mono_chunk(const uint8_t *chunk, size_t bytes, uint8_t *stereo_buffer)
     return Codec_PlaybackData(stereo_buffer, samples * kCodecCaptureChannels * sizeof(int16_t)) == ESP_OK;
 }
 
-void play_audio_task(void *) {
-    // The newest note, in whichever form it is stored.
+// Plays one note, in whichever form it is stored. False if it could not be played at all.
+bool play_note(uint32_t id) {
     circuit_notes::Note note = {};
-    const uint32_t id = circuit_notes::newest_id();
     char path[48] = {};
     const bool found = id != 0 && circuit_notes::describe(id, &note);
     if (found) circuit_notes::note_path(note, path, sizeof(path));
@@ -919,12 +1012,9 @@ void play_audio_task(void *) {
         const bool memory = ready;  // everything was fine except the buffers
         update_storage_status(memory ? "Playback failed\nNot enough memory" : "No recording found\nRecord audio first");
         report_audio_status(memory ? "Playback failed: memory unavailable" : "Playback failed: no recording found");
-        finish_audio_task();
-        return;
+        return false;
     }
 
-    update_storage_status("Playing recording…\nSpeaker active");
-    report_audio_status("Playing latest recording");
     if (reader != nullptr) {
         // read() returns 0 at the end of the note, or at a chunk that does not authenticate
         // (damaged, or a recording cut short while it was being written): playback just stops.
@@ -942,8 +1032,32 @@ void play_audio_task(void *) {
     heap_caps_free(stereo_buffer);
     if (plain != nullptr) fclose(plain);
     delete reader;
-    update_storage_status("Playback complete\nReady to record");
-    report_audio_status("Playback complete");
+    return true;
+}
+
+// Plays the newest recording. One made of parts plays all of them, in order.
+void play_audio_task(void *) {
+    const uint32_t last = circuit_notes::newest_id();
+    uint32_t first = last;
+    circuit_notes::Group group;
+    if (last != 0 && circuit_notes::read_group(last, &group) && group.first != 0 && group.first <= last) first = group.first;
+    update_storage_status("Playing recording…\nSpeaker active");
+    report_audio_status("Playing latest recording");
+    bool played = false;
+    if (last == 0) play_note(0);  // reports that there is nothing to play
+    for (uint32_t id = first; id != 0 && id <= last; ++id) {
+        circuit_notes::Note note;
+        if (!circuit_notes::describe(id, &note)) {
+            if (id == last && !played) play_note(id);  // reports that there is nothing to play
+            continue;
+        }
+        if (!play_note(id)) break;
+        played = true;
+    }
+    if (played) {
+        update_storage_status("Playback complete\nReady to record");
+        report_audio_status("Playback complete");
+    }
     finish_audio_task();
 }
 
