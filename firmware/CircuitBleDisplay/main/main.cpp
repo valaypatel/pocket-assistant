@@ -1535,6 +1535,13 @@ void start_audio_sync(bool forced) {
     xTaskCreate(audio_sync_task, "audio_sync", 6144, nullptr, 4, &audio_sync_task_handle);
 }
 
+void force_sync_task(void *) {
+    update_storage_status("Force sync requested\nStarting sync…");
+    report_audio_status("Force sync requested");
+    start_audio_sync(true);
+    vTaskDelete(nullptr);
+}
+
 // The upper side button (BOOT, GPIO0) is the only key, and it does different things by state:
 //   idle       tap: start a recording      hold 2 s: force a sync (Bluetooth if there is no Wi-Fi)
 //   recording  tap: stop and save          hold 1 s: pause, or carry on
@@ -1565,9 +1572,11 @@ void record_button_task(void *) {
                 toggle_pause_recording();
             } else {
                 ESP_LOGI(kTag, "BOOT held: force sync");
-                update_storage_status("Force sync requested\nStarting sync…");
-                report_audio_status("Force sync requested");
-                start_audio_sync(true);
+                // Starting a sync is heavy (it lists the card and opens a session), far more than
+                // this key task's small stack allows: it runs in a task of its own.
+                if (xTaskCreate(force_sync_task, "force_sync", 6144, nullptr, 4, nullptr) != pdPASS) {
+                    report_audio_status("Could not start the sync");
+                }
             }
         }
         if (!is_pressed && was_pressed && !hold_handled) {  // released: it was a tap
