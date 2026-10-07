@@ -141,15 +141,11 @@ bool home_status_received = false;
 volatile bool boot_splash = true;
 volatile bool clock_set = false;
 volatile bool ble_encrypted = false;       // bonded phone, link encrypted
-volatile int64_t last_wifi_sync_end_ms = -600000;  // no cooldown at boot
-constexpr int64_t kWifiSyncCooldownMs = 45000;
-constexpr int64_t kWifiSyncMaxCooldownMs = 600000;
 volatile uint32_t text_stack_min_bytes = UINT32_MAX;  // least unused stack the command task has had
 int boot_reset_reason = -1;               // why the board last restarted (esp_reset_reason)
 char last_offer[kMaxTextBytes + 40] = "";   // kept so it can be re-sent until the phone answers
 int64_t last_offer_sent_ms = 0;
 constexpr int64_t kOfferResendMs = 15000;
-int wifi_sync_failures = 0;  // sessions in a row where the phone never connected
 constexpr TickType_t kSyncSupervisorInterval = pdMS_TO_TICKS(8000);
 bool sntp_started = false;
 constexpr time_t kMinValidEpoch = 1704067200;  // 2024-01-01
@@ -807,11 +803,10 @@ void record_audio_task(void *argument) {
     update_storage_status("Recording audio…\nPlease speak near Circuit");
     report_audio_status("Recording started: speak near Circuit");
     // Wall-clock time spent recording (not paused) against the audio that came back. A gap
-    // between the two means samples were lost, for example while the card was busy.
+    // between the two means samples were lost.
     const int64_t started_us = esp_timer_get_time();
     int64_t paused_us = 0;
     int64_t pause_began_us = 0;
-    bool synced_meanwhile = false;
     while (recorded_bytes < target_bytes && !recording_stop_requested) {
         const size_t mono_bytes = (target_bytes - recorded_bytes) < (kAudioBufferBytes / kCodecCaptureChannels)
             ? target_bytes - recorded_bytes : (kAudioBufferBytes / kCodecCaptureChannels);
@@ -821,7 +816,6 @@ void record_audio_task(void *argument) {
         if (Codec_RecordData(buffer, stereo_bytes) != ESP_OK) {
             break;
         }
-        if (circuit_sync::is_open()) synced_meanwhile = true;
         if (recording_paused) {
             if (pause_began_us == 0) pause_began_us = esp_timer_get_time();
             if ((esp_timer_get_time() - pause_began_us) / 1000 > kMaxPausedMs) {
@@ -849,9 +843,9 @@ void record_audio_task(void *argument) {
     {
         const int64_t wall_ms = (esp_timer_get_time() - started_us - paused_us) / 1000;
         const int64_t audio_ms = static_cast<int64_t>(recorded_bytes) * 1000 / header.byte_rate;
-        ESP_LOGW(kTag, "RECSTAT audio=%lld ms, recording time=%lld ms, lost=%lld ms, paused=%lld ms, wifi sync open=%s",
+        ESP_LOGW(kTag, "RECSTAT audio=%lld ms, recording time=%lld ms, lost=%lld ms, paused=%lld ms",
             static_cast<long long>(audio_ms), static_cast<long long>(wall_ms), static_cast<long long>(wall_ms - audio_ms),
-            static_cast<long long>(paused_us / 1000), synced_meanwhile ? "yes" : "no");
+            static_cast<long long>(paused_us / 1000));
     }
     heap_caps_free(buffer);
 
@@ -964,7 +958,9 @@ void start_recording(char *command) {
         report_audio_status(limit_text);
         return;
     }
-    if (audio_busy) {
+    // Recording and syncing are never done together: the card, the radio and the memory are
+    // shared, and a recording must not lose a word to a sync.
+    if (audio_busy || circuit_sync::is_open()) {
         show_busy_notice();
         return;
     }
@@ -979,6 +975,11 @@ void start_recording(char *command) {
         return;
     }
     if (!claim_audio()) {  // another request took the microphone a moment ago
+        show_busy_notice();
+        return;
+    }
+    if (circuit_sync::is_open()) {  // a sync opened between the check above and the claim
+        audio_busy = false;
         show_busy_notice();
         return;
     }
@@ -1221,8 +1222,7 @@ void wifi_sync_progress(uint32_t percent) { sync_ui_percent = static_cast<int32_
 void sync_ui_tick() {
     const int32_t percent = sync_ui_percent;
     if (percent < 0 || percent == sync_ui_shown) return;
-    // A Wi-Fi sync can run while a note is being recorded: the recording screen stays up, and
-    // the sync figure is drawn again once the recording is saved.
+    // Never take the screen from a recording.
     if (recording_active || active_screen == DeviceScreen::Recording) return;
     if (active_screen != DeviceScreen::Syncing) show_device_screen(DeviceScreen::Syncing);
     if (Lvgl_lock(-1)) {
@@ -1252,6 +1252,10 @@ bool offer_wifi_sync() {
     sync_ui_percent = -1;
     sync_ui_shown = -1;
     if (!circuit_sync::open_session(&port, token, sizeof(token), &fingerprint, &count, &bytes)) return false;
+    if (audio_busy) {  // a recording started while the session was opening: it wins
+        circuit_sync::close_session();
+        return false;
+    }
     char offer[kMaxTextBytes + 40];
     snprintf(offer, sizeof(offer), "@sync-offer\n%s\n%u\n%s\n%s\n%lu\n%lu", ip, static_cast<unsigned>(port), token,
         fingerprint, static_cast<unsigned long>(count), static_cast<unsigned long>(bytes));
@@ -1291,10 +1295,9 @@ void restore_sync_label_task(void *argument) {
 // The key (or the app) asked to record while the microphone is taken. Say so on the screen
 // and to the phone: a press must always get an answer, never silence.
 void show_busy_notice() {
-    const bool syncing_over_bluetooth = audio_sync_task_handle != nullptr;
-    update_storage_status("Audio is busy\nPlease wait");
-    report_audio_status(syncing_over_bluetooth ? "Can't record: a sync over Bluetooth is running, try again when it ends"
-                                               : "Audio is busy");
+    const bool syncing = audio_sync_task_handle != nullptr || circuit_sync::is_open();
+    update_storage_status(syncing ? "Sync is running\nRecord when it ends" : "Audio is busy\nPlease wait");
+    report_audio_status(syncing ? "Can't record: a sync is running, try again when it ends" : "Audio is busy");
     if (recording_active) return;  // the recording screen is already up
     if (active_screen == DeviceScreen::Syncing && Lvgl_lock(-1)) {
         char *previous = new (std::nothrow) char[16];
@@ -1324,13 +1327,10 @@ void end_wifi_sync() {
         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     circuit_sync::close_session();
     sync_ui_percent = -1;
-    last_wifi_sync_end_ms = circuit_sync::now_ms();
     if (served == 0) {  // the phone never connected: back off, and say so if the screen is showing sync
-        if (wifi_sync_failures < 4) ++wifi_sync_failures;
         if (active_screen == DeviceScreen::Syncing) flash_sync_result("ERR");
         return;
     }
-    wifi_sync_failures = 0;
     const bool complete = circuit_notes::count_unsynced() == 0;
     if (Lvgl_lock(-1)) {
         lv_label_set_text(sync_progress_label, complete ? "100%" : "ERR");
@@ -1340,8 +1340,8 @@ void end_wifi_sync() {
     report_audio_status(complete ? "Sync complete: notes saved on phone" : "Sync interrupted: will retry");
 }
 
-// Starts a sync when the phone is bonded and connected and both are on Wi-Fi;
-// closes sessions that finished, stalled or were abused.
+// Looks after a sync someone asked for, and closes sessions that finished, stalled or were
+// abused. It never starts one.
 void sync_supervisor_task(void *) {
     // Create (or load) the sync certificate now so a failure shows up at boot.
     ESP_LOGI(kTag, "Sync identity %s", circuit_sync::ensure_identity() ? "ready" : "FAILED");
@@ -1368,10 +1368,8 @@ void sync_supervisor_task(void *) {
             }
             continue;
         }
-        int64_t cooldown = kWifiSyncCooldownMs << wifi_sync_failures;  // 45 s, 90 s, 3 min, ...
-        if (cooldown > kWifiSyncMaxCooldownMs) cooldown = kWifiSyncMaxCooldownMs;
-        if (circuit_sync::now_ms() - last_wifi_sync_end_ms < cooldown) continue;
-        if (circuit_notes::count_unsynced() > 0 && !recording_active) offer_wifi_sync();
+        // No sync starts by itself: one only starts when someone asks for it (the key held for
+        // 2 s, or the app), so it never lands in the middle of a recording or a bad moment.
     }
 }
 
