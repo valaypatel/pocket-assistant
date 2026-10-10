@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
@@ -18,6 +19,7 @@
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_sntp.h"
 #include "esp_vfs_fat.h"
 #include "esp_wifi.h"
@@ -65,7 +67,9 @@ constexpr uint16_t kAudioBitsPerSample = 16;
 constexpr size_t kAudioBufferBytes = 4096;
 // Default cap for a single recording. Kept as one value so a phone setting can
 // replace it later. 16 kHz mono 16-bit is ~1.9 MB/min on the SD card.
-constexpr uint32_t kMaxRecordingSeconds = 600;
+constexpr uint32_t kMaxRecordingSeconds = 8 * 3600;  // a safety stop; the card fills first (1.9 MB a minute)
+constexpr uint32_t kPartSeconds = 60;                // one part of a longer recording
+constexpr uint64_t kMinFreeCardBytes = 8ull * 1024 * 1024;  // less than this and a recording stops
 // Use the established relay characteristic for binary audio packets too. This
 // avoids requiring Android to discard a bonded device's cached GATT table.
 constexpr size_t kAudioPacketBytes = 158;
@@ -75,6 +79,10 @@ constexpr gpio_num_t kRecordButtonPin = GPIO_NUM_0;
 constexpr TickType_t kButtonPollInterval = pdMS_TO_TICKS(20);
 constexpr TickType_t kButtonDebounceDelay = pdMS_TO_TICKS(50);
 constexpr TickType_t kForceSyncHoldTime = pdMS_TO_TICKS(2000);
+// While recording, the same key pauses (or resumes) when held this long.
+constexpr TickType_t kPauseHoldTime = pdMS_TO_TICKS(1000);
+// A recording left paused this long is saved, so the board is never stuck in a pause.
+constexpr int64_t kMaxPausedMs = 600000;
 constexpr uint16_t kServiceHandles = 6;
 
 const char *kTag = "Circuit";
@@ -86,6 +94,7 @@ lv_obj_t *pairing_code_label;
 lv_obj_t *recording_timer_label;
 lv_obj_t *recording_icon;  // the animated device icon on the recording screen (64x64)
 lv_obj_t *sync_progress_label;
+lv_obj_t *busy_icon_obj;  // "cannot record now" (a microphone crossed out), drawn where the sync figure is
 lv_obj_t *idle_date_label;
 lv_obj_t *idle_time_label;
 lv_obj_t *idle_ampm_label;
@@ -100,10 +109,14 @@ uint16_t relay_handle;
 uint16_t connection_id = UINT16_MAX;
 sdmmc_card_t *sd_card = nullptr;
 bool audio_ready = false;
-bool audio_busy = false;
+// One thing at a time uses the microphone, speaker and the note being sent. It is claimed with
+// claim_audio() so two requests arriving together (the key and the app) cannot both win.
+std::atomic<bool> audio_busy{false};
 TaskHandle_t audio_sync_task_handle = nullptr;
 volatile bool recording_active = false;
 volatile bool recording_stop_requested = false;
+volatile bool recording_paused = false;
+volatile uint32_t recording_audio_ms = 0;  // audio recorded so far; a pause does not count
 enum class DeviceScreen : uint8_t { Idle, Recording, Saved, Syncing, Pairing };
 volatile DeviceScreen active_screen = DeviceScreen::Idle;
 volatile TickType_t recording_started_at = 0;
@@ -131,20 +144,18 @@ bool home_status_received = false;
 volatile bool boot_splash = true;
 volatile bool clock_set = false;
 volatile bool ble_encrypted = false;       // bonded phone, link encrypted
-volatile int64_t last_wifi_sync_end_ms = -600000;  // no cooldown at boot
-constexpr int64_t kWifiSyncCooldownMs = 45000;
-constexpr int64_t kWifiSyncMaxCooldownMs = 600000;
 volatile uint32_t text_stack_min_bytes = UINT32_MAX;  // least unused stack the command task has had
 int boot_reset_reason = -1;               // why the board last restarted (esp_reset_reason)
 char last_offer[kMaxTextBytes + 40] = "";   // kept so it can be re-sent until the phone answers
 int64_t last_offer_sent_ms = 0;
 constexpr int64_t kOfferResendMs = 15000;
-int wifi_sync_failures = 0;  // sessions in a row where the phone never connected
 constexpr TickType_t kSyncSupervisorInterval = pdMS_TO_TICKS(8000);
 bool sntp_started = false;
 constexpr time_t kMinValidEpoch = 1704067200;  // 2024-01-01
 
 void send_relay_request(const char *request);
+void show_busy_notice();
+bool claim_audio() { return !audio_busy.exchange(true); }
 esp_err_t send_audio_data(const uint8_t *data, size_t length);
 
 struct TextMessage {
@@ -470,6 +481,7 @@ void show_device_screen(DeviceScreen screen) {
     lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
     lv_img_set_src(wordmark_image, kScreens[static_cast<size_t>(screen)]);
     lv_obj_center(wordmark_image);
     apply_persistent_labels(screen);
@@ -495,14 +507,23 @@ void demo_animation_task(void *) {
                 if (active_screen == DeviceScreen::Recording) {
                     // Four stepped frames (waveform changes, the dot alternates filled and hollow)
                     // at the e-paper's cadence; it shows recording is on, not the sound level.
-                    const uint32_t elapsed_ticks = xTaskGetTickCount() - recording_started_at;
-                    lv_img_set_src(recording_icon, circuit_recording_frame(elapsed_ticks * 1000 / configTICK_RATE_HZ));
-                    const uint32_t elapsed = elapsed_ticks / configTICK_RATE_HZ;
+                    // The timer counts recorded audio, so it stops during a pause: the picture
+                    // freezes and the time blinks.
+                    const uint32_t audio_ms = recording_audio_ms;
+                    lv_img_set_src(recording_icon, circuit_recording_frame(audio_ms));
+                    const uint32_t elapsed = audio_ms / 1000;
                     char elapsed_text[12];
                     snprintf(elapsed_text, sizeof(elapsed_text), "%02lu:%02lu",
                         static_cast<unsigned long>(elapsed / 60),
                         static_cast<unsigned long>(elapsed % 60));
                     lv_label_set_text(recording_timer_label, elapsed_text);
+                    static bool blink_off = false;
+                    blink_off = recording_paused && !blink_off;
+                    if (blink_off) {
+                        lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+                    } else {
+                        lv_obj_clear_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+                    }
                     lv_obj_clear_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
                 }
                 Lvgl_unlock();
@@ -545,6 +566,7 @@ void show_pairing_code() {
     lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
     apply_persistent_labels(DeviceScreen::Pairing);
     lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
     Lvgl_unlock();
@@ -634,8 +656,11 @@ void init_sd_card() {
 }
 
 void finish_audio_task() {
-    audio_busy = false;
+    // The task deletes itself below, so a handle left behind would point at nothing.
+    audio_sync_task_handle = nullptr;
+    recording_paused = false;
     recording_active = false;
+    audio_busy = false;
     vTaskDelete(nullptr);
 }
 
@@ -740,6 +765,16 @@ void send_note_key_to_phone(const char *request) {
 }
 
 
+// Free room on the card, in bytes (0 if it cannot be read).
+uint64_t sd_free_bytes() {
+    uint64_t total = 0, free_bytes = 0;
+    return esp_vfs_fat_info(kSdMountPath, &total, &free_bytes) == ESP_OK ? free_bytes : 0;
+}
+
+// A recording is stored as one-minute parts: ordinary encrypted notes with consecutive numbers,
+// each marked (circuit_notes.h, .PRT) with the number of the recording's first part, its own
+// position and whether it is the last. The phone joins them into one note. A short recording
+// is a single plain note, exactly as before. The card's free room is the limit, not the clock.
 void record_audio_task(void *argument) {
     const uint32_t seconds = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(argument));
     if (!audio_ready || sd_card == nullptr) {
@@ -748,15 +783,27 @@ void record_audio_task(void *argument) {
         finish_audio_task();
         return;
     }
+    if (sd_free_bytes() < kMinFreeCardBytes) {
+        update_storage_status("Card is full\nFree some space");
+        report_audio_status("Recording failed: the card is full");
+        finish_audio_task();
+        return;
+    }
 
+    recording_audio_ms = 0;
+    recording_paused = false;
     show_device_screen(DeviceScreen::Recording);
 
     char note_path[48];
-    const uint32_t note_id = circuit_notes::allocate_id();
-    circuit_notes::path_for(note_id, "ENC", note_path, sizeof(note_path));
+    const uint32_t first_id = circuit_notes::allocate_id();
+    uint32_t current_id = first_id;
+    uint32_t previous_id = 0;  // the part before the current one, once there is one
+    uint32_t part = 1;
+    uint32_t part_bytes = 0;
+    circuit_notes::path_for(current_id, "ENC", note_path, sizeof(note_path));
     // The sealing buffers are too big for this task's stack, so the writer lives on the heap.
     auto *writer = new (std::nothrow) circuit_secure::Writer();
-    if (writer == nullptr || !writer->open(note_path, note_key, note_id, kAudioSampleRate, kAudioChannels, kAudioBitsPerSample)) {
+    if (writer == nullptr || !writer->open(note_path, note_key, current_id, kAudioSampleRate, kAudioChannels, kAudioBitsPerSample)) {
         delete writer;
         update_storage_status("Audio record failed\nCannot create file");
         report_audio_status("Recording failed: cannot create file");
@@ -777,15 +824,40 @@ void record_audio_task(void *argument) {
     }
 
     const uint32_t target_bytes = seconds * header.byte_rate;
+    const uint32_t part_limit_bytes = kPartSeconds * header.byte_rate;
     uint32_t recorded_bytes = 0;
     update_storage_status("Recording audio…\nPlease speak near Circuit");
     report_audio_status("Recording started: speak near Circuit");
+    // Wall-clock time spent recording (not paused) against the audio that came back. A gap
+    // between the two means samples were lost.
+    const int64_t started_us = esp_timer_get_time();
+    int64_t paused_us = 0;
+    int64_t pause_began_us = 0;
+    int64_t longest_join_us = 0;  // closing one part and opening the next, where audio could be lost
+    bool writer_open = true;      // false once the current part has been closed at a join
+    bool card_full = false;
+    bool close_failed = false;  // a part could not be sealed at a join
     while (recorded_bytes < target_bytes && !recording_stop_requested) {
         const size_t mono_bytes = (target_bytes - recorded_bytes) < (kAudioBufferBytes / kCodecCaptureChannels)
             ? target_bytes - recorded_bytes : (kAudioBufferBytes / kCodecCaptureChannels);
         const size_t stereo_bytes = mono_bytes * kCodecCaptureChannels;
+        // The microphone keeps running through a pause so it resumes without a gap in the
+        // hardware buffers; what it hears while paused is thrown away.
         if (Codec_RecordData(buffer, stereo_bytes) != ESP_OK) {
             break;
+        }
+        if (recording_paused) {
+            if (pause_began_us == 0) pause_began_us = esp_timer_get_time();
+            if ((esp_timer_get_time() - pause_began_us) / 1000 > kMaxPausedMs) {
+                ESP_LOGW(kTag, "Paused for too long: saving the recording");
+                recording_paused = false;
+                break;
+            }
+            continue;
+        }
+        if (pause_began_us != 0) {
+            paused_us += esp_timer_get_time() - pause_began_us;
+            pause_began_us = 0;
         }
         // The board codec delivers stereo 16-bit samples. Voice notes retain
         // the first microphone channel only, halving both storage and BLE sync.
@@ -793,35 +865,111 @@ void record_audio_task(void *argument) {
         for (size_t frame = 0; frame < mono_bytes / sizeof(int16_t); ++frame) {
             samples[frame] = samples[frame * kCodecCaptureChannels];
         }
+        if (part_bytes >= part_limit_bytes) {
+            // A minute is full: close this part and carry straight on in the next, with the
+            // audio already read going into it. The next part is only opened when there is
+            // audio for it, so a recording never ends in an empty part.
+            const int64_t join_began_us = esp_timer_get_time();
+            const bool closed = writer->finish();
+            writer_open = false;
+            if (!closed) {
+                close_failed = true;
+                break;
+            }
+            circuit_notes::write_group(current_id, {first_id, part, false});
+            previous_id = current_id;
+            if (sd_free_bytes() < kMinFreeCardBytes) {
+                card_full = true;
+                break;
+            }
+            const uint32_t next_id = circuit_notes::allocate_id();
+            char next_path[48];
+            circuit_notes::path_for(next_id, "ENC", next_path, sizeof(next_path));
+            if (!writer->open(next_path, note_key, next_id, kAudioSampleRate, kAudioChannels, kAudioBitsPerSample)) {
+                break;  // the closed part is the last one; what was recorded is kept
+            }
+            writer_open = true;
+            current_id = next_id;
+            ++part;
+            part_bytes = 0;
+            memcpy(note_path, next_path, sizeof(note_path));
+            // Marked as soon as it exists: if the power fails, the recording is still known as parts.
+            circuit_notes::write_group(current_id, {first_id, part, false});
+            const int64_t join_us = esp_timer_get_time() - join_began_us;
+            if (join_us > longest_join_us) longest_join_us = join_us;
+        }
         if (!writer->append(buffer, mono_bytes)) break;
         recorded_bytes += mono_bytes;
+        part_bytes += mono_bytes;
+        recording_audio_ms = static_cast<uint32_t>(static_cast<uint64_t>(recorded_bytes) * 1000 / header.byte_rate);
+    }
+    if (pause_began_us != 0) paused_us += esp_timer_get_time() - pause_began_us;
+    {
+        const int64_t wall_ms = (esp_timer_get_time() - started_us - paused_us) / 1000;
+        const int64_t audio_ms = static_cast<int64_t>(recorded_bytes) * 1000 / header.byte_rate;
+        ESP_LOGW(kTag, "RECSTAT audio=%lld ms, recording time=%lld ms, lost=%lld ms, paused=%lld ms, parts=%lu, longest join=%lld ms",
+            static_cast<long long>(audio_ms), static_cast<long long>(wall_ms), static_cast<long long>(wall_ms - audio_ms),
+            static_cast<long long>(paused_us / 1000), static_cast<unsigned long>(part),
+            static_cast<long long>(longest_join_us / 1000));
     }
     heap_caps_free(buffer);
 
-    // Seals the last chunk. A note that cannot be finished is not kept as if it were fine.
-    const bool sealed_ok = writer->finish();
+    // Seals the last chunk. A part that cannot be finished is not kept as if it were fine: the
+    // recording then ends at the part before it.
+    uint32_t last_id = current_id;
+    uint32_t parts = part;
+    bool whole_recording_lost = false;
+    const auto drop_current_part = [&]() {
+        circuit_notes::remove_note(current_id);
+        if (part > 1) {
+            last_id = previous_id;
+            parts = part - 1;
+        } else {
+            whole_recording_lost = true;
+        }
+    };
+    if (writer_open) {
+        if (part_bytes == 0 && part > 1) {
+            writer->abort();  // opened for audio that never came
+            drop_current_part();
+        } else if (!writer->finish()) {
+            drop_current_part();
+        }
+    } else if (close_failed) {
+        drop_current_part();
+    }
     delete writer;
-    if (!sealed_ok) {
-        remove(note_path);
+    if (whole_recording_lost) {
         update_storage_status("Audio record failed\nCould not save note");
         report_audio_status("Recording failed: could not save the note");
         finish_audio_task();
         return;
     }
+    if (parts > 1) {
+        circuit_notes::write_group(last_id, {first_id, parts, true});
+    } else {  // a single part is a plain note
+        char marker[48];
+        circuit_notes::path_for(first_id, "PRT", marker, sizeof(marker));
+        remove(marker);
+    }
+    const uint32_t saved_parts = parts;
 
-    ESP_LOGI(kTag, "Saved note %lu as %s (%lu bytes of audio, encrypted)", static_cast<unsigned long>(note_id),
-        note_path, static_cast<unsigned long>(recorded_bytes));
+    ESP_LOGI(kTag, "Saved recording %lu as %lu part(s), last part %s (%lu bytes of audio, encrypted)",
+        static_cast<unsigned long>(first_id), static_cast<unsigned long>(saved_parts), note_path,
+        static_cast<unsigned long>(recorded_bytes));
     const bool completed = recorded_bytes == target_bytes;
     show_device_screen(DeviceScreen::Saved);
     return_to_idle_after(DeviceScreen::Saved, 3000);
-    update_storage_status(completed
-        ? "Recording saved\nReady to play"
-        : "Recording stopped\nReady to play");
-    // The note number lets the phone recognise this recording exactly once.
+    update_storage_status(card_full ? "Card is full\nRecording saved"
+                          : completed ? "Recording saved\nReady to play"
+                                      : "Recording stopped\nReady to play");
+    // The number of the first part is the recording's number: it lets the phone recognise this
+    // recording exactly once, however many parts it has.
     char saved_status[64];
     snprintf(saved_status, sizeof(saved_status), "%s: ready to play #%lu",
-        completed ? "Recording saved" : "Recording stopped", static_cast<unsigned long>(note_id));
+        completed ? "Recording saved" : "Recording stopped", static_cast<unsigned long>(first_id));
     report_audio_status(saved_status);
+    if (card_full) report_audio_status("Card is full: the recording was stopped");  // not "Recording stopped…": the app reads that as a new note
     finish_audio_task();
 }
 
@@ -837,10 +985,9 @@ bool play_mono_chunk(const uint8_t *chunk, size_t bytes, uint8_t *stereo_buffer)
     return Codec_PlaybackData(stereo_buffer, samples * kCodecCaptureChannels * sizeof(int16_t)) == ESP_OK;
 }
 
-void play_audio_task(void *) {
-    // The newest note, in whichever form it is stored.
+// Plays one note, in whichever form it is stored. False if it could not be played at all.
+bool play_note(uint32_t id) {
     circuit_notes::Note note = {};
-    const uint32_t id = circuit_notes::newest_id();
     char path[48] = {};
     const bool found = id != 0 && circuit_notes::describe(id, &note);
     if (found) circuit_notes::note_path(note, path, sizeof(path));
@@ -865,12 +1012,9 @@ void play_audio_task(void *) {
         const bool memory = ready;  // everything was fine except the buffers
         update_storage_status(memory ? "Playback failed\nNot enough memory" : "No recording found\nRecord audio first");
         report_audio_status(memory ? "Playback failed: memory unavailable" : "Playback failed: no recording found");
-        finish_audio_task();
-        return;
+        return false;
     }
 
-    update_storage_status("Playing recording…\nSpeaker active");
-    report_audio_status("Playing latest recording");
     if (reader != nullptr) {
         // read() returns 0 at the end of the note, or at a chunk that does not authenticate
         // (damaged, or a recording cut short while it was being written): playback just stops.
@@ -888,8 +1032,32 @@ void play_audio_task(void *) {
     heap_caps_free(stereo_buffer);
     if (plain != nullptr) fclose(plain);
     delete reader;
-    update_storage_status("Playback complete\nReady to record");
-    report_audio_status("Playback complete");
+    return true;
+}
+
+// Plays the newest recording. One made of parts plays all of them, in order.
+void play_audio_task(void *) {
+    const uint32_t last = circuit_notes::newest_id();
+    uint32_t first = last;
+    circuit_notes::Group group;
+    if (last != 0 && circuit_notes::read_group(last, &group) && group.first != 0 && group.first <= last) first = group.first;
+    update_storage_status("Playing recording…\nSpeaker active");
+    report_audio_status("Playing latest recording");
+    bool played = false;
+    if (last == 0) play_note(0);  // reports that there is nothing to play
+    for (uint32_t id = first; id != 0 && id <= last; ++id) {
+        circuit_notes::Note note;
+        if (!circuit_notes::describe(id, &note)) {
+            if (id == last && !played) play_note(id);  // reports that there is nothing to play
+            continue;
+        }
+        if (!play_note(id)) break;
+        played = true;
+    }
+    if (played) {
+        update_storage_status("Playback complete\nReady to record");
+        report_audio_status("Playback complete");
+    }
     finish_audio_task();
 }
 
@@ -907,9 +1075,10 @@ void start_recording(char *command) {
         report_audio_status(limit_text);
         return;
     }
-    if (audio_busy) {
-        update_storage_status("Audio is busy\nPlease wait");
-        report_audio_status("Audio is busy");
+    // Recording and syncing are never done together: the card, the radio and the memory are
+    // shared, and a recording must not lose a word to a sync.
+    if (audio_busy || circuit_sync::is_open()) {
+        show_busy_notice();
         return;
     }
     if (!crypto_self_test_ok) {
@@ -922,8 +1091,17 @@ void start_recording(char *command) {
         report_audio_status("Recording failed: pair Circuit with the app first");
         return;
     }
-    audio_busy = true;
+    if (!claim_audio()) {  // another request took the microphone a moment ago
+        show_busy_notice();
+        return;
+    }
+    if (circuit_sync::is_open()) {  // a sync opened between the check above and the claim
+        audio_busy = false;
+        show_busy_notice();
+        return;
+    }
     recording_active = true;
+    recording_paused = false;
     recording_stop_requested = false;
     xTaskCreate(record_audio_task, "audio_record", 6144,
                 reinterpret_cast<void *>(static_cast<uintptr_t>(seconds)), 5, nullptr);
@@ -936,6 +1114,15 @@ void stop_recording() {
     }
     recording_stop_requested = true;
     report_audio_status("Stopping recording…");
+}
+
+// Pauses a recording, or carries it on. The note stays open: it is one note, with the pause
+// left out of it.
+void toggle_pause_recording() {
+    if (!recording_active || recording_stop_requested) return;
+    recording_paused = !recording_paused;
+    ESP_LOGI(kTag, "Recording %s", recording_paused ? "paused" : "resumed");
+    report_audio_status(recording_paused ? "Recording paused" : "Recording resumed");
 }
 
 // Slow BLE fallback, used only for a force sync with no Wi-Fi sync available.
@@ -1152,6 +1339,8 @@ void wifi_sync_progress(uint32_t percent) { sync_ui_percent = static_cast<int32_
 void sync_ui_tick() {
     const int32_t percent = sync_ui_percent;
     if (percent < 0 || percent == sync_ui_shown) return;
+    // Never take the screen from a recording.
+    if (recording_active || active_screen == DeviceScreen::Recording) return;
     if (active_screen != DeviceScreen::Syncing) show_device_screen(DeviceScreen::Syncing);
     if (Lvgl_lock(-1)) {
         char text[16];
@@ -1180,6 +1369,10 @@ bool offer_wifi_sync() {
     sync_ui_percent = -1;
     sync_ui_shown = -1;
     if (!circuit_sync::open_session(&port, token, sizeof(token), &fingerprint, &count, &bytes)) return false;
+    if (audio_busy) {  // a recording started while the session was opening: it wins
+        circuit_sync::close_session();
+        return false;
+    }
     char offer[kMaxTextBytes + 40];
     snprintf(offer, sizeof(offer), "@sync-offer\n%s\n%u\n%s\n%s\n%lu\n%lu", ip, static_cast<unsigned>(port), token,
         fingerprint, static_cast<unsigned long>(count), static_cast<unsigned long>(bytes));
@@ -1202,6 +1395,44 @@ void flash_sync_result(const char *text) {
     return_to_idle_after(DeviceScreen::Syncing, 2500);
 }
 
+// Swaps the sync figure for the "cannot record" icon, or back.
+void show_busy_icon(bool on) {
+    if (!Lvgl_lock(-1)) return;
+    if (on) {
+        lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    Lvgl_unlock();
+}
+
+// Puts the sync figure back after a short notice, if the sync screen is still up.
+void restore_sync_label_task(void *) {
+    vTaskDelay(pdMS_TO_TICKS(2500));
+    if (active_screen == DeviceScreen::Syncing) show_busy_icon(false);
+    vTaskDelete(nullptr);
+}
+
+// The key (or the app) asked to record while something else has the microphone, such as a
+// sync. Say so on the screen, with an icon, and to the phone: a press must always get an
+// answer, never silence.
+void show_busy_notice() {
+    const bool syncing = audio_sync_task_handle != nullptr || circuit_sync::is_open();
+    update_storage_status(syncing ? "Sync is running\nRecord when it ends" : "Audio is busy\nPlease wait");
+    report_audio_status(syncing ? "Can't record: a sync is running, try again when it ends" : "Audio is busy");
+    if (recording_active) return;  // the recording screen is already up
+    if (active_screen == DeviceScreen::Syncing) {
+        show_busy_icon(true);
+        xTaskCreate(restore_sync_label_task, "busy_notice", 3072, nullptr, 2, nullptr);
+        return;
+    }
+    show_device_screen(DeviceScreen::Syncing);  // the sync screen, with the icon in place of the figure
+    show_busy_icon(true);
+    return_to_idle_after(DeviceScreen::Syncing, 2500);
+}
+
 void end_wifi_sync() {
     const uint32_t served = circuit_sync::state.served_bytes;
     const int64_t started = circuit_sync::state.session_started_ms;
@@ -1217,13 +1448,10 @@ void end_wifi_sync() {
         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     circuit_sync::close_session();
     sync_ui_percent = -1;
-    last_wifi_sync_end_ms = circuit_sync::now_ms();
     if (served == 0) {  // the phone never connected: back off, and say so if the screen is showing sync
-        if (wifi_sync_failures < 4) ++wifi_sync_failures;
         if (active_screen == DeviceScreen::Syncing) flash_sync_result("ERR");
         return;
     }
-    wifi_sync_failures = 0;
     const bool complete = circuit_notes::count_unsynced() == 0;
     if (Lvgl_lock(-1)) {
         lv_label_set_text(sync_progress_label, complete ? "100%" : "ERR");
@@ -1233,8 +1461,8 @@ void end_wifi_sync() {
     report_audio_status(complete ? "Sync complete: notes saved on phone" : "Sync interrupted: will retry");
 }
 
-// Starts a sync when the phone is bonded and connected and both are on Wi-Fi;
-// closes sessions that finished, stalled or were abused.
+// Looks after a sync someone asked for, and closes sessions that finished, stalled or were
+// abused. It never starts one.
 void sync_supervisor_task(void *) {
     // Create (or load) the sync certificate now so a failure shows up at boot.
     ESP_LOGI(kTag, "Sync identity %s", circuit_sync::ensure_identity() ? "ready" : "FAILED");
@@ -1261,10 +1489,8 @@ void sync_supervisor_task(void *) {
             }
             continue;
         }
-        int64_t cooldown = kWifiSyncCooldownMs << wifi_sync_failures;  // 45 s, 90 s, 3 min, ...
-        if (cooldown > kWifiSyncMaxCooldownMs) cooldown = kWifiSyncMaxCooldownMs;
-        if (circuit_sync::now_ms() - last_wifi_sync_end_ms < cooldown) continue;
-        if (circuit_notes::count_unsynced() > 0 && !recording_active) offer_wifi_sync();
+        // No sync starts by itself: one only starts when someone asks for it (the key held for
+        // 2 s, or the app), so it never lands in the middle of a recording or a bad moment.
     }
 }
 
@@ -1302,13 +1528,23 @@ void start_audio_sync(bool forced) {
         report_audio_status("Sync needs Wi-Fi: connect Circuit and your phone to the same network");
         return;
     }
-    audio_busy = true;
+    if (!claim_audio()) {
+        report_audio_status("Audio is busy");
+        return;
+    }
     xTaskCreate(audio_sync_task, "audio_sync", 6144, nullptr, 4, &audio_sync_task_handle);
 }
 
-// The upper side button (BOOT, GPIO0) does two things:
-//   tap (released within 2 s)  start or stop a recording
-//   hold for 2 s               force a sync (Bluetooth fallback when Wi-Fi is not available)
+void force_sync_task(void *) {
+    update_storage_status("Force sync requested\nStarting sync…");
+    report_audio_status("Force sync requested");
+    start_audio_sync(true);
+    vTaskDelete(nullptr);
+}
+
+// The upper side button (BOOT, GPIO0) is the only key, and it does different things by state:
+//   idle       tap: start a recording      hold 2 s: force a sync (Bluetooth if there is no Wi-Fi)
+//   recording  tap: stop and save          hold 1 s: pause, or carry on
 // The lower button is wired to power, so holding it switches the board off.
 void record_button_task(void *) {
     // GPIO0 is active-low. Waiting for a released state avoids treating a
@@ -1328,20 +1564,26 @@ void record_button_task(void *) {
                 continue;
             }
         }
-        if (is_pressed && !hold_handled && xTaskGetTickCount() - pressed_at >= kForceSyncHoldTime) {
+        const TickType_t hold_needed = recording_active ? kPauseHoldTime : kForceSyncHoldTime;
+        if (is_pressed && !hold_handled && xTaskGetTickCount() - pressed_at >= hold_needed) {
             hold_handled = true;
-            ESP_LOGI(kTag, "BOOT held: force sync");
-            if (!recording_active) {
-                update_storage_status("Force sync requested\nStarting sync…");
-                report_audio_status("Force sync requested");
-                start_audio_sync(true);
+            if (recording_active) {
+                ESP_LOGI(kTag, "BOOT held: pause or resume");
+                toggle_pause_recording();
+            } else {
+                ESP_LOGI(kTag, "BOOT held: force sync");
+                // Starting a sync is heavy (it lists the card and opens a session), far more than
+                // this key task's small stack allows: it runs in a task of its own.
+                if (xTaskCreate(force_sync_task, "force_sync", 6144, nullptr, 4, nullptr) != pdPASS) {
+                    report_audio_status("Could not start the sync");
+                }
             }
         }
         if (!is_pressed && was_pressed && !hold_handled) {  // released: it was a tap
             if (recording_active) {
                 stop_recording();
             } else {
-                // Records until the button is pressed again or the cap is hit.
+                // Records until stopped or the cap is hit.
                 char command[32];
                 snprintf(command, sizeof(command), "@audio-record\n%lu", static_cast<unsigned long>(kMaxRecordingSeconds));
                 start_recording(command);
@@ -1370,7 +1612,10 @@ void start_playback() {
         report_audio_status("Audio is busy");
         return;
     }
-    audio_busy = true;
+    if (!claim_audio()) {
+        report_audio_status("Audio is busy");
+        return;
+    }
     xTaskCreate(play_audio_task, "audio_play", 6144, nullptr, 5, nullptr);
 }
 
@@ -1896,6 +2141,12 @@ void init_display() {
         lv_img_set_src(recording_icon, circuit_recording_frame(0));
         lv_obj_align(recording_icon, LV_ALIGN_TOP_LEFT, 36, 105);
         lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
+
+        // The "cannot record now" icon sits where the sync figure is (see show_busy_notice()).
+        busy_icon_obj = lv_img_create(lv_screen_active());
+        lv_img_set_src(busy_icon_obj, &circuit_icon_mic_off);
+        lv_obj_align(busy_icon_obj, LV_ALIGN_TOP_LEFT, 116, 124);
+        lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
 
         // Header icons: positioned and shown by refresh_status_icons().
         icon_wifi_obj = lv_img_create(lv_screen_active());

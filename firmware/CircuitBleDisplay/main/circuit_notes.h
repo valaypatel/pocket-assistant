@@ -6,6 +6,10 @@
 //   /sdcard/NOTES/N0000001.WAV   a note from older firmware, left exactly as it was: plain,
 //                                 still synced and played, never rewritten or removed
 //   /sdcard/NOTES/N0000001.SYN   empty marker: the app has confirmed this note
+//   /sdcard/NOTES/N0000001.PRT   text "<first> <part> <final>": this note is one minute of a longer
+//                                 recording. <first> is the number of the recording's first part
+//                                 (its recording ID), <part> counts from 1, <final> is 1 on the
+//                                 last part. Parts are ordinary notes with consecutive numbers.
 //
 // 8.3 names keep this independent of long-filename support. A note's recording
 // time is the file's modification time. Notes are never deleted by the firmware
@@ -24,7 +28,10 @@
 
 namespace circuit_notes {
 
-constexpr char kDir[] = "/sdcard/NOTES";
+#ifndef CIRCUIT_NOTES_DIR  // a test on a computer points this at a temporary folder
+#define CIRCUIT_NOTES_DIR "/sdcard/NOTES"
+#endif
+constexpr char kDir[] = CIRCUIT_NOTES_DIR;
 constexpr char kLegacyFile[] = "/sdcard/CIRCUIT.WAV";
 constexpr size_t kWavHeaderBytes = 44;
 // An encrypted file with no audio is a 44-byte header and one 16-byte tag.
@@ -95,6 +102,41 @@ inline void for_each_note(Fn fn) {
     closedir(dir);
 }
 
+// ---- recordings made of one-minute parts ----------------------------------
+
+struct Group {
+    uint32_t first;  // number of the recording's first part
+    uint32_t part;   // 1-based
+    bool final;      // the last part of the recording
+};
+
+inline bool write_group(uint32_t id, const Group &group) {
+    char path[48];
+    path_for(id, "PRT", path, sizeof(path));
+    FILE *file = fopen(path, "wb");
+    if (file == nullptr) return false;
+    const bool ok = fprintf(file, "%lu %lu %d\n", static_cast<unsigned long>(group.first),
+                            static_cast<unsigned long>(group.part), group.final ? 1 : 0) > 0;
+    return fclose(file) == 0 && ok;
+}
+
+// False for a note that is not a part (a plain single-file note).
+__attribute__((noinline)) inline bool read_group(uint32_t id, Group *group) {
+    char path[48];
+    path_for(id, "PRT", path, sizeof(path));
+    FILE *file = fopen(path, "rb");
+    if (file == nullptr) return false;
+    unsigned long first = 0, part = 0;
+    int final = 0;
+    const bool ok = fscanf(file, "%lu %lu %d", &first, &part, &final) == 3 && first != 0 && part != 0;
+    fclose(file);
+    if (!ok) return false;
+    group->first = static_cast<uint32_t>(first);
+    group->part = static_cast<uint32_t>(part);
+    group->final = final != 0;
+    return true;
+}
+
 inline uint32_t newest_id() {
     uint32_t newest = 0;
     for_each_file([&](uint32_t id, bool) { if (id > newest) newest = id; });
@@ -123,18 +165,6 @@ inline void repair_header(uint32_t id) {
         fwrite(&fixed, sizeof(fixed), 1, file);
     }
     fclose(file);
-}
-
-// Creates the folder, adopts the single-file recording from older firmware as
-// note 1, and repairs headers. Call once after the SD card is mounted.
-inline void init() {
-    mkdir(kDir, 0777);
-    if (exists(kLegacyFile) && newest_id() == 0) {
-        char path[48];
-        path_for(1, "WAV", path, sizeof(path));
-        rename(kLegacyFile, path);
-    }
-    for_each_wav([](uint32_t id) { repair_header(id); });
 }
 
 // Path for the next note. Ids only ever grow, so a name is never reused.
@@ -218,6 +248,8 @@ inline bool remove_note(uint32_t id) {
     removed = (remove(path) == 0) || removed;
     path_for(id, "SYN", path, sizeof(path));
     remove(path);
+    path_for(id, "PRT", path, sizeof(path));
+    remove(path);
     return removed;
 }
 
@@ -233,6 +265,54 @@ inline size_t clean_synced() {
     size_t removed = 0;
     for (size_t i = 0; i < count; ++i) removed += remove_note(doomed[i]) ? 1 : 0;
     return removed;
+}
+
+// A recording cut short by power loss leaves its last part marked "not final", and the app
+// would wait for a part that is never coming. Nothing is recording at boot, so close the
+// recording at its last part that holds audio.
+inline void finish_interrupted_recordings() {
+    uint32_t open_ends[16];
+    size_t count = 0;
+    DIR *dir = opendir(kDir);
+    if (dir == nullptr) return;
+    while (dirent *entry = readdir(dir)) {
+        unsigned long id = 0;
+        char ext[4] = {};
+        if (sscanf(entry->d_name, "N%7lu.%3s", &id, ext) != 2 || id == 0 || strcasecmp(ext, "PRT") != 0) continue;
+        Group group;
+        if (read_group(static_cast<uint32_t>(id), &group) && !group.final && count < 16) {
+            char next[48];
+            path_for(static_cast<uint32_t>(id) + 1, "PRT", next, sizeof(next));
+            if (!exists(next)) open_ends[count++] = static_cast<uint32_t>(id);
+        }
+    }
+    closedir(dir);
+    for (size_t i = 0; i < count; ++i) {
+        uint32_t id = open_ends[i];
+        Group group;
+        if (!read_group(id, &group)) continue;
+        Note note;
+        if (!describe(id, &note) && group.part > 1) {  // the part never got any audio: drop it
+            remove_note(id);
+            --id;
+            if (!read_group(id, &group)) continue;
+        }
+        group.final = true;
+        write_group(id, group);
+    }
+}
+
+// Creates the folder, adopts the single-file recording from older firmware as
+// note 1, and repairs headers. Call once after the SD card is mounted.
+inline void init() {
+    mkdir(kDir, 0777);
+    if (exists(kLegacyFile) && newest_id() == 0) {
+        char path[48];
+        path_for(1, "WAV", path, sizeof(path));
+        rename(kLegacyFile, path);
+    }
+    for_each_wav([](uint32_t id) { repair_header(id); });
+    finish_interrupted_recordings();
 }
 
 }  // namespace circuit_notes

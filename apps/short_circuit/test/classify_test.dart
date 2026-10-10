@@ -194,11 +194,15 @@ void main() {
                   song ? 'Listening for a song' : 'Recording on Circuit',
                 ),
                 find.text(song ? '00:02' : '00:10'),
-                find.textContaining(song ? 'Hold Circuit' : 'Speak naturally'),
+                find.textContaining(
+                  song ? 'Hold Circuit' : 'Your recording is saved',
+                ),
                 find.byTooltip(
                   song ? 'Stop listening early' : 'Stop recording',
                 ),
-                find.byIcon(song ? LucideIcons.music : LucideIcons.circle),
+                song
+                    ? find.byIcon(LucideIcons.music)
+                    : find.byType(ScDeviceMark),
               ]) {
                 expect(finder, findsOneWidget);
                 expect(

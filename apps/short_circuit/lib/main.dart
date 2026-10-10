@@ -20,6 +20,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'telemetry.dart';
 part 'backup.dart';
+part 'board_parts.dart';
 part 'groups.dart';
 part 'long_notes.dart';
 part 'music.dart';
@@ -1026,7 +1027,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   final _wifiSsidController = TextEditingController();
   final _wifiPasswordController = TextEditingController();
   final _noteSearchController = TextEditingController();
-  bool _noteSearchOpen = false;
   final Map<String, ScanResult> _circuits = {};
 
   StreamSubscription<List<ScanResult>>? _scanSubscription;
@@ -1076,7 +1076,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   String _displayName = '';
   DateTime? _recordingStartedAt;
   Timer? _clockTicker;
-  bool _pruneRequested = false;
   // Automatic retry of AI review: how often each note was tried, and when.
   final Map<String, int> _enrichAttempts = {};
   final Map<String, DateTime> _enrichLastAttempt = {};
@@ -1155,7 +1154,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     });
     _wifiPollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _requestWifiStatus();
-      _checkForLostNotes();
       _checkSyncHealth();
       _processBoardDeletes();
       _retryEnrichmentIfDue();
@@ -1973,7 +1971,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       final isSong = _songClipArmed;
       _songClipArmed = false;
       _addPendingNote(
-        'Recording saved on Circuit. It syncs automatically when Circuit and this phone are on the same Wi-Fi.',
+        'Recording saved on Circuit. Hold Circuit\'s button for 2 seconds to bring it to this phone (same Wi-Fi).',
         boardId: boardId,
         song: isSong,
       );
@@ -2206,7 +2204,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   /// before Circuit kept every note). Remove those instead of leaving a card
   /// that can never sync.
   Iterable<CircuitNote> _notesWithoutAudio(DateTime cutoff) => _notes.where(
-    (note) => note.audioPath == null && note.createdAt.isBefore(cutoff),
+    (note) =>
+        note.audioPath == null &&
+        note.createdAt.isBefore(cutoff) &&
+        // A long recording whose parts are still arriving has none of its audio in the note yet.
+        !note.status.startsWith('Receiving') &&
+        !note.status.startsWith('Waiting for part'),
   );
 
   Future<void> _pruneLostNotes() async {
@@ -2239,18 +2242,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     );
   }
 
-  /// Once per session, if old notes are still waiting for audio, ask Circuit
-  /// whether it has anything left to send. Its answer decides their fate.
-  void _checkForLostNotes() {
-    if (_pruneRequested || !_circuitAvailable) return;
-    final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
-    if (_notesWithoutAudio(cutoff).isEmpty) return;
-    _pruneRequested = true;
-    _writeCircuit('@audio-sync').catchError((Object _) {
-      _pruneRequested = false;
-    });
-  }
-
   /// A synced file belongs to the oldest note still waiting for audio; if the
   /// recording happened while the app was closed there is none, so make one.
   /// True if a note for this Circuit recording already exists. Numbers restart
@@ -2258,7 +2249,11 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   bool _knownBoardNote(int boardId, DateTime around) => _notes.any(
     (note) =>
         note.boardId == boardId &&
-        note.createdAt.difference(around).abs() < const Duration(minutes: 10),
+        note.createdAt.difference(around).abs() <
+            // A recording made of parts is dated by its first part, which can be hours earlier.
+            (note.audioParts.isEmpty
+                ? const Duration(minutes: 10)
+                : const Duration(hours: 12)),
   );
 
   Future<void> _attachSyncedFile(
@@ -2285,6 +2280,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       try {
         await File(path).delete();
       } catch (_) {}
+      return;
+    }
+    // One minute of a longer recording made on Circuit: collected into one note.
+    final boardPart = await readBoardPart(path);
+    if (boardPart != null &&
+        await _attachBoardPart(path, epochSeconds, boardPart)) {
       return;
     }
     final recordedAt = epochSeconds != null && epochSeconds > 0
@@ -2616,13 +2617,20 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     final boardId = _boardIdOf(note);
     if (boardId != null) {
       _pendingBoardDeletes.add(boardId);
+      // A recording made of parts is deleted on Circuit part by part.
+      _pendingBoardDeletes.addAll(await _boardPartIds(note));
       unawaited(_saveBoardDeletes());
       _lastBoardDeleteSent = null;
       _processBoardDeletes();
     }
-    for (final path in note?.audioFiles ?? const <String>[]) {
+    final firstPart = note?.boardId;
+    final arriving = firstPart == null
+        ? const <String>[]
+        : (await _arrivedBoardFiles(firstPart)).keys.toList();
+    for (final path in {...?note?.audioFiles, ...arriving}) {
       try {
         await File(path).delete();
+        await _boardPartFile(path)?.delete();
       } catch (_) {
         // The file may already have been removed.
       }

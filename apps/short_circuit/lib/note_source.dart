@@ -90,13 +90,13 @@ class _SourcePill extends StatelessWidget {
       label: '$label, $count ${count == 1 ? 'note' : 'notes'}',
       excludeSemantics: true,
       child: Material(
-        color: selected ? Sc.ink : Sc.chip,
-        borderRadius: BorderRadius.circular(18),
+        color: selected ? Sc.ink : Sc.surface,
+        borderRadius: BorderRadius.circular(14),
         child: InkWell(
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: BorderRadius.circular(14),
           onTap: onTap,
           child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 40),
+            constraints: const BoxConstraints(minHeight: 48),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 13),
               child: Row(
@@ -114,7 +114,7 @@ class _SourcePill extends StatelessWidget {
                     style: TextStyle(
                       color: foreground,
                       fontSize: 13,
-                      fontWeight: FontWeight.w700,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ],

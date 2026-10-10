@@ -49,6 +49,9 @@ namespace circuit_sync {
 inline volatile uint32_t download_stops = 0;
 
 constexpr uint32_t kIdleTimeoutMs = 120000;
+// Once the phone has started downloading, silence this long means it has gone (Wi-Fi lost, app
+// closed): the session ends so the screen shows the result and the board is free again.
+constexpr uint32_t kClientGoneMs = 25000;
 constexpr uint32_t kLockoutMs = 30000;
 constexpr int kMaxBadAttempts = 3;
 constexpr size_t kChunkBytes = 4096;
@@ -225,12 +228,21 @@ inline esp_err_t list_handler(httpd_req_t *req) {
     if (!authorize(req)) return ESP_FAIL;
     circuit_notes::Note notes[kMaxListed];
     const size_t count = circuit_notes::list_unsynced(notes, kMaxListed);
-    char *body = static_cast<char *>(malloc(count * 40 + 1));
+    // "<id>,<bytes>,<recorded>" and, for a one-minute part of a longer recording,
+    // ",<first part's id>,<part number>,<1 if last>". A phone that does not know parts reads the first three.
+    constexpr size_t kLine = 72;
+    char *body = static_cast<char *>(malloc(count * kLine + 1));
     if (body == nullptr) return ESP_FAIL;
     size_t used = 0;
     for (size_t i = 0; i < count; ++i) {
-        used += snprintf(body + used, 40, "%lu,%lu,%lld\n", static_cast<unsigned long>(notes[i].id),
+        used += snprintf(body + used, kLine, "%lu,%lu,%lld", static_cast<unsigned long>(notes[i].id),
             static_cast<unsigned long>(notes[i].bytes), static_cast<long long>(notes[i].recorded));
+        circuit_notes::Group group;
+        if (circuit_notes::read_group(notes[i].id, &group)) {
+            used += snprintf(body + used, kLine, ",%lu,%lu,%d", static_cast<unsigned long>(group.first),
+                static_cast<unsigned long>(group.part), group.final ? 1 : 0);
+        }
+        body[used++] = '\n';
     }
     body[used] = '\0';
     httpd_resp_set_type(req, "text/plain");
@@ -324,7 +336,8 @@ inline bool is_open() { return state.server != nullptr; }
 inline bool locked_out() { return now_ms() < state.lockout_until_ms; }
 inline bool expired() {
     return is_open() && (state.bad_attempts >= kMaxBadAttempts ||
-                         now_ms() - state.last_activity_ms > kIdleTimeoutMs);
+                         now_ms() - state.last_activity_ms >
+                             (state.first_request_ms != 0 ? kClientGoneMs : kIdleTimeoutMs));
 }
 
 inline void close_session() {

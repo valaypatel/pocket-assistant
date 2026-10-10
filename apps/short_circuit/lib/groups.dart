@@ -397,7 +397,7 @@ extension _ScGroupUi on _CircuitHomePageState {
         Expanded(
           child: Text(
             count == 0 ? 'Select notes' : '$count selected',
-            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
           ),
         ),
         TextButton(
@@ -438,15 +438,15 @@ extension _ScGroupUi on _CircuitHomePageState {
       excludeSemantics: true,
       child: SizedBox(
         width: width,
-        height: 88,
+        height: 90 + MediaQuery.textScalerOf(context).scale(20),
         child: Material(
-          color: Colors.white,
+          color: Sc.surface,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(14),
             side: const BorderSide(color: Sc.line),
           ),
           child: InkWell(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(14),
             onTap: () => _openGroup(id),
             child: Padding(
               padding: const EdgeInsets.all(14),
@@ -470,7 +470,7 @@ extension _ScGroupUi on _CircuitHomePageState {
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                           fontSize: 13.5,
-                          fontWeight: FontWeight.w800,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
                       Text(
@@ -502,7 +502,9 @@ extension _ScGroupUi on _CircuitHomePageState {
         ScGroupLabel('Groups (${all.length - 1})'),
         LayoutBuilder(
           builder: (context, box) {
-            final width = (box.maxWidth - 10) / 2;
+            final width = all.length == 1
+                ? box.maxWidth
+                : (box.maxWidth - 10) / 2;
             return Wrap(
               spacing: 10,
               runSpacing: 10,
@@ -590,7 +592,7 @@ extension _ScGroupUi on _CircuitHomePageState {
                         'Add notes',
                         style: TextStyle(
                           fontSize: 18,
-                          fontWeight: FontWeight.w800,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
@@ -823,18 +825,31 @@ extension _ScGroupUi on _CircuitHomePageState {
                 padding: const EdgeInsets.symmetric(horizontal: 22),
                 decoration: BoxDecoration(
                   color: Sc.accentSoft,
-                  borderRadius: BorderRadius.circular(18),
+                  borderRadius: BorderRadius.circular(14),
                 ),
                 child: const Text(
                   'Remove from group',
                   style: TextStyle(
                     color: Sc.accentInk,
-                    fontWeight: FontWeight.w800,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
               ),
               onDismissed: (_) => _removeNoteFromGroup(group.id, note.id),
-              child: _noteTile(note),
+              child: Row(
+                children: [
+                  Expanded(child: _noteTile(note)),
+                  IconButton(
+                    tooltip: 'Remove from group',
+                    onPressed: () => _removeNoteFromGroup(group.id, note.id),
+                    icon: const Icon(
+                      LucideIcons.minus,
+                      size: 18,
+                      color: Sc.muted,
+                    ),
+                  ),
+                ],
+              ),
             ),
           const SizedBox(height: 10),
         ],
@@ -893,7 +908,7 @@ class _GroupSheetState extends State<_GroupSheet> {
       children: [
         Text(
           'Group ${widget.count} note${widget.count == 1 ? '' : 's'}',
-          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: 14),
         TextField(

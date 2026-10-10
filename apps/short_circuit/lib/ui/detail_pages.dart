@@ -69,7 +69,7 @@ class _AiServiceSettingsPageState extends State<AiServiceSettingsPage> {
       child: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
-              padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
+              padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
               children: [
                 ScBackRow(
                   label: 'Settings',
@@ -228,7 +228,7 @@ class _GeminiSettingsPageState extends State<GeminiSettingsPage> {
         child: _loading
             ? const Center(child: CircularProgressIndicator())
             : ListView(
-                padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
+                padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
                 children: [
                   ScBackRow(
                     label: 'Settings',
@@ -384,6 +384,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
   late String _title;
   late String _transcript;
   late String _category;
+  String _readingTab = 'Summary';
   bool _forcing = false;
   bool _extractingReminder = false;
   Timer? _ticker;
@@ -586,7 +587,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
       bottomNavigationBar: widget.playerBar?.call(),
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
+          padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
           children: [
             ScBackRow(
               label: 'Notes',
@@ -605,75 +606,113 @@ class _TranscriptPageState extends State<TranscriptPage> {
                 height: 1.45,
               ),
             ),
-            const SizedBox(height: 22),
-            const ScGroupLabel('Transcript'),
-            if (widget.onEditNote != null)
-              Align(
-                alignment: Alignment.centerRight,
-                child: ScIconButton(
-                  size: 40,
-                  icon: LucideIcons.pencil,
-                  tooltip: 'Edit note',
-                  onPressed: _edit,
-                ),
-              ),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Sc.warmCard,
-                borderRadius: BorderRadius.circular(18),
-              ),
-              child: _transcript.trim().isEmpty
-                  ? const Text(
-                      'Transcript not available yet. The recording will appear here after sync and transcription.',
-                      style: TextStyle(
-                        fontSize: 14,
-                        height: 1.5,
-                        color: Sc.muted,
-                      ),
-                    )
-                  : SelectableText(
-                      _transcript,
-                      style: const TextStyle(
-                        fontSize: 15,
-                        height: 1.5,
-                        fontWeight: FontWeight.w600,
+            const SizedBox(height: 20),
+            if (widget.audioPath != null) ...[
+              ScPanel(
+                color: Sc.surface,
+                child: Row(
+                  children: [
+                    ScPlayButton(
+                      onPressed: () => widget.onPlayNote(widget.audioPath),
+                    ),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Original recording',
+                            style: TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                          SizedBox(height: 3),
+                          Text(
+                            'Listen while you review',
+                            style: TextStyle(color: Sc.muted, fontSize: 12),
+                          ),
+                        ],
                       ),
                     ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+            Row(
+              children: [
+                Expanded(
+                  child: Wrap(
+                    spacing: 4,
+                    children: [
+                      for (final tab in [
+                        if (summary?.isNotEmpty == true) 'Summary',
+                        'Transcript',
+                        if (translation?.isNotEmpty == true &&
+                            translation != _transcript)
+                          'Translation',
+                      ])
+                        TextButton(
+                          onPressed: () => setState(() => _readingTab = tab),
+                          style: TextButton.styleFrom(
+                            foregroundColor:
+                                (_readingTab == tab ||
+                                    (_readingTab == 'Summary' &&
+                                        summary?.isNotEmpty != true &&
+                                        tab == 'Transcript'))
+                                ? Sc.accentInk
+                                : Sc.muted,
+                            backgroundColor:
+                                (_readingTab == tab ||
+                                    (_readingTab == 'Summary' &&
+                                        summary?.isNotEmpty != true &&
+                                        tab == 'Transcript'))
+                                ? Sc.accentSoft
+                                : Colors.transparent,
+                            minimumSize: const Size(48, 48),
+                          ),
+                          child: Text(tab),
+                        ),
+                    ],
+                  ),
+                ),
+                if (widget.onEditNote != null)
+                  ScIconButton(
+                    icon: LucideIcons.pencil,
+                    tooltip: 'Edit note',
+                    onPressed: _edit,
+                  ),
+              ],
             ),
-            if (summary?.isNotEmpty == true) ...[
-              const SizedBox(height: 20),
-              const ScGroupLabel('Summary'),
-              Text(
-                summary!,
-                style: const TextStyle(
-                  fontSize: 14,
-                  height: 1.45,
-                  color: Sc.muted,
-                ),
+            const SizedBox(height: 16),
+            SelectableText(
+              _readingTab == 'Translation' && translation?.isNotEmpty == true
+                  ? translation!
+                  : _readingTab == 'Summary' && summary?.isNotEmpty == true
+                  ? summary!
+                  : hasTranscript
+                  ? _transcript
+                  : 'Transcript not available yet. The recording will appear here after sync and transcription.',
+              style: TextStyle(
+                fontSize: 16,
+                height: 1.65,
+                color: hasTranscript || summary?.isNotEmpty == true
+                    ? Sc.ink
+                    : Sc.muted,
               ),
-            ],
-            if (translation?.isNotEmpty == true &&
-                translation != _transcript) ...[
-              const SizedBox(height: 20),
-              const ScGroupLabel('English translation'),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Sc.warmCard,
-                  borderRadius: BorderRadius.circular(18),
+            ),
+            const SizedBox(height: 20),
+            if (widget.onOpenChat != null)
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Sc.dark,
+                  foregroundColor: Colors.white,
                 ),
-                child: SelectableText(
-                  translation!,
-                  style: const TextStyle(fontSize: 14, height: 1.5),
-                ),
+                onPressed: hasTranscript ? widget.onOpenChat : null,
+                icon: const Icon(LucideIcons.messageCircle, size: 18),
+                label: const Text('Ask this note'),
               ),
-            ],
             if (categories.isNotEmpty || tags.isNotEmpty) ...[
               const SizedBox(height: 20),
-              const ScGroupLabel('Metadata'),
+              const ScGroupLabel('Categories & tags'),
               Wrap(
                 spacing: 6,
                 runSpacing: 6,
@@ -714,6 +753,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
                             size: 40,
                             icon: LucideIcons.x,
                             tooltip: 'Dismiss suggestion',
+                            caption: 'Dismiss',
                             onPressed: () async {
                               await widget.onSuggestionState(
                                 widget.noteId,
@@ -728,6 +768,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
                             size: 40,
                             icon: LucideIcons.check,
                             tooltip: 'Approve suggestion',
+                            caption: 'Approve',
                             tone: ScTone.primary,
                             onPressed: () => _approveSuggestion(suggestion),
                           ),
