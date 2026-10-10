@@ -21,6 +21,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'telemetry.dart';
 part 'backup.dart';
 part 'board_parts.dart';
+part 'circuit_playback.dart';
 part 'groups.dart';
 part 'long_notes.dart';
 part 'music.dart';
@@ -1103,6 +1104,10 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   DateTime? _wifiConnectingSince;
   Timer? _wifiPollTimer;
   bool _audioBusy = false;
+  CircuitPlaybackPhase _circuitPlayback = CircuitPlaybackPhase.idle;
+  String? _circuitPlaybackFeedback;
+  bool _circuitPlaybackSupportsStop = false;
+  Timer? _playbackRequestTimer;
   bool _recordingAudio = false;
   final _deviceChipKey =
       GlobalKey(); // where the recording pill grows from and folds back to
@@ -1196,6 +1201,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     _phoneRecording.dispose();
     _nowPlayingTimer?.cancel();
     _nowPlaying.dispose();
+    _playbackRequestTimer?.cancel();
     _audioStatusSubscription?.cancel();
     _relayStatusTimer?.cancel();
     _homeStatusTimer?.cancel();
@@ -1938,7 +1944,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _applySyncStatus(status);
       return;
     }
-    if (!mounted || status == _lastAudioStatus) return;
+    if (!mounted) return;
+    if (_applyCircuitPlaybackStatus(status)) return;
+    if (status == _lastAudioStatus) return;
     _lastAudioStatus = status;
     if (status.startsWith('Recording started') && !_recordingAudio) {
       // Started with Circuit's button rather than from the app.
@@ -2108,6 +2116,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   /// "@sync-status\nwaiting=N\nreset=R\nuptime=S" from Circuit.
   void _applySyncStatus(String message) {
     if (!mounted) return;
+    _applyCircuitPlaybackSnapshot(message);
     int? field(String name) => int.tryParse(
       RegExp('$name=(-?\\d+)').firstMatch(message)?.group(1) ?? '',
     );
@@ -2851,7 +2860,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   }
 
   Future<void> _recordAudio() async {
-    if (_audioBusy) return;
+    if (_audioBusy || _circuitPlayback != CircuitPlaybackPhase.idle) return;
     setState(() {
       _audioBusy = true;
       _recordingAudio = true;
@@ -2870,7 +2879,11 @@ class _CircuitHomePageState extends State<CircuitHomePage>
 
   /// Records a short clip on Circuit; once it syncs it is sent for recognition.
   Future<void> _identifySong() async {
-    if (_audioBusy || _recordingAudio) return;
+    if (_audioBusy ||
+        _recordingAudio ||
+        _circuitPlayback != CircuitPlaybackPhase.idle) {
+      return;
+    }
     setState(() {
       _audioBusy = true;
       _recordingAudio = true;
@@ -2983,20 +2996,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
           _recordingAudio = false;
         });
       }
-    }
-  }
-
-  Future<void> _playAudio() async {
-    if (_audioBusy) return;
-    setState(() => _audioBusy = true);
-    try {
-      await _writeCircuit('@audio-play');
-      _setStatus('Circuit is playing its latest recording.');
-      await Future<void>.delayed(const Duration(seconds: 6));
-    } catch (error) {
-      _setStatus('Could not play recording: $error');
-    } finally {
-      if (mounted) setState(() => _audioBusy = false);
     }
   }
 

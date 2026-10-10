@@ -117,7 +117,10 @@ volatile bool recording_active = false;
 volatile bool recording_stop_requested = false;
 volatile bool recording_paused = false;
 volatile uint32_t recording_audio_ms = 0;  // audio recorded so far; a pause does not count
-enum class DeviceScreen : uint8_t { Idle, Recording, Saved, Syncing, Pairing };
+std::atomic<bool> playback_active{false};
+std::atomic<bool> playback_stop_requested{false};
+std::atomic<uint32_t> playback_audio_ms{0};
+enum class DeviceScreen : uint8_t { Idle, Recording, Saved, Syncing, Pairing, Playback };
 volatile DeviceScreen active_screen = DeviceScreen::Idle;
 volatile TickType_t recording_started_at = 0;
 uint32_t pairing_passkey = 0;
@@ -438,7 +441,8 @@ void screen_timeout_task(void *argument) {
     const ScreenTimeout timeout = *static_cast<ScreenTimeout *>(argument);
     delete static_cast<ScreenTimeout *>(argument);
     vTaskDelay(pdMS_TO_TICKS(timeout.delay_ms));
-    if (active_screen == timeout.expected) {
+    if (active_screen == timeout.expected &&
+        !(timeout.expected == DeviceScreen::Playback && playback_active.load())) {
         show_device_screen(DeviceScreen::Idle);
     }
     vTaskDelete(nullptr);
@@ -466,6 +470,7 @@ void show_device_screen(DeviceScreen screen) {
         &circuit_saved_screen,
         &circuit_sync_screen,
         &circuit_pair_screen,
+        &circuit_idle_screen,  // playback uses live labels, with the artwork hidden
     };
     if (!Lvgl_lock(-1)) {
         return;
@@ -494,7 +499,24 @@ void show_device_screen(DeviceScreen screen) {
         lv_label_set_text(sync_progress_label, "0%");
         lv_obj_clear_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     }
-    lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
+    if (screen == DeviceScreen::Playback) {
+        lv_obj_add_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(message_label, LV_ALIGN_TOP_MID, 0, 94);
+        lv_obj_clear_flag(message_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(message_label);
+        lv_label_set_text(recording_timer_label, "00:00");
+        lv_obj_set_width(recording_timer_label, 176);
+        lv_obj_set_style_text_align(recording_timer_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(recording_timer_label, LV_ALIGN_BOTTOM_MID, 0, -22);
+        lv_obj_clear_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(recording_timer_label);
+    } else {
+        lv_obj_align(message_label, LV_ALIGN_BOTTOM_MID, 0, -12);
+        lv_obj_set_width(recording_timer_label, 84);
+        lv_obj_set_style_text_align(recording_timer_label, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_align(recording_timer_label, LV_ALIGN_TOP_LEFT, 116, 124);
+        lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
+    }
     Lvgl_unlock();
 }
 
@@ -544,6 +566,18 @@ void demo_animation_task(void *) {
                 Lvgl_unlock();
             }
             vTaskDelay(pdMS_TO_TICKS(700));
+        } else if (active_screen == DeviceScreen::Playback && playback_active.load()) {
+            if (Lvgl_lock(-1)) {
+                if (active_screen == DeviceScreen::Playback && playback_active.load()) {
+                    const uint32_t seconds = playback_audio_ms.load() / 1000;
+                    char text[16];
+                    snprintf(text, sizeof(text), "%02lu:%02lu",
+                        static_cast<unsigned long>(seconds / 60), static_cast<unsigned long>(seconds % 60));
+                    lv_label_set_text(recording_timer_label, text);
+                }
+                Lvgl_unlock();
+            }
+            vTaskDelay(pdMS_TO_TICKS(1000));
         } else {
             sync_frame = 0;
             vTaskDelay(pdMS_TO_TICKS(150));
@@ -660,11 +694,15 @@ void finish_audio_task() {
     audio_sync_task_handle = nullptr;
     recording_paused = false;
     recording_active = false;
+    playback_active = false;
     audio_busy = false;
     vTaskDelete(nullptr);
 }
 
 void report_audio_status(const char *status) {
+    if (strncmp(status, "Playback", 8) == 0 || strncmp(status, "Playing", 7) == 0) {
+        ESP_LOGI(kTag, "Playback status: %s", status);
+    }
     char message[kMaxTextBytes + 1] = "@audio-status\n";
     strncat(message, status, sizeof(message) - strlen(message) - 1);
     send_relay_request(message);
@@ -1015,23 +1053,34 @@ bool play_note(uint32_t id) {
         return false;
     }
 
+    bool wrote_audio = false;
+    bool output_failed = false;
     if (reader != nullptr) {
         // read() returns 0 at the end of the note, or at a chunk that does not authenticate
         // (damaged, or a recording cut short while it was being written): playback just stops.
         size_t bytes = 0;
-        while ((bytes = reader->read(buffer)) > 0) {
-            if (!play_mono_chunk(buffer, bytes, stereo_buffer)) break;
+        while (!playback_stop_requested.load() && (bytes = reader->read(buffer)) > 0) {
+            if (!play_mono_chunk(buffer, bytes, stereo_buffer)) { output_failed = true; break; }
+            wrote_audio = true;
+            playback_audio_ms.fetch_add(static_cast<uint32_t>(bytes * 1000 / (kAudioSampleRate * 2)));
         }
     } else {
         size_t bytes = 0;
-        while ((bytes = fread(buffer, 1, kAudioBufferBytes, plain)) > 0) {
-            if (!play_mono_chunk(buffer, bytes, stereo_buffer)) break;
+        while (!playback_stop_requested.load() && (bytes = fread(buffer, 1, kAudioBufferBytes, plain)) > 0) {
+            if (!play_mono_chunk(buffer, bytes, stereo_buffer)) { output_failed = true; break; }
+            wrote_audio = true;
+            playback_audio_ms.fetch_add(static_cast<uint32_t>(bytes * 1000 / (kAudioSampleRate * 2)));
         }
     }
     heap_caps_free(buffer);
     heap_caps_free(stereo_buffer);
     if (plain != nullptr) fclose(plain);
     delete reader;
+    if (!playback_stop_requested.load() && (!wrote_audio || output_failed)) {
+        update_storage_status("Playback failed\nCould not play audio");
+        report_audio_status(output_failed ? "Playback failed: speaker output error" : "Playback failed: recording could not be read");
+        return false;
+    }
     return true;
 }
 
@@ -1041,23 +1090,34 @@ void play_audio_task(void *) {
     uint32_t first = last;
     circuit_notes::Group group;
     if (last != 0 && circuit_notes::read_group(last, &group) && group.first != 0 && group.first <= last) first = group.first;
-    update_storage_status("Playing recording…\nSpeaker active");
+    show_device_screen(DeviceScreen::Playback);
+    update_storage_status("Playing on Circuit");
     report_audio_status("Playing latest recording");
     bool played = false;
+    bool failed = false;
     if (last == 0) play_note(0);  // reports that there is nothing to play
-    for (uint32_t id = first; id != 0 && id <= last; ++id) {
+    for (uint32_t id = first; id != 0 && id <= last && !playback_stop_requested.load(); ++id) {
         circuit_notes::Note note;
         if (!circuit_notes::describe(id, &note)) {
             if (id == last && !played) play_note(id);  // reports that there is nothing to play
             continue;
         }
-        if (!play_note(id)) break;
+        if (!play_note(id)) { failed = true; break; }
         played = true;
     }
-    if (played) {
-        update_storage_status("Playback complete\nReady to record");
+    playback_active = false;
+    if (playback_stop_requested.load()) {
+        update_storage_status("Playback stopped");
+        report_audio_status("Playback stopped");
+    } else if (played && !failed) {
+        update_storage_status("Playback complete");
         report_audio_status("Playback complete");
     }
+    if (Lvgl_lock(-1)) {
+        lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+        Lvgl_unlock();
+    }
+    return_to_idle_after(DeviceScreen::Playback, 2500);
     finish_audio_task();
 }
 
@@ -1264,6 +1324,11 @@ void send_sync_status() {
         static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(text_stack_min_bytes == UINT32_MAX ? 0 : text_stack_min_bytes),
         static_cast<unsigned>(circuit_sync::download_stops));
+    send_relay_request(message);
+    // A separate short snapshot keeps both packets within the 160-byte BLE limit.
+    snprintf(message, sizeof(message), "@sync-status\nplayback=%s\nplayback_ms=%lu\nplayback_stop=1",
+        playback_active.load() ? "playing" : "idle",
+        static_cast<unsigned long>(playback_active.load() ? playback_audio_ms.load() : 0));
     send_relay_request(message);
 }
 
@@ -1616,7 +1681,14 @@ void start_playback() {
         report_audio_status("Audio is busy");
         return;
     }
-    xTaskCreate(play_audio_task, "audio_play", 6144, nullptr, 5, nullptr);
+    playback_stop_requested = false;
+    playback_audio_ms = 0;
+    playback_active = true;
+    if (xTaskCreate(play_audio_task, "audio_play", 6144, nullptr, 5, nullptr) != pdPASS) {
+        playback_active = false;
+        audio_busy = false;
+        report_audio_status("Playback failed: could not start playback");
+    }
 }
 
 void on_ping_success(esp_ping_handle_t, void *) {
@@ -1814,6 +1886,9 @@ void text_display_task(void *) {
                 stop_recording();
             } else if (strcmp(message.value, "@audio-play") == 0) {
                 start_playback();
+            } else if (strcmp(message.value, "@audio-play-stop") == 0) {
+                if (playback_active.load()) playback_stop_requested = true;
+                else report_audio_status("Playback stopped");
             } else if (strcmp(message.value, "@audio-sync") == 0) {
                 start_audio_sync(false);
             } else if (strcmp(message.value, "@audio-clear") == 0) {
