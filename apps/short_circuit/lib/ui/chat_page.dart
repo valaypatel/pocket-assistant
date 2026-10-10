@@ -181,7 +181,7 @@ class _NoteChatPageState extends State<NoteChatPage> {
             ),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
             decoration: BoxDecoration(
-              color: mine ? Sc.dark : Sc.surface,
+              color: mine ? Sc.hero : Sc.bg,
               borderRadius: BorderRadius.only(
                 topLeft: const Radius.circular(18),
                 topRight: const Radius.circular(18),
@@ -191,25 +191,20 @@ class _NoteChatPageState extends State<NoteChatPage> {
             ),
             child: SelectableText(
               message.text,
-              style: TextStyle(
-                fontSize: 14,
-                height: 1.4,
-                color: mine ? Colors.white : Sc.ink,
-              ),
+              style: TextStyle(fontSize: 16, height: 1.6, color: Sc.ink),
             ),
           ),
           if (!mine)
             Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: IconButton(
-                visualDensity: VisualDensity.compact,
-                tooltip: 'Add this answer to your tasks',
-                icon: const Icon(
-                  LucideIcons.listPlus,
-                  size: 18,
-                  color: Sc.faint,
+              child: Tooltip(
+                message: 'Add this answer to your tasks',
+                child: TextButton.icon(
+                  onPressed: () => _addAsTask(message),
+                  icon: const Icon(LucideIcons.listPlus, size: 18),
+                  label: const Text('Save as a task'),
+                  style: TextButton.styleFrom(foregroundColor: Sc.accentInk),
                 ),
-                onPressed: () => _addAsTask(message),
               ),
             ),
           const SizedBox(height: 6),
@@ -226,7 +221,7 @@ class _NoteChatPageState extends State<NoteChatPage> {
       const SizedBox(height: 12),
       Text(
         'Ask anything about this ${widget.subject}.',
-        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
       ),
       const SizedBox(height: 16),
       for (final starter in widget.starters ?? _starters)
@@ -255,7 +250,7 @@ class _NoteChatPageState extends State<NoteChatPage> {
                         starter.$2,
                         style: const TextStyle(
                           fontSize: 13.5,
-                          fontWeight: FontWeight.w700,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
@@ -291,7 +286,7 @@ class _NoteChatPageState extends State<NoteChatPage> {
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       fontSize: 17,
-                      fontWeight: FontWeight.w800,
+                      fontWeight: FontWeight.w600,
                       letterSpacing: -.4,
                     ),
                   ),
@@ -319,7 +314,7 @@ class _NoteChatPageState extends State<NoteChatPage> {
             ),
           Expanded(
             child: _loading
-                ? const SizedBox.shrink()
+                ? const Center(child: CircularProgressIndicator())
                 : ListView(
                     controller: _scroll,
                     padding: const EdgeInsets.fromLTRB(20, 14, 20, 12),

@@ -338,9 +338,14 @@ void main() {
         find.widgetWithText(TextField, 'Passphrase').first,
         'short',
       );
+      await tester.scrollUntilVisible(
+        find.byTooltip('Create backup'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
       await tester.tap(find.byTooltip('Create backup'));
       await tester.pump();
-      expect(find.textContaining('at least'), findsOneWidget);
+      expect(find.textContaining('at least'), findsWidgets);
       expect(saved, isFalse);
     });
 
@@ -354,9 +359,14 @@ void main() {
         find.widgetWithText(TextField, 'Passphrase again'),
         '$_pass!',
       );
+      await tester.scrollUntilVisible(
+        find.byTooltip('Create backup'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
       await tester.tap(find.byTooltip('Create backup'));
       await tester.pump();
-      expect(find.textContaining('do not match'), findsOneWidget);
+      expect(find.textContaining('do not match'), findsWidgets);
     });
 
     testWidgets('creates a file that opens with the passphrase', (
@@ -381,6 +391,11 @@ void main() {
       await tester.enterText(
         find.widgetWithText(TextField, 'Passphrase again'),
         _pass,
+      );
+      await tester.scrollUntilVisible(
+        find.byTooltip('Create backup'),
+        200,
+        scrollable: find.byType(Scrollable).first,
       );
       await tester.tap(find.byTooltip('Create backup'));
       await tester.runAsync(
@@ -413,6 +428,8 @@ void main() {
           onRestored: () async => reloaded = true,
         ),
       );
+      await tester.tap(find.text('Restore'));
+      await tester.pumpAndSettle();
       await tester.enterText(
         find.widgetWithText(TextField, 'Passphrase').last,
         'not the right one',
@@ -428,7 +445,7 @@ void main() {
       );
       await tester.pump();
 
-      expect(find.textContaining('Wrong passphrase'), findsOneWidget);
+      expect(find.textContaining('Wrong passphrase'), findsWidgets);
       expect(reloaded, isFalse);
       expect(await tester.runAsync(() => _load('circuit_notes')), isEmpty);
     });

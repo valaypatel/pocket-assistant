@@ -129,7 +129,7 @@ class _SongPageState extends State<SongPage> {
           Text(
             title,
             textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 6),
           Text(
@@ -165,8 +165,8 @@ class _SongPageState extends State<SongPage> {
             song.title ?? 'Unknown title',
             textAlign: TextAlign.center,
             style: const TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.w800,
+              fontSize: 28,
+              fontWeight: FontWeight.w600,
               letterSpacing: -.5,
             ),
           ),
@@ -205,7 +205,7 @@ class _SongPageState extends State<SongPage> {
           const SizedBox(height: 14),
           const Text(
             'Identifying…',
-            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
           ),
         ],
       );
@@ -229,14 +229,17 @@ class _SongPageState extends State<SongPage> {
       backgroundColor: Sc.bg,
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
+          padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
           children: [
             ScBackRow(
               label: 'Notes',
               onBack: () => Navigator.pop(context),
               eyebrow: 'Song identification',
             ),
-            const SizedBox(height: 20),
+            const ScEyebrow('Music recognition'),
+            const SizedBox(height: 8),
+            ScTitle(song.matched ? 'A good find.' : 'Find that song.'),
+            const SizedBox(height: 24),
             body,
             const SizedBox(height: 14),
             Center(
@@ -390,7 +393,7 @@ class _MusicSettingsPageState extends State<MusicSettingsPage> {
       child: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
-              padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
+              padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
               children: [
                 ScBackRow(
                   label: 'Settings',

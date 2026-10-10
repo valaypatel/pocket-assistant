@@ -171,7 +171,7 @@ class _NowPlayingBarState extends State<NowPlayingBar> {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 8, 8, 4),
       decoration: const BoxDecoration(
-        color: Sc.surface,
+        color: Sc.dark,
         border: Border(top: BorderSide(color: Sc.line)),
       ),
       child: Column(
@@ -187,20 +187,27 @@ class _NowPlayingBarState extends State<NowPlayingBar> {
                       playing.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w600),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white,
+                      ),
                     ),
                     Text(
                       '${playing.parts == null ? '' : 'Part ${playing.part} of ${playing.parts} · '}'
                       '${nowPlayingClock(position.round())} / '
                       '${nowPlayingClock(playing.durationMs)}'
                       '${playing.paused ? ' · Paused' : ''}',
-                      style: const TextStyle(color: Sc.muted, fontSize: 13),
+                      style: const TextStyle(
+                        color: Color(0xffd6cec5),
+                        fontSize: 12,
+                      ),
                     ),
                   ],
                 ),
               ),
               IconButton(
                 tooltip: playing.paused ? 'Resume' : 'Pause',
+                color: Colors.white,
                 iconSize: 26,
                 constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                 onPressed: playing.paused ? widget.onResume : widget.onPause,
@@ -210,6 +217,7 @@ class _NowPlayingBarState extends State<NowPlayingBar> {
               ),
               IconButton(
                 tooltip: 'Stop',
+                color: Colors.white,
                 iconSize: 24,
                 constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                 onPressed: widget.onStop,

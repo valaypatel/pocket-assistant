@@ -293,6 +293,11 @@ void main() {
       // Back on Notes: the group is gone, the notes are not.
       expect(find.text('Planning'), findsNothing);
       expect(find.text('Groceries'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.text('Trip plan'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
       expect(find.text('Trip plan'), findsOneWidget);
       final saved = (await SharedPreferences.getInstance()).getString(
         'circuit_groups',

@@ -1027,7 +1027,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   final _wifiSsidController = TextEditingController();
   final _wifiPasswordController = TextEditingController();
   final _noteSearchController = TextEditingController();
-  bool _noteSearchOpen = false;
   final Map<String, ScanResult> _circuits = {};
 
   StreamSubscription<List<ScanResult>>? _scanSubscription;

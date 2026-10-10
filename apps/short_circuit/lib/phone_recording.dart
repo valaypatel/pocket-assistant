@@ -620,7 +620,7 @@ class PhoneRecorderSheet extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
           decoration: BoxDecoration(
             color: Sc.bg,
-            borderRadius: BorderRadius.circular(24),
+            borderRadius: BorderRadius.circular(16),
           ),
           child: SafeArea(
             top: false,
