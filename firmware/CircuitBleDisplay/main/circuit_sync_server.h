@@ -267,26 +267,35 @@ inline esp_err_t note_handler(httpd_req_t *req) {
     if (!authorize(req)) return ESP_FAIL;
     const uint32_t id = id_after(req->uri, "/notes/");
     circuit_notes::Note note;
-    if (id == 0 || !circuit_notes::describe(id, &note)) return ESP_FAIL;
+    if (id == 0 || !circuit_notes::describe(id, &note)) {
+        ESP_LOGW("CircuitSync", "Download refused: note %lu not found on the card", static_cast<unsigned long>(id));
+        return ESP_FAIL;
+    }
 
     uint32_t start = 0;
     char range[48] = {};
     if (httpd_req_get_hdr_value_str(req, "Range", range, sizeof(range)) == ESP_OK &&
         strncmp(range, "bytes=", 6) == 0) {
         start = static_cast<uint32_t>(strtoul(range + 6, nullptr, 10));
-        if (start >= note.bytes) return ESP_FAIL;
+        if (start >= note.bytes) {
+            ESP_LOGW("CircuitSync", "Download refused: note %lu asked from byte %lu but has %lu", static_cast<unsigned long>(id),
+                static_cast<unsigned long>(start), static_cast<unsigned long>(note.bytes));
+            return ESP_FAIL;
+        }
     }
 
     log_heap(start > 0 ? "sync: note (resume)" : "sync: note start");
     char path[48];
     circuit_notes::note_path(note, path, sizeof(path));
     FILE *file = fopen(path, "rb");
-    // DMA-capable internal RAM, so the SD driver reads straight into it instead of allocating its own
-    // bounce buffer, which is what failed ("not enough mem") when internal RAM ran low.
-    uint8_t *buffer = static_cast<uint8_t *>(heap_caps_aligned_alloc(32, kChunkBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+    uint8_t *buffer = static_cast<uint8_t *>(malloc(kChunkBytes));
     if (file == nullptr || buffer == nullptr) {
+        ESP_LOGW("CircuitSync", "Download refused: note %lu file %s, buffer %s (internal RAM free %u, largest %u)",
+            static_cast<unsigned long>(id), file == nullptr ? "would not open" : "ok", buffer == nullptr ? "not allocated" : "ok",
+            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
         if (file != nullptr) fclose(file);
-        heap_caps_free(buffer);
+        free(buffer);
         return ESP_FAIL;
     }
     fseek(file, start, SEEK_SET);
@@ -338,7 +347,7 @@ inline esp_err_t note_handler(httpd_req_t *req) {
             static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
     }
     fclose(file);
-    heap_caps_free(buffer);
+    free(buffer);
     return status;
 }
 
