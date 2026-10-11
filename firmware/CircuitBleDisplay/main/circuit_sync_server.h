@@ -44,6 +44,15 @@
 
 namespace circuit_sync {
 
+// One line of internal-RAM numbers. "lowest" never rises, so the first stage that shows a drop is
+// where the memory went.
+inline void log_heap(const char *stage) {
+    ESP_LOGW("CircuitHeap", "%-22s free %6u  largest %6u  lowest ever %6u", stage,
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+}
+
 // How many downloads the board has cut short since it started (memory, or the phone going
 // away). Reported to the phone with the rest of the board's health.
 inline volatile uint32_t download_stops = 0;
@@ -266,6 +275,7 @@ inline esp_err_t note_handler(httpd_req_t *req) {
         if (start >= note.bytes) return ESP_FAIL;
     }
 
+    log_heap(start > 0 ? "sync: note (resume)" : "sync: note start");
     char path[48];
     circuit_notes::note_path(note, path, sizeof(path));
     FILE *file = fopen(path, "rb");
@@ -292,6 +302,7 @@ inline esp_err_t note_handler(httpd_req_t *req) {
         if (status != ESP_OK) break;
         state.last_activity_ms = now_ms();
         state.served_bytes += read;
+        if (state.served_bytes / (256 * 1024) != (state.served_bytes - read) / (256 * 1024)) log_heap("sync: transferring");
         if (state.on_progress != nullptr && state.total_bytes > 0) {
             const uint64_t percent = static_cast<uint64_t>(state.served_bytes) * 100 / state.total_bytes;
             state.on_progress(percent > 100 ? 100 : static_cast<uint32_t>(percent));
@@ -359,7 +370,9 @@ inline size_t waiting_in_session() { return circuit_notes::count_unsynced_of(sta
 inline bool open_session(uint16_t *port, char *token, size_t token_size, const char **fingerprint,
                          uint32_t *note_count, uint32_t *total_bytes, uint32_t only_recording = 0) {
     State &s = state;
+    log_heap("sync: before session");
     if (is_open() || locked_out() || token_size < sizeof(s.token) || !ensure_identity()) return false;
+    log_heap("sync: identity ready");
 
     circuit_notes::Note notes[kMaxListed];
     const size_t count = circuit_notes::list_unsynced_of(notes, kMaxListed, only_recording);
@@ -394,6 +407,7 @@ inline bool open_session(uint16_t *port, char *token, size_t token_size, const c
         s.server = nullptr;
         return false;
     }
+    log_heap("sync: server up");
     static const httpd_uri_t list = {.uri = "/notes", .method = HTTP_GET, .handler = list_handler, .user_ctx = nullptr};
     static const httpd_uri_t note = {.uri = "/notes/*", .method = HTTP_GET, .handler = note_handler, .user_ctx = nullptr};
     static const httpd_uri_t ack = {.uri = "/ack/*", .method = HTTP_POST, .handler = ack_handler, .user_ctx = nullptr};

@@ -2379,6 +2379,7 @@ extern "C" void app_main(void) {
     ESP_LOGI(kTag, "Start-up done; internal RAM free %u, largest block %u",
         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+    circuit_sync::log_heap("start-up done");
     if (esp_ble_get_bond_device_num() == 0) {
         if (boot_splash) show_pairing_code();
     } else {
