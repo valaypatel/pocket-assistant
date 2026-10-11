@@ -541,6 +541,8 @@ extension _PhoneRecording on _CircuitHomePageState {
   void _openPhoneRecorder() {
     if (_phoneSheetOpen || !mounted) return;
     _phoneSheetOpen = true;
+    statusPillHidden.value =
+        true; // the sheet says the same thing as the status pill
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -551,7 +553,10 @@ extension _PhoneRecording on _CircuitHomePageState {
         onStop: () => _phoneRecorder.invokeMethod<void>('stop'),
         onDiscard: () => _phoneRecorder.invokeMethod<void>('discard'),
       ),
-    ).whenComplete(() => _phoneSheetOpen = false);
+    ).whenComplete(() {
+      _phoneSheetOpen = false;
+      statusPillHidden.value = false;
+    });
   }
 
   void _closePhoneRecorderSheet() {

@@ -38,6 +38,7 @@ part 'ui/recording_view.dart';
 part 'ui/song_page.dart';
 part 'ui/theme.dart';
 part 'test_control.dart';
+part 'ui/status_overlay.dart';
 
 const _circuitName = 'Circuit';
 final _textServiceId = Guid('0000fff0-0000-1000-8000-00805f9b34fb');
@@ -1027,6 +1028,8 @@ class ShortCircuitApp extends StatelessWidget {
     return MaterialApp(
       title: 'Short-Circuit',
       theme: buildScTheme(),
+      builder: (context, child) =>
+          StatusOverlay(child: child ?? const SizedBox.shrink()),
       home: const CircuitHomePage(),
     );
   }
@@ -1163,6 +1166,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _onScanResults,
       onError: (Object error) => _setStatus('Scan failed: $error'),
     );
+    _nowPlaying.addListener(_publishStatusUi);
+    _phoneRecording.addListener(_publishStatusUi);
     _restoreLastCircuit();
     _initTestControl();
     _loadNotes().then((_) {
@@ -1216,6 +1221,10 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _nowPlaying.removeListener(_publishStatusUi);
+    _phoneRecording.removeListener(_publishStatusUi);
+    statusPill.value = null;
+    statusSnack.value = null;
     _scanSubscription?.cancel();
     _connectionSubscription?.cancel();
     _relaySubscription?.cancel();

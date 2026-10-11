@@ -23,7 +23,7 @@ class MainActivity : FlutterActivity() {
 
     private fun testModeOn() = getSharedPreferences("circuit_test", MODE_PRIVATE).getBoolean("on", false)
 
-    private fun takeTestCommand(intent: Intent?) {
+    private fun takeTestCommand(intent: Intent?, appJustStarted: Boolean = false) {
         val cmd = intent?.getStringExtra("test_cmd") ?: return
         val args = intent.getStringExtra("test_args") ?: ""
         intent.removeExtra("test_cmd")
@@ -34,13 +34,14 @@ class MainActivity : FlutterActivity() {
         }
         val command = mapOf("cmd" to cmd, "args" to args)
         val channel = testChannel
-        if (channel != null) channel.invokeMethod("command", command) else pendingTestCommand = command
+        // A command that starts the app is held until the page asks for it: it is not listening yet.
+        if (channel != null && !appJustStarted) channel.invokeMethod("command", command) else pendingTestCommand = command
     }
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
         takeLaunchAction(intent)
-        takeTestCommand(intent)
+        takeTestCommand(intent, appJustStarted = true)
     }
 
     override fun onNewIntent(intent: Intent) {

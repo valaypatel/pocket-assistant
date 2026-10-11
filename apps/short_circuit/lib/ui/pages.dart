@@ -370,7 +370,6 @@ extension _ScPages on _CircuitHomePageState {
           onSyncNote: _syncLatestRecording,
           audioPath: note.audioPath,
           onPlayNote: _playSyncedNote,
-          playerBar: _nowPlayingBar,
           onDeleteNote: _deleteNote,
           onCreateReminder: _extractReminder,
           onAddTask: (title, detail) => _addTask(title, detail: detail),
@@ -1866,15 +1865,23 @@ extension _ScPages on _CircuitHomePageState {
     );
   }
 
-  Future<void> _openRecordingSheet() => showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    showDragHandle: true,
-    backgroundColor: Sc.bg,
-    builder: (_) =>
-        RecordingSheet(read: _recordingSnapshot, onStop: _stopRecording),
-  );
+  Future<void> _openRecordingSheet() async {
+    // The sheet sits where the status pill is, so the pill steps aside while it is open.
+    statusPillHidden.value = true;
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        showDragHandle: true,
+        backgroundColor: Sc.bg,
+        builder: (_) =>
+            RecordingSheet(read: _recordingSnapshot, onStop: _stopRecording),
+      );
+    } finally {
+      statusPillHidden.value = false;
+    }
+  }
 
   // ---- shell ---------------------------------------------------------------
 
@@ -1902,6 +1909,7 @@ extension _ScPages on _CircuitHomePageState {
 
   Widget _buildShell() {
     _publishSyncUi();
+    _publishStatusUi();
     final content = Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 640),
@@ -1921,15 +1929,8 @@ extension _ScPages on _CircuitHomePageState {
         ),
       ),
     );
-    // While Circuit records, a compact pill grows out of the Circuit indicator on Home (or out of
-    // the top edge on other pages) and folds back into it when recording ends, so notes, tasks
-    // and settings stay usable.
-    final body = RecordingMorph(
-      active: _recordingAudio,
-      chipKey: _deviceChipKey,
-      island: () => _recordingIsland(decorated: false),
-      child: content,
-    );
+    // Recording, sync and playback show on every screen from one overlay (status_overlay.dart).
+    final body = content;
     final tab = switch (_page) {
       _AppPage.home => 0,
       _AppPage.notes || _AppPage.group => 1,
@@ -1947,7 +1948,6 @@ extension _ScPages on _CircuitHomePageState {
         bottomNavigationBar: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _nowPlayingBar(),
             if (tab >= 0 && tab != 3 && !_recordingAudio)
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
