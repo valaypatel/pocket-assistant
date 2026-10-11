@@ -17,6 +17,8 @@
 //   GET  /notes        "<id>,<bytes>,<epoch>\n" per unsynced note
 //   GET  /notes/<id>   the note file as stored (encrypted, see circuit_crypto.h): the
 //                      board never decrypts it for the phone. Supports "Range: bytes=<start>-"
+//   GET  /moments/<id> the note's Moments file as stored (sealed, see circuit_moments.h), or an
+//                      empty body when the note has none
 //   POST /ack/<id>     marks the note synced (the file stays on the card)
 
 #include <arpa/inet.h>
@@ -351,6 +353,25 @@ inline esp_err_t note_handler(httpd_req_t *req) {
     return status;
 }
 
+// A note's Moments (bookmarks added with the lower key). The file is small (under 600 bytes) and
+// sealed, so it goes out as it is stored. A note without one answers with an empty body, so the
+// phone never has to treat "none" as an error.
+inline esp_err_t moments_handler(httpd_req_t *req) {
+    if (!authorize(req)) return ESP_FAIL;
+    const uint32_t id = id_after(req->uri, "/moments/");
+    if (id == 0) return ESP_FAIL;
+    char path[48];
+    circuit_notes::path_for(id, "MOM", path, sizeof(path));
+    uint8_t file[640];
+    size_t length = 0;
+    if (FILE *in = fopen(path, "rb")) {
+        length = fread(file, 1, sizeof(file), in);
+        fclose(in);
+    }
+    httpd_resp_set_type(req, "application/octet-stream");
+    return httpd_resp_send(req, reinterpret_cast<const char *>(file), length);
+}
+
 inline esp_err_t ack_handler(httpd_req_t *req) {
     if (!authorize(req)) return ESP_FAIL;
     const uint32_t id = id_after(req->uri, "/ack/");
@@ -434,7 +455,7 @@ inline bool open_session(uint16_t *port, char *token, size_t token_size, const c
     config.httpd.recv_wait_timeout = 10;
     config.httpd.send_wait_timeout = 10;
     config.httpd.uri_match_fn = httpd_uri_match_wildcard;
-    config.httpd.max_uri_handlers = 4;
+    config.httpd.max_uri_handlers = 5;
     if (httpd_ssl_start(&s.server, &config) != ESP_OK) {
         s.server = nullptr;
         return false;
@@ -445,6 +466,8 @@ inline bool open_session(uint16_t *port, char *token, size_t token_size, const c
     static const httpd_uri_t ack = {.uri = "/ack/*", .method = HTTP_POST, .handler = ack_handler, .user_ctx = nullptr};
     httpd_register_uri_handler(s.server, &list);
     httpd_register_uri_handler(s.server, &note);
+    static const httpd_uri_t moments = {.uri = "/moments/*", .method = HTTP_GET, .handler = moments_handler, .user_ctx = nullptr};
+    httpd_register_uri_handler(s.server, &moments);
     httpd_register_uri_handler(s.server, &ack);
     httpd_register_err_handler(s.server, HTTPD_404_NOT_FOUND, not_found_handler);
     httpd_register_err_handler(s.server, HTTPD_405_METHOD_NOT_ALLOWED, not_found_handler);

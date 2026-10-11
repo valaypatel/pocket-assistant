@@ -1912,6 +1912,8 @@ void dev_console_task(void *) {
             vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(seconds * 1000)));
             dev_lower_down = false;
             ESP_LOGW(kTag, "DEV lower key pressed for %.2f s", seconds);
+        } else if (strcmp(line, "moments-selftest") == 0) {
+            ESP_LOGW(kTag, "DEV moments-selftest: %s", circuit_moments::selftest() ? "PASS" : "FAIL");
         } else if (strncmp(line, "moments ", 8) == 0) {
             // "moments ID": read and open the moments file of note ID
             const unsigned long id = strtoul(line + 8, nullptr, 10);
@@ -2779,6 +2781,7 @@ extern "C" void app_main(void) {
     note_key_ready = circuit_secure::load_key(&note_key);
     ESP_LOGI(kTag, "Notes crypto self-test: %s; notes key: %s", crypto_self_test_ok ? "PASS" : "FAIL",
         note_key_ready ? "present" : "none yet");
+    ESP_LOGI(kTag, "Moments self-test: %s", circuit_moments::selftest() ? "PASS" : "FAIL");
     text_queue = xQueueCreate(4, sizeof(TextMessage));
     configASSERT(text_queue);
     pairing_passkey = esp_random() % 1000000;

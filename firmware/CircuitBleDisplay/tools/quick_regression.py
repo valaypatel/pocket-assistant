@@ -149,6 +149,9 @@ good = bool(offsets) and len(offsets) == 2 and 2000 <= offsets[0] <= 8000 and 25
 note("Q4 two taps give two Moments, in order, about 4 s apart", ok and good, str(offsets))
 note("Q4 a note without taps has no Moments file", plain_id is not None and moments_of(plain_id) == [], str(moments_of(plain_id) if plain_id else None))
 
+st = b("moments-selftest", timeout=60)
+note("Q4 the Moments file matches the shared test vector", "moments-selftest: PASS" in st, st.strip()[-80:])
+
 print("== Q5 lower key", flush=True)
 lw = b("lower")
 m = re.search(r"GPIO18 level=(\d) .*presses=(\d+)", lw)
