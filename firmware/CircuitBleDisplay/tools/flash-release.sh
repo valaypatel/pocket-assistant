@@ -72,6 +72,7 @@ fi
 boot="$work/bootloader.bin"
 parts="$work/partition-table.bin"
 app="$(find "$work" -maxdepth 1 -name 'circuit-app*.bin' | head -1)"
+bootdata="$work/ota_data_initial.bin"  # resets the boot slot to ota_0; optional for older releases
 [[ -f "$boot" && -f "$parts" && -n "$app" ]] \
   || die "expected bootloader.bin, partition-table.bin and circuit-app*.bin; got: $(ls "$work" | tr '\n' ' ')"
 
@@ -79,7 +80,7 @@ app="$(find "$work" -maxdepth 1 -name 'circuit-app*.bin' | head -1)"
 size() { wc -c <"$1" | tr -d ' '; }
 (( $(size "$boot") < 65536 )) || die "bootloader.bin is too big to be a bootloader (is this a merged image? do not flash that)"
 (( $(size "$parts") <= 4096 )) || die "partition-table.bin is too big to be a partition table"
-(( $(size "$app") <= 0x3F0000 )) || die "the app does not fit the 4 MB app partition"
+(( $(size "$app") <= 0x320000 )) || die "the app does not fit its 3.1 MB app slot"
 if [[ -f "$work/SHA256SUMS" ]]; then
   sum() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
   (cd "$work" && sum -c SHA256SUMS >/dev/null 2>&1) \
@@ -115,8 +116,11 @@ if (( ! yes )); then
   [[ "$answer" == [yY]* ]] || { echo "Cancelled."; exit 0; }
 fi
 
+bootdata_args=()
+[[ -f "$bootdata" ]] && bootdata_args=(0x650000 "$bootdata")
+
 # ---- flash ------------------------------------------------------------------------------
 "${esptool[@]}" --chip esp32s3 --port "$port" --baud 460800 --after hard_reset \
-  write_flash --flash_mode dio --flash_size 4MB --flash_freq 80m \
-  0x0 "$boot" 0x8000 "$parts" 0x10000 "$app"
+  write_flash --flash_mode dio --flash_size 8MB --flash_freq 80m \
+  0x0 "$boot" 0x8000 "$parts" 0x10000 "$app" ${bootdata_args[@]+"${bootdata_args[@]}"}
 echo "Done. Circuit is restarting; its settings, pairing and notes key were not touched."

@@ -10,6 +10,7 @@
 #ifdef CIRCUIT_DEV_CONSOLE
 #include "driver/usb_serial_jtag.h"
 #endif
+#include "esp_app_desc.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_event.h"
@@ -1650,6 +1651,37 @@ void start_audio_sync(bool forced, uint32_t only_recording = 0) {
 void start_playback();
 #ifdef CIRCUIT_DEV_CONSOLE
 std::atomic<bool> dev_key_down{false};  // the development console "presses" the key through this
+
+// Two-button prototype, step 1: only watches the lower key (GPIO18) and the power-latch pin (GPIO17).
+// It acts on nothing; it answers "can the firmware read the lower key, and what does a long hold do?".
+constexpr gpio_num_t kLowerKeyPin = GPIO_NUM_18;
+constexpr gpio_num_t kPowerLatchPin = GPIO_NUM_17;
+std::atomic<uint32_t> lower_key_presses{0};
+std::atomic<uint32_t> lower_key_longest_ms{0};
+std::atomic<bool> lower_key_down{false};
+
+void lower_key_task(void *) {
+    bool was_pressed = gpio_get_level(kLowerKeyPin) == 0;
+    TickType_t pressed_at = 0;
+    while (true) {
+        const bool is_pressed = gpio_get_level(kLowerKeyPin) == 0;
+        if (is_pressed && !was_pressed) {
+            pressed_at = xTaskGetTickCount();
+            lower_key_down = true;
+            ESP_LOGW(kTag, "DEV lower key DOWN");
+        } else if (!is_pressed && was_pressed) {
+            const uint32_t ms = (xTaskGetTickCount() - pressed_at) * portTICK_PERIOD_MS;
+            lower_key_down = false;
+            lower_key_presses++;
+            if (ms > lower_key_longest_ms.load()) lower_key_longest_ms = ms;
+            ESP_LOGW(kTag, "DEV lower key UP after %u ms", static_cast<unsigned>(ms));
+        } else if (is_pressed && (xTaskGetTickCount() - pressed_at) % pdMS_TO_TICKS(1000) < kButtonPollInterval) {
+            ESP_LOGW(kTag, "DEV lower key still held, %u ms", static_cast<unsigned>((xTaskGetTickCount() - pressed_at) * portTICK_PERIOD_MS));
+        }
+        was_pressed = is_pressed;
+        vTaskDelay(kButtonPollInterval);
+    }
+}
 // Development console (built only with -DCIRCUIT_DEV_CONSOLE=1, see tools/board_dev.py). Reads one-line
 // commands from the USB port: "copy N", "copy-sync N", "sync", "status". It exists to test sync without
 // recording by hand: "copy" makes N new unsynced notes from the newest synced single-part notes.
@@ -1811,6 +1843,11 @@ void dev_console_task(void *) {
             ESP_LOGW(kTag, "DEV crash requested");
             vTaskDelay(pdMS_TO_TICKS(200));
             esp_restart();
+        } else if (strcmp(line, "lower") == 0) {
+            ESP_LOGW(kTag, "DEV lower: GPIO18 level=%d (0 = pressed), GPIO17 level=%d, presses=%u, longest=%u ms, held now=%d",
+                gpio_get_level(kLowerKeyPin), gpio_get_level(kPowerLatchPin),
+                static_cast<unsigned>(lower_key_presses.load()), static_cast<unsigned>(lower_key_longest_ms.load()),
+                lower_key_down.load() ? 1 : 0);
         } else if (strcmp(line, "status") == 0) {
             circuit_sync::log_heap("dev status");
             if (Lvgl_lock(1000)) {
@@ -1821,8 +1858,8 @@ void dev_console_task(void *) {
                     static_cast<unsigned>(mon.total_size), static_cast<unsigned>(mon.free_size),
                     static_cast<unsigned>(mon.max_used), static_cast<unsigned>(mon.max_used * 100u / mon.total_size));
             }
-            ESP_LOGW(kTag, "DEV status: waiting=%u recording=%d paused=%d playing=%d sync_open=%d tasks=%u",
-                static_cast<unsigned>(circuit_notes::count_unsynced()), recording_active ? 1 : 0,
+            ESP_LOGW(kTag, "DEV status: version=%s waiting=%u recording=%d paused=%d playing=%d sync_open=%d tasks=%u",
+                esp_app_get_description()->version, static_cast<unsigned>(circuit_notes::count_unsynced()), recording_active ? 1 : 0,
                 recording_paused ? 1 : 0, playback_active.load() ? 1 : 0, circuit_sync::is_open() ? 1 : 0,
                 static_cast<unsigned>(uxTaskGetNumberOfTasks()));
         } else if (line[0] != '\0') {
@@ -1904,6 +1941,12 @@ void init_record_button() {
     };
     ESP_ERROR_CHECK(gpio_config(&config));
     xTaskCreate(record_button_task, "record_button", 3072, nullptr, 3, nullptr);
+#ifdef CIRCUIT_DEV_CONSOLE
+    gpio_config_t lower_config = config;
+    lower_config.pin_bit_mask = 1ULL << kLowerKeyPin;
+    ESP_ERROR_CHECK(gpio_config(&lower_config));
+    xTaskCreate(lower_key_task, "lower_key", 3072, nullptr, 2, nullptr);
+#endif
 }
 
 void start_playback() {
@@ -2594,6 +2637,7 @@ void init_display() {
 extern "C" void app_main(void) {
     circuit_sdlog::install();  // lines are kept in memory until the card is up, then written to it
     boot_reset_reason = static_cast<int>(esp_reset_reason());
+    ESP_LOGW(kTag, "Circuit firmware %s", esp_app_get_description()->version);
     ESP_LOGW(kTag, "Reset reason: %d (1=power-on 3=software 4=panic 5=int-wdt 6=task-wdt 7=wdt 9=brownout 15=brownout)",
         static_cast<int>(esp_reset_reason()));
     esp_err_t nvs_status = nvs_flash_init();

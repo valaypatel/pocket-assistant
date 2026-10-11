@@ -8,4 +8,6 @@ set(EXTRA_COMPONENT_DIRS
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# Shown in the boot log and, later, to the app. Bump it for each firmware release.
+set(PROJECT_VER "2.0.0-dev1")
 project(circuit_ble_display)

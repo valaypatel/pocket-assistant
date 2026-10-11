@@ -78,7 +78,7 @@ jobs:
             echo "- ESP-IDF: \`$(idf.py --version 2>/dev/null | tail -1)\`"
             echo "- LVGL: \`$(grep -m1 '^version' "../../$WAVESHARE_PROJECT/managed_components/lvgl__lvgl/idf_component.yml" | cut -d' ' -f2)\`"
             echo "- Waveshare board support: \`${WAVESHARE_COMMIT:0:10}\`"
-            echo "- Files: bootloader (0x0), partition table (0x8000), app (0x10000). The settings partition at 0x9000 is never written."
+            echo "- Files: bootloader (0x0), partition table (0x8000), app (0x10000), boot-slot data (0x650000). The settings partition at 0x9000 is never written."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collect the files
@@ -89,7 +89,7 @@ jobs:
           # the notes key) sits in one of those gaps at 0x9000.
           mkdir -p ../../dist
           cp build/circuit_ble_display.bin ../../dist/circuit-app.bin
-          cp build/bootloader/bootloader.bin build/partition_table/partition-table.bin ../../dist/
+          cp build/bootloader/bootloader.bin build/partition_table/partition-table.bin build/ota_data_initial.bin ../../dist/
           (cd ../../dist && sha256sum -- * > SHA256SUMS)
           cat ../../dist/SHA256SUMS
 
@@ -125,7 +125,7 @@ jobs:
             Flash with (replace `<version>`):
 
             ```
-            esptool.py --chip esp32s3 write_flash 0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 circuit-app-<version>.bin
+            esptool.py --chip esp32s3 write_flash 0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 circuit-app-<version>.bin 0x650000 ota_data_initial.bin
             ```
 
             This writes only those three regions. The saved Wi-Fi, pairing and notes key
@@ -136,6 +136,7 @@ jobs:
           files: |
             dist/bootloader.bin
             dist/partition-table.bin
+            dist/ota_data_initial.bin
             dist/circuit-app-*.bin
             dist/SHA256SUMS
           generate_release_notes: true
