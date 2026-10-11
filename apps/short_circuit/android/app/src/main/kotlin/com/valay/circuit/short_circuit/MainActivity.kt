@@ -17,15 +17,37 @@ class MainActivity : FlutterActivity() {
     /** What the person asked for by opening the app from the widget ("record"), until the app reads it. */
     private var launchAction: String? = null
 
+    /** Test mode (Settings > Testing): a command sent with `adb shell am start --es test_cmd ...` is run. */
+    private var testChannel: MethodChannel? = null
+    private var pendingTestCommand: Map<String, String>? = null
+
+    private fun testModeOn() = getSharedPreferences("circuit_test", MODE_PRIVATE).getBoolean("on", false)
+
+    private fun takeTestCommand(intent: Intent?) {
+        val cmd = intent?.getStringExtra("test_cmd") ?: return
+        val args = intent.getStringExtra("test_args") ?: ""
+        intent.removeExtra("test_cmd")
+        intent.removeExtra("test_args")
+        if (!testModeOn()) {
+            android.util.Log.i("CircuitTest", "ignored '$cmd': test mode is off")
+            return
+        }
+        val command = mapOf("cmd" to cmd, "args" to args)
+        val channel = testChannel
+        if (channel != null) channel.invokeMethod("command", command) else pendingTestCommand = command
+    }
+
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
         takeLaunchAction(intent)
+        takeTestCommand(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         takeLaunchAction(intent)
+        takeTestCommand(intent)
     }
 
     private fun takeLaunchAction(intent: Intent?) {
@@ -47,6 +69,27 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        testChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "circuit/test").also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "setMode" -> {
+                        getSharedPreferences("circuit_test", MODE_PRIVATE).edit()
+                            .putBoolean("on", call.arguments as? Boolean ?: false).apply()
+                        result.success(null)
+                    }
+                    "mode" -> result.success(testModeOn())
+                    "pending" -> {
+                        result.success(pendingTestCommand)
+                        pendingTestCommand = null
+                    }
+                    "log" -> {
+                        android.util.Log.i("CircuitTest", call.arguments as? String ?: "")
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        }
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, "circuit/audio_status")
             .setStreamHandler(object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
