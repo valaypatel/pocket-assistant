@@ -657,15 +657,25 @@ class CircuitRelayService : Service() {
                     var interruptions = 0
                     var attempts = 0
                     var progressedTo = partial.length()
+                    var lastProgressMs = SystemClock.elapsedRealtime()
                     while (partial.length() < bytes) {
                         // Circuit's memory is tight, so on a long download it can drop the connection
-                        // now and then. Resuming picks up where it stopped, so only attempts that make
-                        // no progress count against the limit.
+                        // now and then. Resuming picks up where it stopped, so only time without
+                        // progress counts: Circuit keeps its Wi-Fi sync open for 25 seconds after the
+                        // phone goes quiet, so keep trying for that long, with a pause between tries
+                        // (a Wi-Fi network that has only just come back refuses at once).
                         if (partial.length() > progressedTo) {
                             progressedTo = partial.length()
+                            lastProgressMs = SystemClock.elapsedRealtime()
                             attempts = 0
                         }
-                        if (++attempts > 4) throw IOException("Connection to Circuit kept dropping")
+                        attempts++
+                        if (attempts > 1) {
+                            if (SystemClock.elapsedRealtime() - lastProgressMs > 24000) {
+                                throw IOException("Connection to Circuit kept dropping")
+                            }
+                            Thread.sleep(1500)
+                        }
                         // A phone that lost Wi-Fi comes back with a new network, and the old one can no
                         // longer be used (the socket cannot be bound to it). Wait briefly for Wi-Fi to
                         // return and carry on with the new one; give up at once if it does not.
