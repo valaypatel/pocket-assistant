@@ -33,8 +33,6 @@ The long-term goal is an assistant that acts on your behalf, for example
 ```
 apps/short_circuit/              Flutter app plus a Kotlin foreground relay service
 firmware/CircuitBleDisplay/      ESP32-S3 firmware (ESP-IDF + LVGL), the current board firmware
-firmware/CircuitBleProbe/        BLE experiments
-firmware/CircuitDisplay/         Early display experiments
 prototypes/                      HTML mock-ups of the e-paper states and the app
 PROJECT_FEATURES.md              Feature list and roadmap
 ```
