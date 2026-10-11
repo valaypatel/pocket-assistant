@@ -133,6 +133,8 @@ extension _LongNotes on _CircuitHomePageState {
     if (_transcribingNoteId != null) return null;
     _update(() => _transcribingNoteId = id);
     final timer = Stopwatch()..start();
+    var sawPhoneCall =
+        false; // any part that sounded like a phone call makes the note one
     try {
       final texts = await transcribeParts(
         count: files.length,
@@ -157,6 +159,7 @@ extension _LongNotes on _CircuitHomePageState {
             detectMusic: false,
             part: part,
           );
+          if (result.isCall) sawPhoneCall = true;
           return result.transcript;
         },
         onProgress: (texts) =>
@@ -168,6 +171,7 @@ extension _LongNotes on _CircuitHomePageState {
         category: 'note',
         title: const GeminiClient()._fallbackHeading(joined),
         transcript: joined,
+        isCall: sawPhoneCall,
       );
       Telemetry.event('transcription_done', {
         'ok': true,
