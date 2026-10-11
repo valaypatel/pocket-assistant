@@ -1984,6 +1984,16 @@ extension _ScPages on _CircuitHomePageState {
     },
   );
 
+  Widget? _inlineSnack() {
+    final snack = _statusSnack();
+    return snack == null
+        ? null
+        : Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+            child: snack,
+          );
+  }
+
   Widget _buildShell() {
     _publishSyncUi();
     _publishStatusUi();
@@ -2025,6 +2035,8 @@ extension _ScPages on _CircuitHomePageState {
         bottomNavigationBar: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Playback gets its own row here, above Capture a thought, so nothing is covered.
+            ?_inlineSnack(),
             if (tab >= 0 && tab != 3 && !_recordingAudio)
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),

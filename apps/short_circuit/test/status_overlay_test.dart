@@ -7,6 +7,7 @@ void main() {
     statusPill.value = null;
     statusSnack.value = null;
     statusPillHidden.value = false;
+    statusOnTabPage.value = true;
   });
 
   Widget app() => MaterialApp(
@@ -63,6 +64,8 @@ void main() {
   ) async {
     var stopped = 0;
     await tester.pumpWidget(app());
+    statusOnTabPage.value =
+        false; // the overlay shows playback on a pushed page
     statusPill.value = StatusPillBar(
       icon: Icons.sync,
       title: 'Syncing from Circuit · 40%',
@@ -82,7 +85,7 @@ void main() {
     expect(stopped, 1);
   });
 
-  testWidgets('the snackbar drops to the bottom edge on a pushed page', (
+  testWidgets('the overlay shows playback only on a pushed page', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -109,16 +112,14 @@ void main() {
       onAction: () {},
     );
     await tester.pumpAndSettle();
-    final homeY = tester.getBottomLeft(find.byType(StatusSnackBar)).dy;
+    // Home owns its bottom area (the page shows the bar there), so the overlay stays out of it.
+    expect(find.byType(StatusSnackBar), findsNothing);
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
     expect(find.text('detail'), findsOneWidget);
-    expect(
-      tester.getBottomLeft(find.byType(StatusSnackBar)).dy,
-      greaterThan(homeY),
-    );
+    expect(find.byType(StatusSnackBar), findsOneWidget);
     Navigator.of(tester.element(find.text('detail'))).pop();
     await tester.pumpAndSettle();
-    expect(tester.getBottomLeft(find.byType(StatusSnackBar)).dy, homeY);
+    expect(find.byType(StatusSnackBar), findsNothing);
   });
 }

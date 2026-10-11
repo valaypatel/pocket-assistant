@@ -8,14 +8,9 @@ part of '../main.dart';
 final ValueNotifier<Widget?> statusPill = ValueNotifier(null);
 final ValueNotifier<Widget?> statusSnack = ValueNotifier(null);
 
-/// How far above the bottom edge the snackbar floats: above the navigation bar, and above the
-/// "Capture a thought" button on the pages that show it. Pages without either use the smaller value.
-final ValueNotifier<double> statusSnackLift = ValueNotifier(
-  StatusOverlay._navigationHeight,
-);
-
-/// False while a page (a note's own page, say) is open over Home: that page has no navigation
-/// bar or Capture button, so the snackbar floats just above the bottom edge instead.
+/// False while a page (a note's own page, say) is open over Home. On the main pages the playback
+/// bar is part of the page's bottom area (above Capture a thought), so nothing is covered; on a
+/// pushed page, which has no such area, the overlay floats it just above the bottom edge.
 final ValueNotifier<bool> statusOnTabPage = ValueNotifier(true);
 
 /// Watches the pages pushed over Home so the snackbar knows where the bottom of the screen is.
@@ -54,8 +49,6 @@ class StatusOverlay extends StatelessWidget {
   const StatusOverlay({super.key, required this.child});
 
   final Widget child;
-
-  static const _navigationHeight = 92.0;
 
   @override
   Widget build(BuildContext context) {
@@ -96,22 +89,16 @@ class StatusOverlay extends StatelessWidget {
             ),
           ),
         ),
-        ListenableBuilder(
-          listenable: Listenable.merge([statusSnackLift, statusOnTabPage]),
-          builder: (context, child) => Positioned(
-            bottom:
-                media.padding.bottom +
-                (statusOnTabPage.value ? statusSnackLift.value : 16),
-            left: 12,
-            right: 12,
-            child: child!,
-          ),
+        Positioned(
+          bottom: media.padding.bottom + 16,
+          left: 12,
+          right: 12,
           child: Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 640),
-              child: ValueListenableBuilder<Widget?>(
-                valueListenable: statusSnack,
-                builder: (context, snack, _) => AnimatedSwitcher(
+              child: ListenableBuilder(
+                listenable: Listenable.merge([statusSnack, statusOnTabPage]),
+                builder: (context, _) => AnimatedSwitcher(
                   duration: still
                       ? Duration.zero
                       : const Duration(milliseconds: 220),
@@ -125,7 +112,10 @@ class StatusOverlay extends StatelessWidget {
                       child: child,
                     ),
                   ),
-                  child: snack ?? const SizedBox.shrink(key: ValueKey('none')),
+                  child: statusOnTabPage.value
+                      ? const SizedBox.shrink(key: ValueKey('none'))
+                      : (statusSnack.value ??
+                            const SizedBox.shrink(key: ValueKey('none'))),
                 ),
               ),
             ),
@@ -314,15 +304,6 @@ extension _StatusUi on _CircuitHomePageState {
   void _publishStatusUi() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      // The Capture button sits above the navigation bar on these pages (not Settings).
-      final captureShown =
-          !_recordingAudio &&
-          (_page == _AppPage.home ||
-              _page == _AppPage.notes ||
-              _page == _AppPage.group ||
-              _page == _AppPage.tasks);
-      statusSnackLift.value =
-          StatusOverlay._navigationHeight + (captureShown ? 70 : 0);
       statusPill.value = _statusPill();
       statusSnack.value = _statusSnack();
     });
