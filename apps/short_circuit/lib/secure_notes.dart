@@ -135,6 +135,10 @@ class NoteCrypto {
     return wavFromPcm(pcm.takeBytes(), rate, channels, bits);
   }
 
+  /// The raw samples of a note (or the raw payload of a Moments file), without a WAV header.
+  static Future<Uint8List> decryptToPcm(Uint8List file, Uint8List key) async =>
+      Uint8List.sublistView(await decryptToWav(file, key), 44);
+
   static Uint8List wavFromPcm(Uint8List pcm, int rate, int channels, int bits) {
     final block = channels * bits ~/ 8;
     final out = Uint8List(44 + pcm.length);

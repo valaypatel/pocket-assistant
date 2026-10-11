@@ -402,6 +402,7 @@ extension _ScPages on _CircuitHomePageState {
           onSyncNote: _syncLatestRecording,
           audioPath: note.audioPath,
           onPlayNote: _playSyncedNote,
+          onPlayMoment: _playNoteFrom,
           onDeleteNote: _deleteNote,
           onDeletePhoneOnly: _boardIdOf(note) == null
               ? null

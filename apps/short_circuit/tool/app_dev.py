@@ -11,6 +11,8 @@
   app_dev.py rec-pause | rec-resume | rec-stop
   app_dev.py delete ID [ID...]  delete notes (also removes them from Circuit when connected)
   app_dev.py delete-from N      delete every note that came from Circuit note number N or higher
+  app_dev.py moments N          the Moments of the note Circuit numbered N, in ms from the start of the note
+  app_dev.py play-moment N MS   play that note from MS (a Moment) and report where playback is
                                 (test copies made by board_dev.py copy get the highest numbers)
 
 Commands only run when "Test mode" is switched on in the app's Settings; otherwise the app logs
@@ -74,7 +76,7 @@ def main():
     if argv[0] == "install":
         return install()
     known = {"state", "sync", "sync-note", "play", "play-stop", "rec-start", "rec-pause", "rec-resume",
-             "rec-stop", "delete", "delete-from"}
+             "rec-stop", "delete", "delete-from", "moments", "play-moment"}
     if argv[0] not in known:
         print(__doc__)
         return 1
