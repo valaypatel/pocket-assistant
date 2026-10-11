@@ -281,10 +281,12 @@ inline esp_err_t note_handler(httpd_req_t *req) {
     char path[48];
     circuit_notes::note_path(note, path, sizeof(path));
     FILE *file = fopen(path, "rb");
-    uint8_t *buffer = static_cast<uint8_t *>(malloc(kChunkBytes));
+    // DMA-capable internal RAM, so the SD driver reads straight into it instead of allocating its own
+    // bounce buffer, which is what failed ("not enough mem") when internal RAM ran low.
+    uint8_t *buffer = static_cast<uint8_t *>(heap_caps_aligned_alloc(32, kChunkBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
     if (file == nullptr || buffer == nullptr) {
         if (file != nullptr) fclose(file);
-        free(buffer);
+        heap_caps_free(buffer);
         return ESP_FAIL;
     }
     fseek(file, start, SEEK_SET);
@@ -336,7 +338,7 @@ inline esp_err_t note_handler(httpd_req_t *req) {
             static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
     }
     fclose(file);
-    free(buffer);
+    heap_caps_free(buffer);
     return status;
 }
 

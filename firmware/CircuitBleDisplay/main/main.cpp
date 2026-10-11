@@ -1672,14 +1672,21 @@ int dev_copy_notes(int wanted) {
     return copied;
 }
 
+// Asks for a sync the way the phone does (so playback gives way to it), then waits for it to end.
 void dev_sync_and_wait() {
-    for (int i = 0; i < 240 && !can_offer_wifi_sync(); ++i) vTaskDelay(pdMS_TO_TICKS(500));
-    const bool offered = offer_wifi_sync();
-    ESP_LOGW(kTag, "DEV sync offered: %d", offered ? 1 : 0);
-    if (!offered) return;
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    for (int i = 0; i < 240 && !(ble_encrypted && connection_id != UINT16_MAX); ++i) vTaskDelay(pdMS_TO_TICKS(500));
+    start_audio_sync(false);
+    ESP_LOGW(kTag, "DEV sync requested");
+    vTaskDelay(pdMS_TO_TICKS(4000));
     for (int i = 0; i < 600 && circuit_sync::is_open(); ++i) vTaskDelay(pdMS_TO_TICKS(500));
     ESP_LOGW(kTag, "DEV sync ended, %u note(s) still waiting", static_cast<unsigned>(circuit_notes::count_unsynced()));
+}
+
+// The console must stay responsive during a sync (to test pressing the key meanwhile), so a sync
+// waits in a task of its own.
+void dev_sync_task(void *) {
+    dev_sync_and_wait();
+    vTaskDelete(nullptr);
 }
 
 void dev_console_task(void *) {
@@ -1703,12 +1710,12 @@ void dev_console_task(void *) {
         if (strncmp(line, "copy-sync", 9) == 0) {
             if (sscanf(line + 9, "%d", &n) != 1) n = 3;
             dev_copy_notes(n);
-            dev_sync_and_wait();
+            xTaskCreate(dev_sync_task, "dev_sync", 6144, nullptr, 4, nullptr);
         } else if (strncmp(line, "copy", 4) == 0) {
             if (sscanf(line + 4, "%d", &n) != 1) n = 3;
             dev_copy_notes(n);
         } else if (strcmp(line, "sync") == 0) {
-            dev_sync_and_wait();
+            xTaskCreate(dev_sync_task, "dev_sync", 6144, nullptr, 4, nullptr);
         } else if (strncmp(line, "rec", 3) == 0 && strncmp(line, "rec-", 4) != 0) {
             // "rec [seconds]": record without the key (default: until stopped)
             unsigned long seconds = kMaxRecordingSeconds;
@@ -1754,11 +1761,17 @@ void dev_console_task(void *) {
                 }
             }
             ESP_LOGW(kTag, "DEV list done");
+        } else if (strcmp(line, "crash") == 0) {
+            // Like a power cut: nothing gets to finish or close its files.
+            ESP_LOGW(kTag, "DEV crash requested");
+            vTaskDelay(pdMS_TO_TICKS(200));
+            esp_restart();
         } else if (strcmp(line, "status") == 0) {
             circuit_sync::log_heap("dev status");
-            ESP_LOGW(kTag, "DEV status: waiting=%u recording=%d paused=%d playing=%d sync_open=%d", 
+ESP_LOGW(kTag, "DEV status: waiting=%u recording=%d paused=%d playing=%d sync_open=%d tasks=%u",
                 static_cast<unsigned>(circuit_notes::count_unsynced()), recording_active ? 1 : 0,
-                recording_paused ? 1 : 0, playback_active.load() ? 1 : 0, circuit_sync::is_open() ? 1 : 0);
+                recording_paused ? 1 : 0, playback_active.load() ? 1 : 0, circuit_sync::is_open() ? 1 : 0,
+                static_cast<unsigned>(uxTaskGetNumberOfTasks()));
         } else if (line[0] != '\0') {
             ESP_LOGW(kTag, "DEV unknown command '%s' (copy N, copy-sync N, sync, status)", line);
         }
