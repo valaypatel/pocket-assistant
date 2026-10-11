@@ -298,6 +298,8 @@ extension _StatusUi on _CircuitHomePageState {
       );
     }
     final syncing = _syncActive || _syncingNoteId != null;
+    // Home and the Circuit page show a sync in their own cards.
+    if (_page == _AppPage.home || _page == _AppPage.circuit) return null;
     if (_syncError != null && !syncing) {
       return StatusPillBar(
         key: const ValueKey('sync-error'),

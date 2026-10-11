@@ -35,6 +35,8 @@ extension _TestControl on _CircuitHomePageState {
       _testChannel.invokeMethod<void>('log', line);
 
   Future<void> _runTestCommand(String cmd, String args) async {
+    // Read the setting fresh: a command that starts the app can arrive before the page has loaded it.
+    _testMode = await _testChannel.invokeMethod<bool>('mode') ?? false;
     if (!_testMode) {
       await _testLog('ignored $cmd: test mode is off');
       return;
