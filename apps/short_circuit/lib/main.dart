@@ -242,6 +242,7 @@ class GeminiClient {
                         'Transcribe this voice note exactly. Preserve Gujarati script, English, and mixed Gujarati-English. Return the complete transcription only. Do not summarise, classify, translate, or add a title.'
                         '${detectMusic ? ' Exception: if the recording is mainly music or a song playing, with no one speaking to record a note, reply with exactly [[MUSIC]] and nothing else.' : ''}'
                         ' If two or more different people clearly speak, start each change of speaker on a new line labelled "Speaker 1:", "Speaker 2:" and so on, using the same label for the same voice throughout. If only one person speaks, add no label.'
+                        ' If the recording sounds like a phone call (a conversation heard through a phone, with telephone-quality audio, ringing, or a call being answered or ended), begin your reply with [[CALL]] followed by the transcription.'
                         ' If it is only silence or background noise, reply with exactly [[NOISE]].'
                         '${_partInstruction(part)}',
                   },
@@ -287,7 +288,8 @@ class GeminiClient {
   }
 
   /// Turns Gemini's plain-text answer into a transcription. A recording of
-  /// music comes back as the [[MUSIC]] marker and silence as [[NOISE]].
+  /// music comes back as the [[MUSIC]] marker, silence as [[NOISE]], and a phone
+  /// call as a [[CALL]] prefix ahead of the transcript.
   static GeminiTranscription parseTranscriptionText(
     String? answer, {
     bool allowMusic = true,
@@ -306,10 +308,14 @@ class GeminiClient {
         audioType: 'music',
       );
     }
+    final isCall = result.startsWith('[[CALL]]');
+    final text = isCall ? result.substring('[[CALL]]'.length).trim() : result;
+    if (text.isEmpty) throw Exception('No speech detected.');
     return GeminiTranscription(
       category: 'note',
-      title: const GeminiClient()._fallbackHeading(result),
-      transcript: result,
+      title: const GeminiClient()._fallbackHeading(text),
+      transcript: text,
+      isCall: isCall,
     );
   }
 
@@ -721,6 +727,7 @@ class GeminiTranscription {
     required this.title,
     required this.transcript,
     this.audioType = 'speech',
+    this.isCall = false,
   });
 
   final String category;
@@ -729,6 +736,9 @@ class GeminiTranscription {
 
   /// 'speech', or 'music' when the recording is a song rather than a note.
   final String audioType;
+
+  /// The recording sounds like a phone call.
+  final bool isCall;
 
   bool get isMusic => audioType == 'music';
 }
@@ -769,6 +779,7 @@ class CircuitNote {
     this.titleEdited = false,
     this.audioParts = const [],
     this.partTexts = const [],
+    this.isCall = false,
   });
 
   final String id;
@@ -811,6 +822,9 @@ class CircuitNote {
       ? audioParts
       : (audioPath == null ? const [] : [audioPath!]);
 
+  /// Transcription judged this recording to be a phone call.
+  final bool isCall;
+
   bool get isSong => kind == 'song';
 
   /// Where the recording was made: 'Phone' (this phone's own recorder) or 'Circuit'.
@@ -850,6 +864,7 @@ class CircuitNote {
     partTexts: (json['partTexts'] as List<dynamic>? ?? const [])
         .map((value) => value?.toString())
         .toList(),
+    isCall: json['isCall'] == true,
   );
 
   CircuitNote copyWith({
@@ -871,6 +886,7 @@ class CircuitNote {
     bool? titleEdited,
     List<String>? audioParts,
     List<String?>? partTexts,
+    bool? isCall,
     bool clearSong = false,
   }) => CircuitNote(
     id: id,
@@ -893,6 +909,7 @@ class CircuitNote {
     titleEdited: titleEdited ?? this.titleEdited,
     audioParts: audioParts ?? this.audioParts,
     partTexts: partTexts ?? this.partTexts,
+    isCall: isCall ?? this.isCall,
   );
 
   Map<String, dynamic> toJson() => {
@@ -919,6 +936,7 @@ class CircuitNote {
     if (titleEdited) 'titleEdited': true,
     if (audioParts.isNotEmpty) 'audioParts': audioParts,
     if (partTexts.isNotEmpty) 'partTexts': partTexts,
+    if (isCall) 'isCall': true,
   };
 }
 
@@ -1383,6 +1401,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
                   transcript: transcription.transcript,
                   title: note.titleEdited ? note.title : transcription.title,
                   category: transcription.category,
+                  isCall: transcription.isCall,
                   enrichmentStatus: 'pending',
                 )
               : note,

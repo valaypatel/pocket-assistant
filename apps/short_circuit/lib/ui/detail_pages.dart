@@ -336,6 +336,7 @@ class TranscriptPage extends StatefulWidget {
     this.onEnrich,
     this.onOpenChat,
     this.onEditNote,
+    this.isCall = false,
   });
 
   final DateTime createdAt;
@@ -379,6 +380,9 @@ class TranscriptPage extends StatefulWidget {
   /// Saves a hand-edited title and transcript. Hides the edit button when null.
   final Future<void> Function(String noteId, String title, String transcript)?
   onEditNote;
+
+  /// The recording was judged to be a phone call.
+  final bool isCall;
 
   @override
   State<TranscriptPage> createState() => _TranscriptPageState();
@@ -586,6 +590,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
     final tags = live?.tags ?? widget.tags;
     final suggestions = live?.actionSuggestions ?? widget.suggestions;
     final enriching = live?.enrichmentStatus == 'enriching';
+    final isCall = live?.isCall ?? widget.isCall;
     final hasTranscript = _transcript.trim().isNotEmpty;
     return Scaffold(
       bottomNavigationBar: widget.playerBar?.call(),
@@ -769,13 +774,14 @@ class _TranscriptPageState extends State<TranscriptPage> {
                 icon: const Icon(LucideIcons.messageCircle, size: 18),
                 label: const Text('Ask this note'),
               ),
-            if (categories.isNotEmpty || tags.isNotEmpty) ...[
+            if (isCall || categories.isNotEmpty || tags.isNotEmpty) ...[
               const SizedBox(height: 20),
               const ScGroupLabel('Categories & tags'),
               Wrap(
                 spacing: 6,
                 runSpacing: 6,
                 children: [
+                  if (isCall) const ScChip('phone call'),
                   ...categories.map((item) => ScChip(item)),
                   ...tags.map((item) => ScChip(item, tag: true)),
                 ],
