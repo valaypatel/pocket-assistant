@@ -1325,15 +1325,16 @@ void send_wifi_status() {
     send_relay_request(message);
 }
 
-// Tells the app how many notes are waiting and why the board last restarted, so
-// the app can show a sync that is stuck, and a crash, instead of guessing.
+// Tells the app how many recordings are waiting (a long one made of parts counts once) and why
+// the board last restarted, so the app can show a sync that is stuck, and a crash, instead of
+// guessing.
 void send_sync_status() {
     char message[kMaxTextBytes + 1];
     // The first three lines are what the app has always read; the rest is board health,
     // forwarded to the app's diagnostics (counts and sizes only).
     snprintf(message, sizeof(message),
         "@sync-status\nwaiting=%u\nreset=%d\nuptime=%lld\nfree_min=%u\nstack_min=%u\nstops=%u",
-        static_cast<unsigned>(circuit_notes::count_unsynced()), boot_reset_reason,
+        static_cast<unsigned>(circuit_notes::count_unsynced_recordings()), boot_reset_reason,
         static_cast<long long>(circuit_sync::now_ms() / 1000),
         static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(text_stack_min_bytes == UINT32_MAX ? 0 : text_stack_min_bytes),

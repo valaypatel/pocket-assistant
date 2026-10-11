@@ -229,6 +229,29 @@ inline size_t count_unsynced() {
     return count;
 }
 
+// How many recordings have something waiting, as a person counts them: the one-minute parts of
+// a long recording are one recording, however many of them have not synced yet. (count_unsynced()
+// counts files, which is what the sync itself works through.)
+inline size_t count_unsynced_recordings() {
+    uint32_t firsts[16];
+    size_t seen = 0, others = 0;
+    for_each_note([&](uint32_t id) {
+        Note note;
+        if (!describe(id, &note) || note.synced) return;
+        Group group;
+        if (!read_group(id, &group)) {
+            ++others;
+            return;
+        }
+        for (size_t i = 0; i < seen; ++i) {
+            if (firsts[i] == group.first) return;
+        }
+        if (seen < 16) firsts[seen++] = group.first;
+        else ++others;  // too many different recordings to tell apart: count each part
+    });
+    return seen + others;
+}
+
 inline bool mark_synced(uint32_t id) {
     char marker[48];
     path_for(id, "SYN", marker, sizeof(marker));
