@@ -445,10 +445,10 @@ class BackupStore {
     final idMap = <String, String>{};
     final added = <Map<String, dynamic>>[];
     var skipped = 0;
-    final audioByName = {
-      for (final a in data.audio)
-        if (a.bytes != null) _basename(a.name): a.bytes!,
-    };
+    final audioByName = {for (final a in data.audio) _basename(a.name): a};
+    // A recording made by decoding a backup is in memory; one gathered from this phone is on disk.
+    Future<Uint8List> bytesOf(BackupAudio a) async =>
+        a.bytes ?? await a.file!.readAsBytes();
     await filesDir.create(recursive: true);
     for (final note in data.notes) {
       final id = note['id'] as String?;
@@ -470,17 +470,19 @@ class BackupStore {
           (copy.remove('audioParts') as List<dynamic>? ?? const [])
               .map((part) => part.toString())
               .toList();
-      final bytes = name == null ? null : audioByName[_basename(name)];
-      if (bytes != null) {
+      final audio = name == null ? null : audioByName[_basename(name)];
+      if (audio != null) {
         final target = File('${filesDir.path}/${_basename(name!)}');
-        if (!await target.exists()) await target.writeAsBytes(bytes);
+        if (!await target.exists())
+          await target.writeAsBytes(await bytesOf(audio));
         copy['audioPath'] = target.path;
         final restored = <String>[];
         for (final partName in partNames) {
-          final partBytes = audioByName[_basename(partName)];
-          if (partBytes == null) continue;
+          final partAudio = audioByName[_basename(partName)];
+          if (partAudio == null) continue;
           final part = File('${filesDir.path}/${_basename(partName)}');
-          if (!await part.exists()) await part.writeAsBytes(partBytes);
+          if (!await part.exists())
+            await part.writeAsBytes(await bytesOf(partAudio));
           restored.add(part.path);
         }
         if (restored.length > 1) copy['audioParts'] = restored;
