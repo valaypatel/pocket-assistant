@@ -14,6 +14,7 @@
 #include "esp_bt_main.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
+#include "circuit_sdlog.h"
 #include "esp_mac.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gatt_common_api.h"
@@ -73,6 +74,7 @@ constexpr size_t kAudioBufferBytes = 4096;
 constexpr uint32_t kMaxRecordingSeconds = 8 * 3600;  // a safety stop; the card fills first (1.9 MB a minute)
 constexpr uint32_t kPartSeconds = 60;                // one part of a longer recording
 constexpr uint64_t kMinFreeCardBytes = 8ull * 1024 * 1024;  // less than this and a recording stops
+uint64_t sd_free_bytes();
 // Use the established relay characteristic for binary audio packets too. This
 // avoids requiring Android to discard a bonded device's cached GATT table.
 constexpr size_t kAudioPacketBytes = 158;
@@ -689,6 +691,8 @@ void init_sd_card() {
 
     if (verified) {
         ESP_LOGI(kTag, "MicroSD mounted and read/write test passed");
+        circuit_sdlog::room_ok = [] { return sd_free_bytes() > 3 * kMinFreeCardBytes; };
+        circuit_sdlog::start_writer();
         circuit_notes::init();
         ESP_LOGI(kTag, "Notes on card: %u unsynced", static_cast<unsigned>(circuit_notes::count_unsynced()));
         circuit_notes::for_each_wav([](uint32_t id) {
@@ -1357,9 +1361,11 @@ void send_sync_status() {
         static_cast<unsigned>(circuit_sync::download_stops));
     send_relay_request(message);
     // A separate short snapshot keeps both packets within the 160-byte BLE limit.
-    snprintf(message, sizeof(message), "@sync-status\nplayback=%s\nplayback_ms=%lu\nplayback_stop=1",
+    // "recording" lets the app drop a recording indicator that outlived a restart of the board.
+    snprintf(message, sizeof(message), "@sync-status\nplayback=%s\nplayback_ms=%lu\nplayback_stop=1\nrecording=%s",
         playback_active.load() ? "playing" : "idle",
-        static_cast<unsigned long>(playback_active.load() ? playback_audio_ms.load() : 0));
+        static_cast<unsigned long>(playback_active.load() ? playback_audio_ms.load() : 0),
+        recording_active ? (recording_paused ? "paused" : "recording") : "idle");
     send_relay_request(message);
 }
 
@@ -1777,6 +1783,29 @@ void dev_console_task(void *) {
                 }
             }
             ESP_LOGW(kTag, "DEV list done");
+        } else if (strncmp(line, "logtail", 7) == 0) {
+            // "logtail [KB]": the end of the log kept on the card, printed to the serial port
+            unsigned kb = 8, index = 0;
+            if (sscanf(line + 7, "%u %u", &kb, &index) < 1 || kb == 0) kb = 8;
+            char log_path[40];
+            snprintf(log_path, sizeof(log_path), "/sdcard/LOGS/CIRCUIT%u.LOG", index > 3 ? 0 : index);
+            FILE *file = fopen(log_path, "rb");
+            if (file == nullptr) {
+                printf("SDLOG| no log file on the card\n");
+            } else {
+                fseek(file, 0, SEEK_END);
+                long size = ftell(file);
+                long from = size > static_cast<long>(kb) * 1024 ? size - static_cast<long>(kb) * 1024 : 0;
+                fseek(file, from, SEEK_SET);
+                char text[160];
+                if (from > 0) fgets(text, sizeof(text), file);  // skip the cut first line
+                while (fgets(text, sizeof(text), file) != nullptr) {
+                    text[strcspn(text, "\r\n")] = '\0';
+                    printf("SDLOG| %s\n", text);
+                }
+                fclose(file);
+                printf("SDLOG| end (file is %ld bytes)\n", size);
+            }
         } else if (strcmp(line, "crash") == 0) {
             // Like a power cut: nothing gets to finish or close its files.
             ESP_LOGW(kTag, "DEV crash requested");
@@ -1784,7 +1813,15 @@ void dev_console_task(void *) {
             esp_restart();
         } else if (strcmp(line, "status") == 0) {
             circuit_sync::log_heap("dev status");
-ESP_LOGW(kTag, "DEV status: waiting=%u recording=%d paused=%d playing=%d sync_open=%d tasks=%u",
+            if (Lvgl_lock(1000)) {
+                lv_mem_monitor_t mon;
+                lv_mem_monitor(&mon);
+                Lvgl_unlock();
+                ESP_LOGW(kTag, "DEV lvgl pool: total %u, free %u, highest ever used %u (%u%%)",
+                    static_cast<unsigned>(mon.total_size), static_cast<unsigned>(mon.free_size),
+                    static_cast<unsigned>(mon.max_used), static_cast<unsigned>(mon.max_used * 100u / mon.total_size));
+            }
+            ESP_LOGW(kTag, "DEV status: waiting=%u recording=%d paused=%d playing=%d sync_open=%d tasks=%u",
                 static_cast<unsigned>(circuit_notes::count_unsynced()), recording_active ? 1 : 0,
                 recording_paused ? 1 : 0, playback_active.load() ? 1 : 0, circuit_sync::is_open() ? 1 : 0,
                 static_cast<unsigned>(uxTaskGetNumberOfTasks()));
@@ -2169,6 +2206,52 @@ void text_display_task(void *) {
     }
 }
 
+// What the board holds for paired phones, so a pairing that goes wrong can be explained: every
+// bond's address and type, which keys it has (encryption key, identity key) and the identity
+// address if the phone gave one.
+void log_bonds(const char *when) {
+    int count = esp_ble_get_bond_device_num();
+    ESP_LOGW(kTag, "BONDS (%s): %d stored", when, count);
+    if (count <= 0 || count > 8) return;
+    // On the heap: this runs on the Bluetooth task, whose stack is small, and eight of these records
+    // on it overflowed it and restarted the board on every connection.
+    auto *list = static_cast<esp_ble_bond_dev_t *>(heap_caps_malloc(8 * sizeof(esp_ble_bond_dev_t), MALLOC_CAP_SPIRAM));
+    if (list == nullptr) return;
+    int n = 8;
+    if (esp_ble_get_bond_device_list(&n, list) != ESP_OK) {
+        heap_caps_free(list);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        const uint8_t *a = list[i].bd_addr;
+        const uint8_t *id = list[i].bond_key.pid_key.static_addr;
+        ESP_LOGW(kTag, "BONDS (%s): #%d %02x:%02x:%02x:%02x:%02x:%02x type %d, keys 0x%02x (enc %s, id %s), identity %02x:%02x:%02x:%02x:%02x:%02x",
+            when, i, a[0], a[1], a[2], a[3], a[4], a[5], static_cast<int>(list[i].bd_addr_type),
+            static_cast<unsigned>(list[i].bond_key.key_mask),
+            (list[i].bond_key.key_mask & ESP_BLE_ENC_KEY_MASK) ? "yes" : "NO",
+            (list[i].bond_key.key_mask & ESP_BLE_ID_KEY_MASK) ? "yes" : "NO",
+            id[0], id[1], id[2], id[3], id[4], id[5]);
+    }
+    heap_caps_free(list);
+}
+
+// A pairing that disappears while nothing is connected has happened (11 Oct 2026, between 17:32 and
+// 19:10, with no restart). This notes the minute the count changes, so the lines logged around it
+// say why. It runs from PSRAM and wakes twice a minute.
+void bond_watch_task(void *) {
+    int last = esp_ble_get_bond_device_num();
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(30000));
+        const int now = esp_ble_get_bond_device_num();
+        if (now != last) {
+            ESP_LOGW(kTag, "BOND COUNT CHANGED: %d -> %d (up %lu s, connected %d)", last, now,
+                static_cast<unsigned long>(esp_timer_get_time() / 1000000), connection_id != UINT16_MAX ? 1 : 0);
+            log_bonds("after the count changed");
+            last = now;
+        }
+    }
+}
+
 void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
     switch (event) {
     case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
@@ -2177,7 +2260,12 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
     case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
         ESP_LOGI(kTag, "Advertising as %s", kDeviceName);
         break;
+    case ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT:
+        ESP_LOGW(kTag, "BOND REMOVED (status %d)", static_cast<int>(param->remove_bond_dev_cmpl.status));
+        log_bonds("after a bond was removed");
+        break;
     case ESP_GAP_BLE_SEC_REQ_EVT:
+        ESP_LOGW(kTag, "BLE security request event from the phone");
         ESP_ERROR_CHECK(esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true));
         break;
     case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
@@ -2198,8 +2286,9 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             ensure_note_key();
             if (active_screen == DeviceScreen::Pairing) show_device_screen(DeviceScreen::Idle);
         } else {
-            ESP_LOGW(kTag, "BLE security failed with %02x:..:%02x (address type %d): reason 0x%x, %d bonded phone(s) stored",
-                a[0], a[5], auth.addr_type, auth.fail_reason, esp_ble_get_bond_device_num());
+            ESP_LOGW(kTag, "BLE security failed with %02x:%02x:%02x:%02x:%02x:%02x (address type %d): reason 0x%x, %d bonded phone(s) stored",
+                a[0], a[1], a[2], a[3], a[4], a[5], auth.addr_type, auth.fail_reason, esp_ble_get_bond_device_num());
+            log_bonds("after failed security");
             show_pairing_code();
         }
         break;
@@ -2309,16 +2398,18 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         int bonded_count = esp_ble_get_bond_device_num();
         bool known = false;
         if (bonded_count > 0 && bonded_count <= 8) {
-            esp_ble_bond_dev_t list[8];
+            auto *list = static_cast<esp_ble_bond_dev_t *>(heap_caps_malloc(8 * sizeof(esp_ble_bond_dev_t), MALLOC_CAP_SPIRAM));
             int n = 8;
-            if (esp_ble_get_bond_device_list(&n, list) == ESP_OK) {
+            if (list != nullptr && esp_ble_get_bond_device_list(&n, list) == ESP_OK) {
                 for (int i = 0; i < n; i++) {
                     if (memcmp(list[i].bd_addr, a, ESP_BD_ADDR_LEN) == 0) known = true;
                 }
             }
+            if (list != nullptr) heap_caps_free(list);
         }
-        ESP_LOGI(kTag, "Short-Circuit connected: %02x:..:%02x (address type %d), %d bonded phone(s) stored, this address %s",
-            a[0], a[5], param->connect.ble_addr_type, bonded_count, known ? "is one of them" : "is not listed");
+        ESP_LOGI(kTag, "Short-Circuit connected: %02x:%02x:%02x:%02x:%02x:%02x (address type %d), %d bonded phone(s) stored, this address %s",
+            a[0], a[1], a[2], a[3], a[4], a[5], param->connect.ble_addr_type, bonded_count, known ? "is one of them" : "is not listed");
+        log_bonds("on connect");
         esp_err_t enc = esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
         if (enc != ESP_OK) ESP_LOGW(kTag, "Could not ask for an encrypted link: %s", esp_err_to_name(enc));
         break;
@@ -2364,6 +2455,9 @@ void start_ble() {
     ESP_ERROR_CHECK(esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &response_key, sizeof(response_key)));
     ESP_ERROR_CHECK(esp_ble_gatts_register_callback(gatts_event_handler));
     ESP_ERROR_CHECK(esp_ble_gatts_app_register(0));
+    log_bonds("at start-up");
+    xTaskCreatePinnedToCoreWithCaps(bond_watch_task, "bond_watch", 3072, nullptr, 1, nullptr, tskNO_AFFINITY,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
 void start_wifi() {
@@ -2498,11 +2592,15 @@ void init_display() {
 }  // namespace
 
 extern "C" void app_main(void) {
+    circuit_sdlog::install();  // lines are kept in memory until the card is up, then written to it
     boot_reset_reason = static_cast<int>(esp_reset_reason());
     ESP_LOGW(kTag, "Reset reason: %d (1=power-on 3=software 4=panic 5=int-wdt 6=task-wdt 7=wdt 9=brownout 15=brownout)",
         static_cast<int>(esp_reset_reason()));
     esp_err_t nvs_status = nvs_flash_init();
     if (nvs_status == ESP_ERR_NVS_NO_FREE_PAGES || nvs_status == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // This wipes everything saved (pairings, keys, Wi-Fi). It must never go unrecorded.
+        ESP_LOGE(kTag, "NVS ERASED at start-up (%s): all saved settings and pairings are gone",
+            esp_err_to_name(nvs_status));
         ESP_ERROR_CHECK(nvs_flash_erase());
         ESP_ERROR_CHECK(nvs_flash_init());
     } else {
