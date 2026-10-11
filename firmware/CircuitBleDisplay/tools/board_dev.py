@@ -17,6 +17,7 @@
   board_dev.py list             the newest notes on the card and whether each is waiting or synced
   board_dev.py delete ID        delete one note from the card (only while idle)
   board_dev.py resend           mark every note unsynced and sync them all again (what "Send old notes again" does)
+  board_dev.py logtail [KB] [FILE]  print the end of the log kept on the SD card (default 8 KB of file 0, the newest; 1-3 are older)
   board_dev.py crash            restart the board at once, like a power cut (nothing gets to finish)
 
 The console only exists in the development build; release firmware ignores these commands.
@@ -116,7 +117,7 @@ def send(command, wait_for, timeout):
     while time.time() < deadline:
         with open(LOG, errors="replace") as f:
             f.seek(start)
-            lines = [l.rstrip() for l in f.read().splitlines() if "DEV" in l or "CircuitHeap" in l or "SYNCSTAT" in l or "Sync requested" in l]
+            lines = [l.rstrip() for l in f.read().splitlines() if "DEV" in l or "CircuitHeap" in l or "SYNCSTAT" in l or "Sync requested" in l or "SDLOG|" in l]
         for line in lines[seen:]:
             print(line)
             if wait_for and any(w in line for w in ([wait_for] if isinstance(wait_for, str) else wait_for)):
@@ -161,6 +162,8 @@ def main():
         return send("key " + what, "DEV key pressed", 15)
     if cmd == "resend":
         return send("resend", ("SYNCSTAT", "0 file(s)"), 900)
+    if cmd == "logtail":
+        return send("logtail " + " ".join(args[1:]) if len(args) > 1 else "logtail", ("SDLOG| end", "no log file"), 60)
     if cmd == "crash":
         return send("crash", "DEV crash requested", 10)
     if cmd == "list":
