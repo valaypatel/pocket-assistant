@@ -7,6 +7,9 @@
 #include <mutex>
 #include <new>
 
+#ifdef CIRCUIT_DEV_CONSOLE
+#include "driver/usb_serial_jtag.h"
+#endif
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_event.h"
@@ -1625,6 +1628,144 @@ void start_audio_sync(bool forced, uint32_t only_recording = 0) {
     xTaskCreate(audio_sync_task, "audio_sync", 6144, nullptr, 4, &audio_sync_task_handle);
 }
 
+void start_playback();
+#ifdef CIRCUIT_DEV_CONSOLE
+std::atomic<bool> dev_key_down{false};  // the development console "presses" the key through this
+// Development console (built only with -DCIRCUIT_DEV_CONSOLE=1, see tools/board_dev.py). Reads one-line
+// commands from the USB port: "copy N", "copy-sync N", "sync", "status". It exists to test sync without
+// recording by hand: "copy" makes N new unsynced notes from the newest synced single-part notes.
+int dev_copy_notes(int wanted) {
+    uint32_t sources[8] = {};
+    int found = 0;
+    if (wanted > 8) wanted = 8;
+    for (uint32_t id = circuit_notes::newest_id(); id > 0 && found < wanted; --id) {
+        circuit_notes::Note note;
+        circuit_notes::Group group;
+        if (circuit_notes::describe(id, &note) && note.synced && note.encrypted &&
+            !circuit_notes::read_group(id, &group) && note.bytes > 200000) {
+            sources[found++] = id;
+        }
+    }
+    uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(4096, MALLOC_CAP_SPIRAM));
+    int copied = 0;
+    for (int i = 0; i < found && buffer != nullptr; ++i) {
+        char from[48], to[48];
+        circuit_notes::path_for(sources[i], "ENC", from, sizeof(from));
+        const uint32_t id = circuit_notes::allocate_id();
+        circuit_notes::path_for(id, "ENC", to, sizeof(to));
+        FILE *in = fopen(from, "rb");
+        FILE *out = fopen(to, "wb");
+        size_t n = 0, total = 0;
+        while (in != nullptr && out != nullptr && (n = fread(buffer, 1, 4096, in)) > 0) {
+            fwrite(buffer, 1, n, out);
+            total += n;
+        }
+        if (in != nullptr) fclose(in);
+        if (out != nullptr) fclose(out);
+        ESP_LOGW(kTag, "DEV copied note %lu to %lu (%u bytes)", static_cast<unsigned long>(sources[i]),
+            static_cast<unsigned long>(id), static_cast<unsigned>(total));
+        ++copied;
+    }
+    if (buffer != nullptr) heap_caps_free(buffer);
+    ESP_LOGW(kTag, "DEV copy done: %d note(s) copied, %u waiting", copied,
+        static_cast<unsigned>(circuit_notes::count_unsynced()));
+    return copied;
+}
+
+void dev_sync_and_wait() {
+    for (int i = 0; i < 240 && !can_offer_wifi_sync(); ++i) vTaskDelay(pdMS_TO_TICKS(500));
+    const bool offered = offer_wifi_sync();
+    ESP_LOGW(kTag, "DEV sync offered: %d", offered ? 1 : 0);
+    if (!offered) return;
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    for (int i = 0; i < 600 && circuit_sync::is_open(); ++i) vTaskDelay(pdMS_TO_TICKS(500));
+    ESP_LOGW(kTag, "DEV sync ended, %u note(s) still waiting", static_cast<unsigned>(circuit_notes::count_unsynced()));
+}
+
+void dev_console_task(void *) {
+    usb_serial_jtag_driver_config_t config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    config.rx_buffer_size = 256;
+    config.tx_buffer_size = 256;
+    usb_serial_jtag_driver_install(&config);
+    ESP_LOGW(kTag, "DEV console ready");
+    char line[48];
+    size_t used = 0;
+    while (true) {
+        uint8_t c;
+        if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(200)) <= 0) continue;
+        if (c != '\r' && c != '\n') {
+            if (used < sizeof(line) - 1) line[used++] = static_cast<char>(c);
+            continue;
+        }
+        line[used] = '\0';
+        used = 0;
+        int n = 3;
+        if (strncmp(line, "copy-sync", 9) == 0) {
+            if (sscanf(line + 9, "%d", &n) != 1) n = 3;
+            dev_copy_notes(n);
+            dev_sync_and_wait();
+        } else if (strncmp(line, "copy", 4) == 0) {
+            if (sscanf(line + 4, "%d", &n) != 1) n = 3;
+            dev_copy_notes(n);
+        } else if (strcmp(line, "sync") == 0) {
+            dev_sync_and_wait();
+        } else if (strncmp(line, "rec", 3) == 0 && strncmp(line, "rec-", 4) != 0) {
+            // "rec [seconds]": record without the key (default: until stopped)
+            unsigned long seconds = kMaxRecordingSeconds;
+            if (sscanf(line + 3, "%lu", &seconds) != 1) seconds = kMaxRecordingSeconds;
+            char command[32];
+            snprintf(command, sizeof(command), "@audio-record\n%lu", seconds);
+            start_recording(command);
+            ESP_LOGW(kTag, "DEV record requested (%lu s)", seconds);
+        } else if (strcmp(line, "rec-stop") == 0) {
+            stop_recording();
+            ESP_LOGW(kTag, "DEV stop requested");
+        } else if (strcmp(line, "rec-pause") == 0) {
+            toggle_pause_recording();
+            ESP_LOGW(kTag, "DEV pause toggled");
+        } else if (strcmp(line, "play") == 0) {
+            start_playback();
+            ESP_LOGW(kTag, "DEV play requested");
+        } else if (strcmp(line, "play-stop") == 0) {
+            if (playback_active.load()) playback_stop_requested = true;
+            ESP_LOGW(kTag, "DEV play-stop requested");
+        } else if (strncmp(line, "key ", 4) == 0) {
+            // "key tap" or "key hold <seconds>": press the real key, so its own rules apply
+            float seconds = 0.12f;
+            if (strncmp(line + 4, "hold", 4) == 0 && sscanf(line + 8, "%f", &seconds) != 1) seconds = 1.2f;
+            dev_key_down = true;
+            vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(seconds * 1000)));
+            dev_key_down = false;
+            ESP_LOGW(kTag, "DEV key pressed for %.2f s", seconds);
+        } else if (strncmp(line, "delete ", 7) == 0) {
+            const unsigned long id = strtoul(line + 7, nullptr, 10);
+            if (id == 0 || audio_busy || recording_active || circuit_sync::is_open()) {
+                ESP_LOGW(kTag, "DEV delete refused (busy or no number)");
+            } else {
+                ESP_LOGW(kTag, "DEV deleted note %lu: %s", id,
+                    circuit_notes::remove_note(static_cast<uint32_t>(id)) ? "removed" : "was already gone");
+            }
+        } else if (strcmp(line, "list") == 0) {
+            for (uint32_t id = circuit_notes::newest_id(); id > 0 && id + 12 > circuit_notes::newest_id(); --id) {
+                circuit_notes::Note note;
+                if (circuit_notes::describe(id, &note)) {
+                    ESP_LOGW(kTag, "DEV note %lu: %lu bytes, %s", static_cast<unsigned long>(id),
+                        static_cast<unsigned long>(note.bytes), note.synced ? "synced" : "waiting");
+                }
+            }
+            ESP_LOGW(kTag, "DEV list done");
+        } else if (strcmp(line, "status") == 0) {
+            circuit_sync::log_heap("dev status");
+            ESP_LOGW(kTag, "DEV status: waiting=%u recording=%d paused=%d playing=%d sync_open=%d", 
+                static_cast<unsigned>(circuit_notes::count_unsynced()), recording_active ? 1 : 0,
+                recording_paused ? 1 : 0, playback_active.load() ? 1 : 0, circuit_sync::is_open() ? 1 : 0);
+        } else if (line[0] != '\0') {
+            ESP_LOGW(kTag, "DEV unknown command '%s' (copy N, copy-sync N, sync, status)", line);
+        }
+    }
+}
+#endif
+
 void force_sync_task(void *) {
     update_storage_status("Force sync requested\nStarting sync…");
     report_audio_status("Force sync requested");
@@ -1643,7 +1784,10 @@ void record_button_task(void *) {
     TickType_t pressed_at = 0;
     bool hold_handled = false;
     while (true) {
-        const bool is_pressed = gpio_get_level(kRecordButtonPin) == 0;
+        bool is_pressed = gpio_get_level(kRecordButtonPin) == 0;
+#ifdef CIRCUIT_DEV_CONSOLE
+        if (dev_key_down.load()) is_pressed = true;
+#endif
         if (is_pressed && !was_pressed) {
             vTaskDelay(kButtonDebounceDelay);
             if (gpio_get_level(kRecordButtonPin) == 0) {
@@ -2379,6 +2523,10 @@ extern "C" void app_main(void) {
     ESP_LOGI(kTag, "Start-up done; internal RAM free %u, largest block %u",
         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+    circuit_sync::log_heap("start-up done");
+#ifdef CIRCUIT_DEV_CONSOLE
+    xTaskCreate(dev_console_task, "dev_console", 6144, nullptr, 3, nullptr);
+#endif
     if (esp_ble_get_bond_device_num() == 0) {
         if (boot_splash) show_pairing_code();
     } else {

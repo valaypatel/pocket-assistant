@@ -1144,6 +1144,13 @@ extension _ScPages on _CircuitHomePageState {
       ),
     ],
     const SizedBox(height: 24),
+    const ScGroupLabel('Testing'),
+    ScRow(
+      title: 'Test mode',
+      caption: 'Lets a computer start syncs, playback and recordings over USB or Wi-Fi debugging',
+      trailing: Switch(value: _testMode, onChanged: _setTestMode),
+    ),
+    const SizedBox(height: 24),
     const ScGroupLabel('You'),
     ScRow(
       title: 'Your name',

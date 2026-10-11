@@ -37,6 +37,7 @@ part 'ui/pages.dart';
 part 'ui/recording_view.dart';
 part 'ui/song_page.dart';
 part 'ui/theme.dart';
+part 'test_control.dart';
 part 'ui/status_overlay.dart';
 
 const _circuitName = 'Circuit';
@@ -1072,6 +1073,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   bool _autoEnrich =
       true; // AI review (title, summary, tags, actions) after a transcript
   bool _shareDiagnostics = true;
+  bool _testMode = false; // lets adb drive the app, see test_control.dart
   bool _geminiConnected = false;
   bool _aiConnected = false;
   bool _musicConnected = false;
@@ -1167,6 +1169,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     _nowPlaying.addListener(_publishStatusUi);
     _phoneRecording.addListener(_publishStatusUi);
     _restoreLastCircuit();
+    _initTestControl();
     _loadNotes().then((_) {
       _reconcileSyncedNotes();
       _listenForPhoneRecording();
