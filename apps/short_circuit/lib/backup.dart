@@ -24,9 +24,26 @@ class BackupException implements Exception {
 }
 
 class BackupAudio {
-  const BackupAudio(this.name, this.bytes);
+  /// A recording held in memory (what a restore reads back).
+  const BackupAudio(this.name, Uint8List this.bytes)
+    : file = null,
+      _fileLength = 0;
+
+  /// A recording still on disk: it is read a piece at a time while the backup is written, so a
+  /// big library is never held in memory whole.
+  const BackupAudio.file(this.name, File this.file, int length)
+    : bytes = null,
+      _fileLength = length;
+
   final String name;
-  final Uint8List bytes;
+  final Uint8List? bytes;
+  final File? file;
+  final int _fileLength;
+
+  int get length => bytes?.length ?? _fileLength;
+
+  Stream<List<int>> open() =>
+      bytes != null ? Stream.value(bytes!) : file!.openRead();
 }
 
 class BackupData {
@@ -93,29 +110,35 @@ class BackupCodec {
   static int _read32(List<int> b, int at) =>
       b[at] | (b[at + 1] << 8) | (b[at + 2] << 16) | (b[at + 3] << 24);
 
-  static Uint8List _plain(BackupData data) {
-    final manifest = utf8.encode(
-      jsonEncode({
-        'version': 1,
-        'createdAt': DateTime.now().toIso8601String(),
-        'notes': data.notes,
-        if (data.tasks != null) 'tasks': data.tasks,
-        if (data.groups != null) 'groups': data.groups,
-        'chats': data.chats,
-        'noteKeys': data.noteKeys,
-        'audio': [
-          for (final a in data.audio)
-            {'name': a.name, 'length': a.bytes.length},
-        ],
-      }),
-    );
-    final out = BytesBuilder(copy: false)
-      ..add(_u32(manifest.length))
-      ..add(manifest);
+  static List<int> _manifest(BackupData data) => utf8.encode(
+    jsonEncode({
+      'version': 1,
+      'createdAt': DateTime.now().toIso8601String(),
+      'notes': data.notes,
+      if (data.tasks != null) 'tasks': data.tasks,
+      if (data.groups != null) 'groups': data.groups,
+      'chats': data.chats,
+      'noteKeys': data.noteKeys,
+      'audio': [
+        for (final a in data.audio) {'name': a.name, 'length': a.length},
+      ],
+    }),
+  );
+
+  /// More recordings than this and a backup is refused: the finished file (and, on restore, the
+  /// file plus what is read from it) has to fit in the phone's memory.
+  static const maxAudioBytes = 400 * 1024 * 1024;
+
+  /// The plaintext, a piece at a time: the manifest's length and text, then each recording.
+  static Stream<List<int>> _plainStream(
+    List<int> manifest,
+    BackupData data,
+  ) async* {
+    yield _u32(manifest.length);
+    yield manifest;
     for (final a in data.audio) {
-      out.add(a.bytes);
+      yield* a.open();
     }
-    return out.takeBytes();
   }
 
   static BackupData _parse(Uint8List plain) {
@@ -187,22 +210,59 @@ class BackupCodec {
       ..._u32(_chunkSize),
     ]);
     final key = await _key(passphrase, salt, iterations);
-    final plain = _plain(data);
-    final chunks = max(1, (plain.length + _chunkSize - 1) ~/ _chunkSize);
+    final manifest = _manifest(data);
+    // The size is known before anything is read, so the last chunk can be marked as the last.
+    final total =
+        4 +
+        manifest.length +
+        data.audio.fold<int>(0, (sum, a) => sum + a.length);
+    final chunks = max(1, (total + _chunkSize - 1) ~/ _chunkSize);
     final out = BytesBuilder(copy: false)..add(header);
-    for (var i = 0; i < chunks; i++) {
-      final start = i * _chunkSize;
-      final end = min(plain.length, start + _chunkSize);
+
+    var index = 0;
+    var read = 0;
+    final chunk = Uint8List(_chunkSize);
+    var filled = 0;
+    Future<void> seal(int length) async {
+      if (index >= chunks)
+        throw const BackupException(
+          'A recording changed while backing up. Try again.',
+        );
       final box = await _gcm.encrypt(
-        Uint8List.sublistView(plain, start, end),
+        Uint8List.sublistView(chunk, 0, length),
         secretKey: key,
-        nonce: [...prefix, ..._u32(i)],
-        aad: [...header, ..._u32(i), if (i == chunks - 1) 1 else 0],
+        nonce: [...prefix, ..._u32(index)],
+        aad: [...header, ..._u32(index), if (index == chunks - 1) 1 else 0],
       );
       out
         ..add(box.cipherText)
         ..add(box.mac.bytes);
+      index++;
     }
+
+    await for (final piece in _plainStream(manifest, data)) {
+      var from = 0;
+      while (from < piece.length) {
+        final take = min(piece.length - from, _chunkSize - filled);
+        chunk.setRange(filled, filled + take, piece, from);
+        filled += take;
+        from += take;
+        read += take;
+        if (filled == _chunkSize) {
+          await seal(_chunkSize);
+          filled = 0;
+        }
+      }
+    }
+    if (read != total)
+      throw const BackupException(
+        'A recording changed while backing up. Try again.',
+      );
+    if (filled > 0 || index == 0) await seal(filled);
+    if (index != chunks)
+      throw const BackupException(
+        'A recording changed while backing up. Try again.',
+      );
     return out.takeBytes();
   }
 
@@ -307,7 +367,7 @@ class BackupStore {
           final name = _basename(path);
           copy['audioPath'] = name;
           if (names.add(name)) {
-            audio.add(BackupAudio(name, await file.readAsBytes()));
+            audio.add(BackupAudio.file(name, file, await file.length()));
           }
         }
         // A long note is several files; each goes in, in order.
@@ -318,7 +378,7 @@ class BackupStore {
           final name = _basename(partPath);
           partNames.add(name);
           if (names.add(name)) {
-            audio.add(BackupAudio(name, await part.readAsBytes()));
+            audio.add(BackupAudio.file(name, part, await part.length()));
           }
         }
         if (partNames.length > 1) copy['audioParts'] = partNames;
@@ -386,7 +446,8 @@ class BackupStore {
     final added = <Map<String, dynamic>>[];
     var skipped = 0;
     final audioByName = {
-      for (final a in data.audio) _basename(a.name): a.bytes,
+      for (final a in data.audio)
+        if (a.bytes != null) _basename(a.name): a.bytes!,
     };
     await filesDir.create(recursive: true);
     for (final note in data.notes) {

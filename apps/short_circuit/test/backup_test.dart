@@ -86,6 +86,52 @@ void main() {
       expect(back.audio.single.bytes, big);
     });
 
+    test(
+      'a recording read from disk makes the same backup as one in memory',
+      () async {
+        final tmp = Directory.systemTemp.createTempSync('backup-stream');
+        addTearDown(() => tmp.deleteSync(recursive: true));
+        final big = Uint8List.fromList(
+          List.generate((1 << 20) * 2 + 77, (i) => i * 7),
+        );
+        final small = Uint8List.fromList([4, 5, 6]);
+        final bigFile = File('${tmp.path}/big')..writeAsBytesSync(big);
+        final smallFile = File('${tmp.path}/small')..writeAsBytesSync(small);
+        final file = await BackupCodec.encode(
+          BackupData(
+            audio: [
+              BackupAudio.file('big', bigFile, big.length),
+              BackupAudio.file('small', smallFile, small.length),
+            ],
+          ),
+          _pass,
+          iterations: 10,
+        );
+        final back = await BackupCodec.decode(file, _pass);
+        expect(back.audio.map((a) => a.name), ['big', 'small']);
+        expect(back.audio[0].bytes, big);
+        expect(back.audio[1].bytes, small);
+      },
+    );
+
+    test(
+      'a recording that changes while the backup is written is caught',
+      () async {
+        final tmp = Directory.systemTemp.createTempSync('backup-change');
+        addTearDown(() => tmp.deleteSync(recursive: true));
+        final f = File('${tmp.path}/a')..writeAsBytesSync([1, 2, 3, 4]);
+        // The backup was told the file is longer than it is.
+        expect(
+          BackupCodec.encode(
+            BackupData(audio: [BackupAudio.file('a', f, 9)]),
+            _pass,
+            iterations: 10,
+          ),
+          throwsA(isA<BackupException>()),
+        );
+      },
+    );
+
     test('the wrong passphrase is refused', () async {
       final file = await BackupCodec.encode(
         BackupData(notes: [_note('n1')]),
@@ -170,7 +216,14 @@ void main() {
 
         final data = await BackupStore.collect();
         expect(data.notes.single['audioPath'], 'circuit-note-1-7.cnote');
-        expect(data.audio.single.bytes, [9, 8, 7]);
+        // The recording stays on disk until the backup is written; it is not read into memory here.
+        expect(data.audio.single.bytes, isNull);
+        expect(data.audio.single.length, 3);
+        expect(await data.audio.single.open().expand((b) => b).toList(), [
+          9,
+          8,
+          7,
+        ]);
         expect(data.chats.keys, ['n1']);
         expect(data.noteKeys.keys, ['000000ab']);
         expect(jsonEncode(data.noteKeys), isNot(contains('SECRET')));
