@@ -73,6 +73,13 @@ class _BackupPageState extends State<BackupPage> {
     setState(() => _busy = true);
     try {
       final data = await BackupStore.collect(includeAudio: _includeAudio);
+      final audioBytes = data.audio.fold<int>(0, (sum, a) => sum + a.length);
+      if (audioBytes > BackupCodec.maxAudioBytes) {
+        return _snack(
+          'Your recordings come to ${audioBytes ~/ (1024 * 1024)} MB, too much for one backup file on this phone. '
+          'Turn off "Include recordings" to back up the notes, or delete old recordings first.',
+        );
+      }
       final file = await BackupCodec.encode(
         data,
         _passphrase.text,
