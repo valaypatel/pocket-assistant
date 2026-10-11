@@ -397,6 +397,9 @@ inline bool open_session(uint16_t *port, char *token, size_t token_size, const c
     config.prvtkey_len = strlen(s.key_pem) + 1;
     config.port_secure = s.port;
     config.httpd.stack_size = 10240;
+    // The server's stack lives in PSRAM: internal RAM is the scarce part during a sync. Nothing the
+    // server task runs writes flash (the certificate is stored by the task that opens the session).
+    config.httpd.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     config.httpd.max_open_sockets = 2;
     config.httpd.lru_purge_enable = true;
     config.httpd.recv_wait_timeout = 10;
