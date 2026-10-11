@@ -166,6 +166,11 @@ def main():
         return send("clock-skew " + args[1], "DEV clock-skew", 10)
     if cmd == "rtc-lose":
         return send("rtc-lose", "DEV rtc-lose", 10)
+    if cmd == "lower-tap":
+        what = " ".join(args[1:]) if len(args) > 1 else ""
+        return send(("lower-tap " + what).strip(), "DEV lower key pressed", 15)
+    if cmd == "moments" and len(args) > 1:
+        return send("moments " + args[1], "DEV moments of note", 10)
     if cmd == "lower":
         return send("lower", "DEV lower:", 10)
     if cmd == "resend":

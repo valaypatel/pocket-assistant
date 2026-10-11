@@ -10,6 +10,8 @@
 //                                 recording. <first> is the number of the recording's first part
 //                                 (its recording ID), <part> counts from 1, <final> is 1 on the
 //                                 last part. Parts are ordinary notes with consecutive numbers.
+//   /sdcard/NOTES/N0000001.MOM   sealed list of the moments (bookmarks) added during this part, see
+//                                 circuit_moments.h. Removed with the note.
 //
 // 8.3 names keep this independent of long-filename support. A note's recording
 // time is the file's modification time. Notes are never deleted by the firmware
@@ -287,6 +289,8 @@ inline bool remove_note(uint32_t id) {
     path_for(id, "SYN", path, sizeof(path));
     remove(path);
     path_for(id, "PRT", path, sizeof(path));
+    remove(path);
+    path_for(id, "MOM", path, sizeof(path));
     remove(path);
     return removed;
 }

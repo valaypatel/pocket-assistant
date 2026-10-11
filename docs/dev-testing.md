@@ -9,6 +9,10 @@ board_dev.py build      # development firmware, in build-dev/
 board_dev.py flash      # stops the log capture, flashes, restarts it
 board_dev.py status | list | rec [S] | rec-pause | rec-stop | play | play-stop
 board_dev.py key tap | key hold S      # the real key logic: 1 s pauses, 2 s forces a sync
+board_dev.py lower-tap [hold S]        # the lower key: a tap while recording adds a Moment
+board_dev.py moments ID                # opens the sealed Moments file of note ID and prints its offsets (ms)
+board_dev.py lower                     # lower key (GPIO18) level and the presses seen
+board_dev.py rtc | rtc-lose | clock-skew N   # RTC chip against the system clock; wipe the clock and restart; skew it
 board_dev.py copy [N] | sync | copy-sync [N] | delete ID
 ```
 
@@ -27,7 +31,21 @@ Each command brings the app to the front, which also makes it reconnect to Circu
 
 **Typical run:** `board_dev.py copy-sync 3`, then `app_dev.py state`, then `app_dev.py delete-from <first copy number>`.
 
-## Regression test
+## Quick regression
+
+`firmware/CircuitBleDisplay/tools/quick_regression.py` is the check to run after any firmware change. It needs
+only the board (development firmware on USB, logger running, ESP-IDF python) and takes about 80 seconds:
+record, pause, resume and stop; playback; recording over playback; Moments (taps saved, sealed, read back,
+none when not recording); the lower key; the RTC chip and its restore after the clock is wiped; no panic;
+cleanup of its own notes. Prints PASS/FAIL per check, exit code 1 on any failure.
+
+```
+~/.espressif/python_env/idf5.5_py3.9_env/bin/python firmware/CircuitBleDisplay/tools/quick_regression.py
+```
+
+Use the full regression below only for changes to sync, the app link or the recording join, and before a release.
+
+## Regression test (full)
 
 `firmware/CircuitBleDisplay/tools/regression.py` runs everything above in one go, about 25 minutes: record,
 pause, resume and stop; playback; the priority rules (record over playback, a key tap during a sync, a
