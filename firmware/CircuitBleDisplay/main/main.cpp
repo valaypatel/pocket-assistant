@@ -50,6 +50,7 @@
 #include "circuit_recording_icon.h"
 #include "circuit_crypto.h"
 #include "circuit_notes.h"
+#include "circuit_rtc.h"
 #include "circuit_selftest_vector.h"
 #include "circuit_sync_server.h"
 
@@ -304,6 +305,7 @@ void set_clock_from_phone(time_t epoch, int offset_minutes) {
     timeval tv = {.tv_sec = epoch, .tv_usec = 0};
     settimeofday(&tv, nullptr);
     clock_set = true;
+    circuit_rtc::write(epoch);  // so the next power-up starts with the right time
 }
 
 // Shows a 24-hour time as 12-hour "H:MM" with a small AM/PM beside it.
@@ -410,6 +412,32 @@ void restore_home_screen() {
     ESP_LOGI(kTag, "Home restored: counts=%s clock=%s", have_saved ? "saved" : "none", clock_kept ? "kept" : "unknown");
 }
 
+// The real-time clock chip keeps UTC while the board is off. Use it when the system clock was lost
+// (power was cut). Needs the codec started first: that is what opens the I2C bus.
+void restore_clock_from_rtc() {
+    circuit_rtc::init();
+    time_t from_chip = 0;
+    const bool chip_ok = circuit_rtc::read(&from_chip, kMinValidEpoch);
+    const time_t now = time(nullptr);
+    if (chip_ok && now < kMinValidEpoch) {
+        timeval tv = {.tv_sec = from_chip, .tv_usec = 0};
+        settimeofday(&tv, nullptr);
+        clock_set = true;
+        if (Lvgl_lock(-1)) {
+            show_local_time(from_chip);
+            Lvgl_unlock();
+        }
+        ESP_LOGW(kTag, "Clock restored from the RTC chip: %lld", static_cast<long long>(from_chip));
+    } else {
+        ESP_LOGW(kTag, "RTC chip: %s; system clock %s", chip_ok ? "holds a time" : "has no valid time",
+            now >= kMinValidEpoch ? "kept" : "not set");
+        // The system clock was kept but the chip is empty or behind: teach the chip.
+        if (now >= kMinValidEpoch && (!chip_ok || from_chip + 120 < now || from_chip > now + 120)) {
+            circuit_rtc::write(now);
+        }
+    }
+}
+
 void update_home_status(const char *value) {
     char buffer[kMaxTextBytes + 1];
     strncpy(buffer, value, sizeof(buffer) - 1);
@@ -423,8 +451,14 @@ void update_home_status(const char *value) {
     const char *offset = strtok_r(nullptr, "\n", &save);
     if (time == nullptr || date == nullptr || counts == nullptr) return;
     // First time source wins; after that Circuit keeps time on its own.
-    if (!clock_set && epoch != nullptr && offset != nullptr) {
-        set_clock_from_phone(strtoll(epoch, nullptr, 10), atoi(offset));
+    if (epoch != nullptr && offset != nullptr) {
+        const time_t phone_now = static_cast<time_t>(strtoll(epoch, nullptr, 10));
+        const time_t board_now = ::time(nullptr);
+        // Set it when none is set yet, or when the board is off by more than two minutes (the RTC
+        // or the clock drifted, or the RTC held an old value). Small differences are left alone.
+        if (!clock_set || (phone_now >= kMinValidEpoch && (phone_now > board_now ? phone_now - board_now : board_now - phone_now) > 120)) {
+            set_clock_from_phone(phone_now, atoi(offset));
+        }
     }
     // The phone repeats this message often. Touching the labels redraws the whole
     // e-paper, so do nothing when it matches what is already shown.
@@ -1843,6 +1877,27 @@ void dev_console_task(void *) {
             ESP_LOGW(kTag, "DEV crash requested");
             vTaskDelay(pdMS_TO_TICKS(200));
             esp_restart();
+        } else if (strcmp(line, "rtc") == 0) {
+            time_t chip = 0;
+            const bool chip_ok = circuit_rtc::read(&chip, kMinValidEpoch);
+            const time_t now = time(nullptr);
+            ESP_LOGW(kTag, "DEV rtc: chip=%s %lld, system=%lld, difference=%lld s, clock_set=%d",
+                chip_ok ? "valid" : "invalid", static_cast<long long>(chip), static_cast<long long>(now),
+                static_cast<long long>(now - chip), clock_set ? 1 : 0);
+        } else if (strncmp(line, "clock-skew ", 11) == 0) {
+            // Moves the system clock by N seconds (the RTC chip is left alone): the phone must put it right.
+            timeval tv = {};
+            gettimeofday(&tv, nullptr);
+            tv.tv_sec += atoi(line + 11);
+            settimeofday(&tv, nullptr);
+            ESP_LOGW(kTag, "DEV clock-skew: system clock moved by %d s", atoi(line + 11));
+        } else if (strcmp(line, "rtc-lose") == 0) {
+            // Like a power cut for the clock: forget the system time (the chip keeps its own), then restart.
+            timeval tv = {.tv_sec = 100, .tv_usec = 0};
+            settimeofday(&tv, nullptr);
+            ESP_LOGW(kTag, "DEV rtc-lose: system clock wiped, restarting");
+            vTaskDelay(pdMS_TO_TICKS(300));
+            esp_restart();
         } else if (strcmp(line, "lower") == 0) {
             ESP_LOGW(kTag, "DEV lower: GPIO18 level=%d (0 = pressed), GPIO17 level=%d, presses=%u, longest=%u ms, held now=%d",
                 gpio_get_level(kLowerKeyPin), gpio_get_level(kPowerLatchPin),
@@ -2007,6 +2062,7 @@ void check_wifi_internet() {
 void on_sntp_sync(timeval *) {
     // One sync is enough; the system clock keeps time from here.
     clock_set = true;
+    circuit_rtc::write(time(nullptr));
     esp_sntp_stop();
 }
 
@@ -2668,6 +2724,7 @@ extern "C" void app_main(void) {
     restore_home_screen();
     init_sd_card();
     Codec_StartInit();
+    restore_clock_from_rtc();
     audio_ready = true;
     init_record_button();
     xTaskCreate(demo_animation_task, "demo_animation", 3072, nullptr, 2, nullptr);
