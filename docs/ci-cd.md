@@ -178,11 +178,12 @@ git tag app-v1.0.1 && git push origin app-v1.0.1             # Short-Circuit APK
 git tag firmware-v0.2.0 && git push origin firmware-v0.2.0   # Circuit firmware files
 ```
 
-Flash a firmware release with its three files, each at its own address:
+Flash a firmware release with its files, each at its own address (`ota_data_initial.bin` makes the board boot the app slot you just wrote):
 
 ```bash
 esptool.py --chip esp32s3 write_flash \
-  0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 circuit-app-<version>.bin
+  0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 circuit-app-<version>.bin \
+  0x650000 ota_data_initial.bin
 ```
 
 This writes only those regions. The board's saved Wi-Fi, pairing and notes key live
@@ -190,6 +191,25 @@ in flash at `0x9000`, between the partition table and the app, and are left alon
 **Do not flash a single merged image at `0x0`, and do not run `erase_flash`:** a
 merged image is blank between its parts, so either one wipes that region. Notes
 sealed with the wiped key could then only be opened by a phone that already holds it.
+
+### Flash layout (8 MB)
+
+The board has 8 MB of flash. The layout (`firmware/CircuitBleDisplay/partitions.csv`) is:
+
+| Region | Address | Size |
+|---|---|---|
+| `nvs` (Wi-Fi, pairing, notes key) | `0x9000` | `0x6000` |
+| `phy_init` | `0xf000` | `0x1000` |
+| `ota_0` (the app is flashed here) | `0x10000` | `0x320000` |
+| `ota_1` (second app slot for updates) | `0x330000` | `0x320000` |
+| `otadata` | `0x650000` | `0x2000` |
+
+`nvs` and the app address are unchanged from the old 4 MB layout, so the commands above still
+apply. A board still on the old 4 MB layout takes the new partition table over USB once (the same
+files, including `ota_data_initial.bin`: `flash_args` in the build folder lists all four). The notes key is not
+touched by that. This was checked by reading the `nvs` region before and after: identical.
+The flash script also writes `--flash_size 8MB`, so a board that really has only 4 MB of flash is
+not supported.
 
 ## Flashing a build from GitHub
 

@@ -1,4 +1,9 @@
-# Name,   Type, SubType, Offset,  Size
-nvs,      data, nvs,     0x9000,  0x6000
-phy_init, data, phy,     0xf000,  0x1000
-factory,  app,  factory, 0x10000, 0x3F0000
+# Name,   Type, SubType, Offset,   Size
+# 8 MB flash. nvs (Wi-Fi, pairing, note key) and phy_init stay exactly where they were, and the
+# first app slot stays at 0x10000, so existing boards keep their key and the flash addresses in
+# tools/flash-release.sh and docs/ci-cd.md stay valid. A board with no otadata boots ota_0.
+nvs,      data, nvs,     0x9000,   0x6000
+phy_init, data, phy,     0xf000,   0x1000
+ota_0,    app,  ota_0,   0x10000,  0x320000
+ota_1,    app,  ota_1,   0x330000, 0x320000
+otadata,  data, ota,     0x650000, 0x2000

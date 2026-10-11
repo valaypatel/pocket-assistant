@@ -160,6 +160,8 @@ def main():
     if cmd == "key":
         what = " ".join(args[1:]) if len(args) > 1 else "tap"
         return send("key " + what, "DEV key pressed", 15)
+    if cmd == "lower":
+        return send("lower", "DEV lower:", 10)
     if cmd == "resend":
         return send("resend", ("SYNCSTAT", "0 file(s)"), 900)
     if cmd == "logtail":
