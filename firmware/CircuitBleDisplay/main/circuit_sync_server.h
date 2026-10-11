@@ -26,6 +26,8 @@
 #include <cstring>
 #include <sys/socket.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_https_server.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -297,7 +299,23 @@ inline esp_err_t note_handler(httpd_req_t *req) {
     }
     esp_err_t status = ESP_OK;
     size_t read = 0;
-    while ((read = fread(buffer, 1, kChunkBytes, file)) > 0) {
+    uint32_t position = start;
+    int read_failures = 0;
+    while (true) {
+        read = fread(buffer, 1, kChunkBytes, file);
+        if (read == 0) {
+            // A read that fails while internal RAM is nearly gone (the SD driver cannot get its small
+            // buffer) looks like the end of the file. Wait a moment and read the same place again.
+            if (ferror(file) && position < note.bytes && ++read_failures <= 5) {
+                clearerr(file);
+                vTaskDelay(pdMS_TO_TICKS(60));
+                fseek(file, position, SEEK_SET);
+                continue;
+            }
+            break;
+        }
+        read_failures = 0;
+        position += read;
         status = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer), read);
         if (status != ESP_OK) break;
         state.last_activity_ms = now_ms();
