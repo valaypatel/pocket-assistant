@@ -367,6 +367,7 @@ extension _ScPages on _CircuitHomePageState {
           status: note.status,
           transcript: note.transcript ?? '',
           onForceTranscribe: _transcribeNote,
+          onSyncNote: _syncLatestRecording,
           audioPath: note.audioPath,
           onPlayNote: _playSyncedNote,
           playerBar: _nowPlayingBar,

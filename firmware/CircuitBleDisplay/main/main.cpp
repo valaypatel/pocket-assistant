@@ -1438,7 +1438,7 @@ bool can_offer_wifi_sync() {
 }
 
 // Opens a session and hands the phone what it needs over the bonded BLE link.
-bool offer_wifi_sync() {
+bool offer_wifi_sync(uint32_t only_recording = 0) {
     char ip[16];
     uint16_t port = 0;
     char token[33];
@@ -1448,7 +1448,7 @@ bool offer_wifi_sync() {
     circuit_sync::state.on_progress = wifi_sync_progress;
     sync_ui_percent = -1;
     sync_ui_shown = -1;
-    if (!circuit_sync::open_session(&port, token, sizeof(token), &fingerprint, &count, &bytes)) return false;
+    if (!circuit_sync::open_session(&port, token, sizeof(token), &fingerprint, &count, &bytes, only_recording)) return false;
     if (audio_busy) {  // a recording started while the session was opening: it wins
         circuit_sync::close_session();
         return false;
@@ -1526,13 +1526,14 @@ void end_wifi_sync() {
         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+    const bool session_done = circuit_sync::waiting_in_session() == 0;  // before the session forgets which recording
     circuit_sync::close_session();
     sync_ui_percent = -1;
     if (served == 0) {  // the phone never connected: back off, and say so if the screen is showing sync
         if (active_screen == DeviceScreen::Syncing) flash_sync_result("ERR");
         return;
     }
-    const bool complete = circuit_notes::count_unsynced() == 0;
+    const bool complete = session_done;
     if (Lvgl_lock(-1)) {
         lv_label_set_text(sync_progress_label, complete ? "100%" : "ERR");
         Lvgl_unlock();
@@ -1556,7 +1557,7 @@ void sync_supervisor_task(void *) {
             esp_wifi_connect();
         }
         if (circuit_sync::is_open()) {
-            const bool all_synced = circuit_sync::state.acked > 0 && circuit_notes::count_unsynced() == 0;
+            const bool all_synced = circuit_sync::state.acked > 0 && circuit_sync::waiting_in_session() == 0;
             if (all_synced || circuit_sync::expired() || connection_id == UINT16_MAX) {
                 end_wifi_sync();
             } else if (circuit_sync::state.client_ip == 0 && ble_encrypted &&
@@ -1576,16 +1577,25 @@ void sync_supervisor_task(void *) {
 
 // `forced` is the device button: it falls back to BLE when Wi-Fi sync is not
 // possible. The app can only ask for Wi-Fi sync.
-void start_audio_sync(bool forced) {
+// `only_recording` (the app's "sync this note") limits the sync to that recording; 0 syncs everything.
+void start_audio_sync(bool forced, uint32_t only_recording = 0) {
     if (!free_audio_from_playback()) {  // playing a note gives way; a recording does not
         report_audio_status("Audio is busy");
         return;
     }
-    ESP_LOGI(kTag, "Sync requested (%s): %u note(s) waiting", forced ? "button" : "app",
-        static_cast<unsigned>(circuit_notes::count_unsynced()));
-    if (circuit_notes::count_unsynced() == 0) {
+    ESP_LOGI(kTag, "Sync requested (%s%s): %u file(s) waiting", forced ? "button" : "app",
+        only_recording != 0 ? ", one recording" : "",
+        static_cast<unsigned>(circuit_notes::count_unsynced_of(only_recording)));
+    if (circuit_notes::count_unsynced_of(only_recording) == 0) {
         update_storage_status("Nothing to sync");
-        report_audio_status("Sync: no new notes");
+        if (only_recording != 0) {
+            // Not "no new notes": that tells the app nothing at all is waiting.
+            char text[48];
+            snprintf(text, sizeof(text), "Sync: nothing waiting for #%lu", static_cast<unsigned long>(only_recording));
+            report_audio_status(text);
+        } else {
+            report_audio_status("Sync: no new notes");
+        }
         if (forced) flash_sync_result("OK");  // everything is already on the phone
         return;
     }
@@ -1593,7 +1603,7 @@ void start_audio_sync(bool forced) {
         report_audio_status("Sync already in progress");
         return;
     }
-    if (offer_wifi_sync()) {
+    if (offer_wifi_sync(only_recording)) {
         if (forced) {  // show progress right away; the phone connects within a second or two
             show_device_screen(DeviceScreen::Syncing);
             if (Lvgl_lock(-1)) {
@@ -1906,6 +1916,9 @@ void text_display_task(void *) {
                 else report_audio_status("Playback stopped");
             } else if (strcmp(message.value, "@audio-sync") == 0) {
                 start_audio_sync(false);
+            } else if (strncmp(message.value, "@audio-sync\n", 12) == 0) {
+                // "@audio-sync\n<recording number>": sync just that note (all its parts).
+                start_audio_sync(false, static_cast<uint32_t>(strtoul(message.value + 12, nullptr, 10)));
             } else if (strcmp(message.value, "@audio-clear") == 0) {
                 if (audio_busy) {
                     report_audio_status("Audio is busy");

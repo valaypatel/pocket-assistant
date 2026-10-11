@@ -318,6 +318,7 @@ class TranscriptPage extends StatefulWidget {
     required this.status,
     required this.transcript,
     required this.onForceTranscribe,
+    this.onSyncNote,
     required this.audioPath,
     required this.onPlayNote,
     this.playerBar,
@@ -344,6 +345,9 @@ class TranscriptPage extends StatefulWidget {
   final String status;
   final String transcript;
   final Future<GeminiTranscription?> Function(String noteId) onForceTranscribe;
+
+  /// Asks Circuit to send just this note. Shown while the note has no audio on the phone yet.
+  final Future<void> Function(String noteId)? onSyncNote;
   final String? audioPath;
   final Future<void> Function(String? path) onPlayNote;
 
@@ -607,6 +611,24 @@ class _TranscriptPageState extends State<TranscriptPage> {
               ),
             ),
             const SizedBox(height: 20),
+            if ((live?.audioPath ?? widget.audioPath) == null &&
+                widget.onSyncNote != null) ...[
+              ScButton(
+                label: 'Sync this note from Circuit',
+                icon: LucideIcons.refreshCw,
+                busy:
+                    status.startsWith('Sync queued') ||
+                    status.startsWith('Receiving') ||
+                    status.startsWith('Waiting for part'),
+                onPressed: () => widget.onSyncNote!(widget.noteId),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Only this note is sent. Hold Circuit\'s button for 2 seconds to send everything.',
+                style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.4),
+              ),
+              const SizedBox(height: 20),
+            ],
             if (widget.audioPath != null) ...[
               ScPanel(
                 color: Sc.surface,

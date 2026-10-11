@@ -2044,6 +2044,23 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       }
       return;
     }
+    if (status.startsWith('Sync: nothing waiting for #')) {
+      // Asked for one note and Circuit has nothing waiting for it (it may have synced already).
+      // Unlike "no new notes" this says nothing about the other notes, so nothing is pruned.
+      final noteId = _syncingNoteId;
+      setState(() {
+        _audioBusy = false;
+        _syncActive = false;
+        _syncingNoteId = null;
+        _syncProgress = null;
+      });
+      if (noteId != null) {
+        unawaited(
+          _setNoteStatus(noteId, 'Circuit has nothing waiting for this note.'),
+        );
+      }
+      return;
+    }
     if (status.startsWith('Sync: no new notes')) {
       // Circuit has nothing waiting.
       setState(() {
@@ -2130,6 +2147,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         if (waiting == 0) {
           _waitingSince = null;
           if (!_syncActive) _syncError = null; // everything made it across
+          unawaited(_pruneLostNotes());
         }
         _boardWaiting = waiting;
       }
@@ -2222,6 +2240,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   );
 
   Future<void> _pruneLostNotes() async {
+    // Only when Circuit itself says nothing at all is waiting. A sync of one note ends with the
+    // same "saved" message, and the other notes are then still on the board.
+    if (_boardWaiting != 0) return;
     final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
     final lost = _notesWithoutAudio(cutoff)
         .where(
@@ -2468,7 +2489,14 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     _lastSyncActivity = DateTime.now();
     _syncActive = true;
     try {
-      await _writeCircuit('@audio-sync');
+      // Ask for just this note (all its parts) when Circuit gave it a number; an older board
+      // ignores the number and sends everything waiting.
+      final boardId = _boardIdOf(
+        _notes.where((n) => n.id == noteId).firstOrNull,
+      );
+      await _writeCircuit(
+        boardId == null ? '@audio-sync' : '@audio-sync\n$boardId',
+      );
     } catch (error) {
       _audioBusy = false;
       _syncingNoteId = null;
