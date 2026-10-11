@@ -8,6 +8,40 @@ part of '../main.dart';
 final ValueNotifier<Widget?> statusPill = ValueNotifier(null);
 final ValueNotifier<Widget?> statusSnack = ValueNotifier(null);
 
+/// False while a page (a note's own page, say) is open over Home. On the main pages the playback
+/// bar is part of the page's bottom area (above Capture a thought), so nothing is covered; on a
+/// pushed page, which has no such area, the overlay floats it just above the bottom edge.
+final ValueNotifier<bool> statusOnTabPage = ValueNotifier(true);
+
+/// Watches the pages pushed over Home so the snackbar knows where the bottom of the screen is.
+class StatusRouteObserver extends NavigatorObserver {
+  void _set(Route<dynamic>? top) {
+    final onTabPage = top == null || top.isFirst || top is! PageRoute;
+    if (statusOnTabPage.value == onTabPage) return;
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => statusOnTabPage.value = onTabPage,
+    );
+  }
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      _set(route);
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      _set(previousRoute);
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      _set(previousRoute);
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) =>
+      _set(newRoute);
+}
+
+final statusRouteObserver = StatusRouteObserver();
+
 /// True while a sheet that sits where the pill is (the full recording view) is open.
 final ValueNotifier<bool> statusPillHidden = ValueNotifier(false);
 
@@ -15,8 +49,6 @@ class StatusOverlay extends StatelessWidget {
   const StatusOverlay({super.key, required this.child});
 
   final Widget child;
-
-  static const _navigationHeight = 92.0;
 
   @override
   Widget build(BuildContext context) {
@@ -58,15 +90,15 @@ class StatusOverlay extends StatelessWidget {
           ),
         ),
         Positioned(
-          bottom: media.padding.bottom + _navigationHeight,
+          bottom: media.padding.bottom + 16,
           left: 12,
           right: 12,
           child: Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 640),
-              child: ValueListenableBuilder<Widget?>(
-                valueListenable: statusSnack,
-                builder: (context, snack, _) => AnimatedSwitcher(
+              child: ListenableBuilder(
+                listenable: Listenable.merge([statusSnack, statusOnTabPage]),
+                builder: (context, _) => AnimatedSwitcher(
                   duration: still
                       ? Duration.zero
                       : const Duration(milliseconds: 220),
@@ -80,7 +112,10 @@ class StatusOverlay extends StatelessWidget {
                       child: child,
                     ),
                   ),
-                  child: snack ?? const SizedBox.shrink(key: ValueKey('none')),
+                  child: statusOnTabPage.value
+                      ? const SizedBox.shrink(key: ValueKey('none'))
+                      : (statusSnack.value ??
+                            const SizedBox.shrink(key: ValueKey('none'))),
                 ),
               ),
             ),

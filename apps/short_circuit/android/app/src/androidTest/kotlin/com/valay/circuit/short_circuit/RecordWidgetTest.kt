@@ -61,7 +61,16 @@ class RecordWidgetTest {
         else Log.e(tag, "no add button found; screen: " + device.findObjects(By.pkg(device.currentPackageName)).take(40)
             .joinToString { "${it.className}:${it.text ?: it.contentDescription}" })
         device.wait(Until.gone(By.text("Cancel")), 6000)
-        return device.wait(Until.findObject(By.text("Record a note")), 10000)
+        device.wait(Until.findObject(By.text("Record a note")), 10000)?.let { return it }
+        // Some launchers (Samsung One UI) put a new widget on another home page when the current one
+        // is full. Look through the pages, a swipe at a time, before giving up.
+        repeat(4) { page ->
+            device.swipe(device.displayWidth * 9 / 10, device.displayHeight / 2, device.displayWidth / 10, device.displayHeight / 2, 20)
+            device.waitForIdle()
+            Log.i(tag, "looking on home page ${page + 2}")
+            device.wait(Until.findObject(By.text("Record a note")), 2500)?.let { return it }
+        }
+        return null
     }
 
     private fun dumpScreen(why: String) {

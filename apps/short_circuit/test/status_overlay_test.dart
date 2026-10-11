@@ -7,6 +7,7 @@ void main() {
     statusPill.value = null;
     statusSnack.value = null;
     statusPillHidden.value = false;
+    statusOnTabPage.value = true;
   });
 
   Widget app() => MaterialApp(
@@ -63,6 +64,8 @@ void main() {
   ) async {
     var stopped = 0;
     await tester.pumpWidget(app());
+    statusOnTabPage.value =
+        false; // the overlay shows playback on a pushed page
     statusPill.value = StatusPillBar(
       icon: Icons.sync,
       title: 'Syncing from Circuit · 40%',
@@ -80,5 +83,43 @@ void main() {
     expect(find.text('Playing on Circuit · 0:12'), findsOneWidget);
     await tester.tap(find.text('Stop'));
     expect(stopped, 1);
+  });
+
+  testWidgets('the overlay shows playback only on a pushed page', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorObservers: [statusRouteObserver],
+        builder: (context, child) => StatusOverlay(child: child!),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const Scaffold(body: Text('detail')),
+                ),
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      ),
+    );
+    statusSnack.value = StatusSnackBar(
+      icon: Icons.graphic_eq,
+      text: 'Playing on Circuit',
+      onAction: () {},
+    );
+    await tester.pumpAndSettle();
+    // Home owns its bottom area (the page shows the bar there), so the overlay stays out of it.
+    expect(find.byType(StatusSnackBar), findsNothing);
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    expect(find.text('detail'), findsOneWidget);
+    expect(find.byType(StatusSnackBar), findsOneWidget);
+    Navigator.of(tester.element(find.text('detail'))).pop();
+    await tester.pumpAndSettle();
+    expect(find.byType(StatusSnackBar), findsNothing);
   });
 }
