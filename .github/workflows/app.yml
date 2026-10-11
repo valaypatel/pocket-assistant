@@ -114,10 +114,12 @@ jobs:
             name="$(sed -nE 's/^version: *([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)"
           fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
-          # Always above any build made by hand (those use small numbers, 1 to a few hundred), so an
-          # update from App Distribution or a release is never refused as a downgrade, and rising
-          # each run.
-          echo "number=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
+          # The time, in 10-second steps since 2026-01-01 UTC (apps/short_circuit/tool/build_number.sh
+          # does the same for a build made by hand). Whichever build was made last has the higher
+          # number, so an update from App Distribution or a release is never refused as a downgrade,
+          # which would force an uninstall and wipe the app's settings. It is always above the old
+          # "1000 + run number" builds already out there.
+          echo "number=$(( ($(date -u +%s) - 1767225600) / 10 ))" >> "$GITHUB_OUTPUT"
 
       - name: Set up signing
         id: signing

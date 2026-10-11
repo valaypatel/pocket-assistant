@@ -142,11 +142,13 @@ updates in place and keeps its notes, settings and pairing. For that reason the 
 needs Android 9 or later (`minSdk = 28`) and is signed with the v3 scheme only,
 which is the one that carries the proof. The old key is not needed again.
 
-CI builds are numbered `1000 + the run number`, so they are always above a build made by
-hand (those use small numbers: pass `--build-number` below 1000 to `flutter build`). Android
-refuses to install a lower number over a higher one, so an update from App Distribution or a
-release is never refused as a downgrade. If a phone has a CI or released build, install the
-next one from CI too (a hand-made build with a number below it would be refused). If the rotation secret
+Every build is numbered by the time it was made (10-second steps since 2026-01-01 UTC), by CI
+and by hand alike, so the build made last always has the higher number. Android refuses to
+install a lower number over a higher one, and the only way round that is to uninstall, which
+wipes the app's settings, keys and notes. So never pick a number yourself: a build made by hand
+for a phone uses `flutter build apk --release --build-number="$(tool/build_number.sh)"`. (Builds
+before 7 October 2026 were `1000 + the run number`; the time-based numbers are far above them.)
+If the rotation secret
 (`ANDROID_LINEAGE_BASE64`) is ever missing, the build warns, and the APK will not
 update an app that was installed signed with the previous key.
 
