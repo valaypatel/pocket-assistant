@@ -26,6 +26,7 @@ part 'circuit_playback.dart';
 part 'groups.dart';
 part 'long_notes.dart';
 part 'music.dart';
+part 'note_dates.dart';
 part 'note_source.dart';
 part 'now_playing.dart';
 part 'phone_recording.dart';
@@ -1106,6 +1107,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   final Map<String, DateTime> _enrichLastAttempt = {};
   // Notes deleted in the app whose copy on Circuit still has to be removed.
   final Set<int> _pendingBoardDeletes = {};
+  NoteDeleteChoice?
+  _pendingDeleteChoice; // what the person picked in the delete dialog
   DateTime? _lastBoardDeleteSent;
   String? _lastHomeCounts;
   DateTime? _lastHomeSentAt;
@@ -2684,10 +2687,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     });
   }
 
-  Future<void> _deleteNote(String id) async {
+  Future<void> _deleteNote(String id, {bool phoneOnly = false}) async {
     final note = _notes.where((item) => item.id == id).firstOrNull;
     final boardId = _boardIdOf(note);
-    if (boardId != null) {
+    // "Phone only" leaves Circuit's copy on its card: it is already marked synced there, so it
+    // is not sent again unless the person asks for old notes to be re-sent.
+    if (boardId != null && !phoneOnly) {
       _pendingBoardDeletes.add(boardId);
       // A recording made of parts is deleted on Circuit part by part.
       _pendingBoardDeletes.addAll(await _boardPartIds(note));
@@ -3008,6 +3013,40 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       }
     } finally {
       _identifyingSongs.remove(id);
+    }
+  }
+
+  /// Asks Circuit to offer every note on its card again, including ones already synced. Notes this
+  /// phone still has are not downloaded a second time; ones it no longer has (deleted on the phone
+  /// only, or lost) come back.
+  Future<void> _resendCircuitNotes() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Send old notes again?'),
+        content: const Text(
+          'Circuit offers every note still on its card. Notes you deleted from this phone only will '
+          'come back; notes already here are skipped.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Send again'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _writeCircuit('@notes-resend');
+      _setStatus('Asking Circuit to offer its old notes again…');
+    } catch (error) {
+      _setStatus('Could not ask Circuit: $error');
     }
   }
 

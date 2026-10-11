@@ -323,6 +323,7 @@ class TranscriptPage extends StatefulWidget {
     required this.onPlayNote,
     this.playerBar,
     required this.onDeleteNote,
+    this.onDeletePhoneOnly,
     required this.onCreateReminder,
     required this.onAddTask,
     this.summary,
@@ -356,6 +357,9 @@ class TranscriptPage extends StatefulWidget {
   /// the app so it is the same bar as on Home and Notes. It appears only while something plays.
   final Widget Function()? playerBar;
   final Future<void> Function(String noteId) onDeleteNote;
+
+  /// Set for a note that is also on Circuit: deletes only the phone's copy.
+  final Future<void> Function(String noteId)? onDeletePhoneOnly;
   final Future<ReminderDraft?> Function(String transcript) onCreateReminder;
   final Future<void> Function(String title, String? detail) onAddTask;
   final String? summary;
@@ -564,9 +568,16 @@ class _TranscriptPageState extends State<TranscriptPage> {
   }
 
   Future<void> _delete() async {
-    final confirmed = await _confirmDeleteNote(context);
-    if (!confirmed || !mounted) return;
-    await widget.onDeleteNote(widget.noteId);
+    final choice = await _chooseNoteDelete(
+      context,
+      fromCircuit: widget.onDeletePhoneOnly != null,
+    );
+    if (choice == null || !mounted) return;
+    if (choice == NoteDeleteChoice.phoneOnly) {
+      await widget.onDeletePhoneOnly!(widget.noteId);
+    } else {
+      await widget.onDeleteNote(widget.noteId);
+    }
     if (mounted) Navigator.pop(context);
   }
 

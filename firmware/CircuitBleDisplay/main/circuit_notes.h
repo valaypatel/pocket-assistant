@@ -293,6 +293,46 @@ inline bool remove_note(uint32_t id) {
 
 // Deletes notes the app has confirmed (the file and its marker) and returns how
 // many were removed. Notes still waiting to sync are never touched.
+// Removes the oldest recording (every part of it) that the phone has confirmed, to make room on the
+// card. A recording with any part still waiting is never touched. Returns how many notes it removed,
+// 0 when nothing is old enough to go.
+inline size_t remove_oldest_synced_recording() {
+    uint32_t oldest = 0;
+    for_each_note([&](uint32_t id) {
+        Note note;
+        if (!describe(id, &note) || !note.synced) return;
+        if (count_unsynced_of(recording_of(id)) != 0) return;
+        if (oldest == 0 || id < oldest) oldest = id;
+    });
+    if (oldest == 0) return 0;
+    const uint32_t recording = recording_of(oldest);
+    uint32_t doomed[128];
+    size_t count = 0;
+    for_each_note([&](uint32_t id) {
+        if (count < 128 && recording_of(id) == recording) doomed[count++] = id;
+    });
+    size_t removed = 0;
+    for (size_t i = 0; i < count; ++i) removed += remove_note(doomed[i]) ? 1 : 0;
+    return removed;
+}
+
+// Forgets which notes the phone has confirmed, so every note on the card is offered again.
+// Returns how many notes were marked unsynced.
+inline size_t mark_all_unsynced() {
+    uint32_t ids[256];
+    size_t count = 0;
+    for_each_note([&](uint32_t id) {
+        if (count < 256) ids[count++] = id;
+    });
+    size_t changed = 0;
+    for (size_t i = 0; i < count; ++i) {
+        char marker[48];
+        path_for(ids[i], "SYN", marker, sizeof(marker));
+        if (unlink(marker) == 0) ++changed;
+    }
+    return changed;
+}
+
 inline size_t clean_synced() {
     uint32_t doomed[128];
     size_t count = 0;

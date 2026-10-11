@@ -209,3 +209,13 @@ extension _BoardParts on _CircuitHomePageState {
     return ids;
   }
 }
+
+extension ArrivingNote on CircuitNote {
+  /// A long recording from Circuit that is still collecting its parts. It is kept out of the lists
+  /// and counts until the whole recording is here, so nothing half-arrived is shown.
+  bool get isArriving =>
+      audioPath == null &&
+      boardId != null &&
+      (status.startsWith('Waiting for part') ||
+          status.startsWith('Receiving '));
+}

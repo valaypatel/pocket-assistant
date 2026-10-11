@@ -430,7 +430,7 @@ extension _ScGroupUi on _CircuitHomePageState {
   // ---- the Groups row
 
   Widget _groupsRow() {
-    final spoken = _notes.where((n) => !n.isSong).toList();
+    final spoken = _notes.where((n) => !n.isSong && !n.isArriving).toList();
     if (_selecting || spoken.isEmpty) return const SizedBox.shrink();
     Widget card(String id, String name, int count, double width) => Semantics(
       button: true,
@@ -474,7 +474,8 @@ extension _ScGroupUi on _CircuitHomePageState {
                         ),
                       ),
                       Text(
-                        '$count note${count == 1 ? '' : 's'}',
+                        // Songs are not in a group, so the count is of spoken notes.
+                        '$count ${id == allNotesGroupId ? 'voice ' : ''}note${count == 1 ? '' : 's'}',
                         style: const TextStyle(color: Sc.faint, fontSize: 11),
                       ),
                     ],
@@ -493,7 +494,11 @@ extension _ScGroupUi on _CircuitHomePageState {
     final all = <(String, String, int)>[
       (allNotesGroupId, 'All notes', spoken.length),
       for (final g in _groups)
-        (g.id, g.name, _notesOfGroup(g).where((n) => !n.isSong).length),
+        (
+          g.id,
+          g.name,
+          _notesOfGroup(g).where((n) => !n.isSong && !n.isArriving).length,
+        ),
     ];
     final shown = _groupsExpanded ? all : all.take(maxShown).toList();
     return Column(
