@@ -9,6 +9,7 @@ class SongPage extends StatefulWidget {
     required this.onIdentify,
     required this.onPlay,
     required this.onDelete,
+    this.onDeletePhoneOnly,
     required this.onOpenSettings,
     required this.onUseAsNote,
     this.openLink,
@@ -19,6 +20,7 @@ class SongPage extends StatefulWidget {
   final Future<void> Function(String id) onIdentify;
   final Future<void> Function(String? path) onPlay;
   final Future<void> Function(String id) onDelete;
+  final Future<void> Function(String id)? onDeletePhoneOnly;
   final VoidCallback onOpenSettings;
 
   /// Turns a clip wrongly taken for a song back into a voice note.
@@ -51,9 +53,16 @@ class _SongPageState extends State<SongPage> {
   }
 
   Future<void> _delete() async {
-    final confirmed = await _confirmDeleteNote(context);
-    if (!confirmed || !mounted) return;
-    await widget.onDelete(widget.noteId);
+    final choice = await _chooseNoteDelete(
+      context,
+      fromCircuit: widget.onDeletePhoneOnly != null,
+    );
+    if (choice == null || !mounted) return;
+    if (choice == NoteDeleteChoice.phoneOnly) {
+      await widget.onDeletePhoneOnly!(widget.noteId);
+    } else {
+      await widget.onDelete(widget.noteId);
+    }
     if (mounted) Navigator.pop(context);
   }
 

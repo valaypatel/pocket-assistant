@@ -826,6 +826,19 @@ uint64_t sd_free_bytes() {
     return esp_vfs_fat_info(kSdMountPath, &total, &free_bytes) == ESP_OK ? free_bytes : 0;
 }
 
+// Frees room on the card by removing the oldest recordings the phone has confirmed, until there is
+// twice the minimum free. Notes still waiting to sync are never removed. False if that was not
+// enough.
+bool free_card_room() {
+    const uint64_t target = 2 * kMinFreeCardBytes;
+    while (sd_free_bytes() < target) {
+        const size_t removed = circuit_notes::remove_oldest_synced_recording();
+        if (removed == 0) return false;
+        ESP_LOGW(kTag, "Card nearly full: removed %u synced note(s) to make room", static_cast<unsigned>(removed));
+    }
+    return true;
+}
+
 // A recording is stored as one-minute parts: ordinary encrypted notes with consecutive numbers,
 // each marked (circuit_notes.h, .PRT) with the number of the recording's first part, its own
 // position and whether it is the last. The phone joins them into one note. A short recording
@@ -838,7 +851,7 @@ void record_audio_task(void *argument) {
         finish_audio_task();
         return;
     }
-    if (sd_free_bytes() < kMinFreeCardBytes) {
+    if (sd_free_bytes() < kMinFreeCardBytes && !free_card_room()) {
         update_storage_status("Card is full\nFree some space");
         report_audio_status("Recording failed: the card is full");
         finish_audio_task();
@@ -933,7 +946,7 @@ void record_audio_task(void *argument) {
             }
             circuit_notes::write_group(current_id, {first_id, part, false});
             previous_id = current_id;
-            if (sd_free_bytes() < kMinFreeCardBytes) {
+            if (sd_free_bytes() < kMinFreeCardBytes && !free_card_room()) {
                 card_full = true;
                 break;
             }
@@ -1714,6 +1727,10 @@ void dev_console_task(void *) {
         } else if (strncmp(line, "copy", 4) == 0) {
             if (sscanf(line + 4, "%d", &n) != 1) n = 3;
             dev_copy_notes(n);
+        } else if (strcmp(line, "resend") == 0) {
+            ESP_LOGW(kTag, "DEV marked %u note(s) to be sent again",
+                static_cast<unsigned>(circuit_notes::mark_all_unsynced()));
+            xTaskCreate(dev_sync_task, "dev_sync", 6144, nullptr, 4, nullptr);
         } else if (strcmp(line, "sync") == 0) {
             xTaskCreate(dev_sync_task, "dev_sync", 6144, nullptr, 4, nullptr);
         } else if (strncmp(line, "rec", 3) == 0 && strncmp(line, "rec-", 4) != 0) {
@@ -2107,6 +2124,14 @@ void text_display_task(void *) {
                     snprintf(result, sizeof(result), "Note deleted #%lu", id);
                 }
                 report_audio_status(result);
+            } else if (strcmp(message.value, "@notes-resend") == 0) {
+                if (audio_busy || recording_active || circuit_sync::is_open()) {
+                    report_audio_status("Cannot resend notes while recording or syncing");
+                } else {
+                    const size_t marked = circuit_notes::mark_all_unsynced();
+                    ESP_LOGI(kTag, "Marked %u note(s) to be sent again", static_cast<unsigned>(marked));
+                    start_audio_sync(false);
+                }
             } else if (strcmp(message.value, "@notes-clean") == 0) {
                 if (audio_busy || recording_active || circuit_sync::is_open()) {
                     report_audio_status("Cannot clean notes while recording or syncing");

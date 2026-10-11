@@ -16,6 +16,7 @@
   board_dev.py key hold [S]     hold the real key for S seconds (1 s pauses, 2 s forces a sync)
   board_dev.py list             the newest notes on the card and whether each is waiting or synced
   board_dev.py delete ID        delete one note from the card (only while idle)
+  board_dev.py resend           mark every note unsynced and sync them all again (what "Send old notes again" does)
   board_dev.py crash            restart the board at once, like a power cut (nothing gets to finish)
 
 The console only exists in the development build; release firmware ignores these commands.
@@ -158,6 +159,8 @@ def main():
     if cmd == "key":
         what = " ".join(args[1:]) if len(args) > 1 else "tap"
         return send("key " + what, "DEV key pressed", 15)
+    if cmd == "resend":
+        return send("resend", "DEV sync ended", 600)
     if cmd == "crash":
         return send("crash", "DEV crash requested", 10)
     if cmd == "list":

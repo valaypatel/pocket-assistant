@@ -37,27 +37,56 @@ String _dayLabel(DateTime value) {
   return '${local.day} ${_months[local.month - 1].substring(0, 3)}';
 }
 
-Future<bool> _confirmDeleteNote(BuildContext context) async =>
-    await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Delete this note?'),
-        content: const Text(
-          'This removes only the phone copy. Circuit keeps nothing once a note is synced.',
-        ),
-        actions: scDialogActions(
-          dialogContext,
-          confirmIcon: LucideIcons.trash2,
-          confirmTooltip: 'Delete note',
-          danger: true,
-          onCancel: () => Navigator.pop(dialogContext, false),
-          onConfirm: () => Navigator.pop(dialogContext, true),
-        ),
+/// What to delete when a note that came from Circuit is deleted in the app.
+enum NoteDeleteChoice { everywhere, phoneOnly }
+
+/// Asks before a note is deleted. A note that came from Circuit also lives on Circuit's card, so
+/// the person chooses between deleting it everywhere and deleting only the phone's copy.
+/// Returns null if they cancel.
+Future<NoteDeleteChoice?> _chooseNoteDelete(
+  BuildContext context, {
+  bool fromCircuit = false,
+}) => showDialog<NoteDeleteChoice>(
+  context: context,
+  builder: (dialogContext) => AlertDialog(
+    title: const Text('Delete this note?'),
+    content: Text(
+      fromCircuit
+          ? 'It is also on Circuit\'s card. Delete it there too, or keep it on Circuit and remove only the phone copy?'
+          : 'This cannot be undone.',
+    ),
+    actionsOverflowDirection: VerticalDirection.down,
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(dialogContext),
+        child: const Text('Cancel'),
       ),
-    ) ??
-    false;
+      if (fromCircuit)
+        TextButton(
+          onPressed: () =>
+              Navigator.pop(dialogContext, NoteDeleteChoice.phoneOnly),
+          child: const Text('Phone only'),
+        ),
+      TextButton(
+        style: TextButton.styleFrom(foregroundColor: Sc.danger),
+        onPressed: () =>
+            Navigator.pop(dialogContext, NoteDeleteChoice.everywhere),
+        child: Text(fromCircuit ? 'Everywhere' : 'Delete'),
+      ),
+    ],
+  ),
+);
 
 extension _ScPages on _CircuitHomePageState {
+  Future<bool> _confirmDeleteListNote(CircuitNote note) async {
+    final choice = await _chooseNoteDelete(
+      context,
+      fromCircuit: _boardIdOf(note) != null,
+    );
+    _pendingDeleteChoice = choice;
+    return choice != null;
+  }
+
   /// Circuit is connected right now. The background service merely running does not count:
   /// it also runs while it is still trying, and then nothing can be sent or received.
   bool get _circuitAvailable =>
@@ -351,6 +380,9 @@ extension _ScPages on _CircuitHomePageState {
             onIdentify: _identifySongNote,
             onPlay: _playSyncedNote,
             onDelete: _deleteNote,
+            onDeletePhoneOnly: _boardIdOf(note) == null
+                ? null
+                : (id) => _deleteNote(id, phoneOnly: true),
             onOpenSettings: _openMusicSettings,
             onUseAsNote: (id) => _transcribeNote(id, asSpeech: true),
           ),
@@ -371,6 +403,9 @@ extension _ScPages on _CircuitHomePageState {
           audioPath: note.audioPath,
           onPlayNote: _playSyncedNote,
           onDeleteNote: _deleteNote,
+          onDeletePhoneOnly: _boardIdOf(note) == null
+              ? null
+              : (id) => _deleteNote(id, phoneOnly: true),
           onCreateReminder: _extractReminder,
           onAddTask: (title, detail) => _addTask(title, detail: detail),
           summary: note.summary,
@@ -494,9 +529,11 @@ extension _ScPages on _CircuitHomePageState {
 
   List<Widget> _homePage() {
     final now = DateTime.now();
-    final attention = _notes.where(_noteNeedsAttention).toList();
+    final attention = _notes
+        .where((n) => !n.isArriving && _noteNeedsAttention(n))
+        .toList();
     final open = _tasks.where((task) => !task.done).toList();
-    final recent = _notes.take(3).toList();
+    final recent = _notes.where((n) => !n.isArriving).take(3).toList();
     return [
       Row(
         children: [
@@ -703,7 +740,10 @@ extension _ScPages on _CircuitHomePageState {
 
   List<Widget> _notesPage() {
     final query = _noteSearchController.text.trim().toLowerCase();
-    final inSource = _notes
+    // A long recording still collecting its parts is not shown, or counted, until it is whole.
+    final shownNotes = _notes.where((note) => !note.isArriving).toList();
+    final arriving = _notes.length - shownNotes.length;
+    final inSource = shownNotes
         .where((note) => noteMatchesSource(note, _noteSource))
         .toList();
     final visibleNotes = query.isEmpty
@@ -724,9 +764,10 @@ extension _ScPages on _CircuitHomePageState {
           }).toList();
     // Review items are displayed in the queue above; exclude them from the
     // library list so a recording never appears as two cards.
-    final libraryNotes = visibleNotes
-        .where((note) => !_noteNeedsAttention(note))
-        .toList();
+    final libraryNotes =
+        visibleNotes.where((note) => !_noteNeedsAttention(note)).toList()
+          ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final now = DateTime.now();
     return [
       if (_selecting)
         _selectionHeader()
@@ -763,16 +804,25 @@ extension _ScPages on _CircuitHomePageState {
                 ),
         ),
       ),
-      if (_notes.isNotEmpty) ...[
+      if (shownNotes.isNotEmpty) ...[
         const SizedBox(height: 12),
         NoteSourceFilter(
           selected: _noteSource,
           counts: {
-            noteSourceAll: _notes.length,
-            'Phone': _notes.where((n) => n.source == 'Phone').length,
-            'Circuit': _notes.where((n) => n.source == 'Circuit').length,
+            noteSourceAll: shownNotes.length,
+            'Phone': shownNotes.where((n) => n.source == 'Phone').length,
+            'Circuit': shownNotes.where((n) => n.source == 'Circuit').length,
           },
           onChanged: (choice) => _update(() => _noteSource = choice),
+        ),
+      ],
+      if (arriving > 0) ...[
+        const SizedBox(height: 12),
+        Text(
+          arriving == 1
+              ? 'A longer recording is still arriving from Circuit. It appears here when all of it is on your phone.'
+              : '$arriving longer recordings are still arriving from Circuit. They appear here when all of each is on your phone.',
+          style: const TextStyle(color: Sc.muted, fontSize: 13),
         ),
       ],
       const SizedBox(height: 14),
@@ -797,8 +847,11 @@ extension _ScPages on _CircuitHomePageState {
                 ),
                 child: const Icon(LucideIcons.trash2, color: Sc.danger),
               ),
-              confirmDismiss: (_) => _confirmDeleteNote(context),
-              onDismissed: (_) => _deleteNote(note.id),
+              confirmDismiss: (_) => _confirmDeleteListNote(note),
+              onDismissed: (_) => _deleteNote(
+                note.id,
+                phoneOnly: _pendingDeleteChoice == NoteDeleteChoice.phoneOnly,
+              ),
               child: _noteTile(note, actions: true),
             ),
           ),
@@ -819,7 +872,16 @@ extension _ScPages on _CircuitHomePageState {
               : 'Try another word or search tag.',
         )
       else
-        for (final note in libraryNotes) ...[
+        for (final (index, note) in libraryNotes.indexed) ...[
+          if (index == 0 ||
+              noteAge(note.createdAt.toLocal(), now) !=
+                  noteAge(
+                    libraryNotes[index - 1].createdAt.toLocal(),
+                    now,
+                  )) ...[
+            if (index > 0) const SizedBox(height: 8),
+            ScGroupLabel(noteAge(note.createdAt.toLocal(), now).label),
+          ],
           _selectableNote(
             note,
             Dismissible(
@@ -834,8 +896,11 @@ extension _ScPages on _CircuitHomePageState {
                 ),
                 child: const Icon(LucideIcons.trash2, color: Sc.danger),
               ),
-              confirmDismiss: (_) => _confirmDeleteNote(context),
-              onDismissed: (_) => _deleteNote(note.id),
+              confirmDismiss: (_) => _confirmDeleteListNote(note),
+              onDismissed: (_) => _deleteNote(
+                note.id,
+                phoneOnly: _pendingDeleteChoice == NoteDeleteChoice.phoneOnly,
+              ),
               child: _noteTile(note),
             ),
           ),
@@ -1519,6 +1584,18 @@ extension _ScPages on _CircuitHomePageState {
                     !_recordingAudio &&
                     _circuitPlayback == CircuitPlaybackPhase.idle
                 ? _cleanCircuitNotes
+                : null,
+          ),
+          ScIconButton(
+            icon: LucideIcons.refreshCw,
+            tooltip: 'Send old notes again',
+            caption: 'Send again',
+            onPressed:
+                available &&
+                    !_audioBusy &&
+                    !_recordingAudio &&
+                    _circuitPlayback == CircuitPlaybackPhase.idle
+                ? _resendCircuitNotes
                 : null,
           ),
           if (_relayActive)
