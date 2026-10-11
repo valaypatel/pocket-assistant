@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -130,6 +131,38 @@ void main() {
           throwsA(isA<BackupException>()),
         );
       },
+    );
+
+    test(
+      'a 24 MB recording on disk is backed up and restored intact',
+      () async {
+        final tmp = Directory.systemTemp.createTempSync('backup-big');
+        addTearDown(() => tmp.deleteSync(recursive: true));
+        // 24 whole chunks and a partial one, with content that does not repeat.
+        final size = (1 << 20) * 24 + 12345;
+        final f = File('${tmp.path}/big.cnote');
+        final sink = f.openWrite();
+        var seed = 12345;
+        for (var done = 0; done < size; done += 65536) {
+          final n = min(65536, size - done);
+          final block = Uint8List(n);
+          for (var i = 0; i < n; i++) {
+            seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+            block[i] = seed >> 16;
+          }
+          sink.add(block);
+        }
+        await sink.close();
+        final file = await BackupCodec.encode(
+          BackupData(audio: [BackupAudio.file('big.cnote', f, size)]),
+          _pass,
+          iterations: 10,
+        );
+        final back = await BackupCodec.decode(file, _pass);
+        expect(back.audio.single.bytes!.length, size);
+        expect(back.audio.single.bytes, f.readAsBytesSync());
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
     );
 
     test('the wrong passphrase is refused', () async {
