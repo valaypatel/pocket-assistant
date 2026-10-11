@@ -117,18 +117,6 @@ extension _NowPlayingControls on _CircuitHomePageState {
   }
 
   /// The bar when something plays, or nothing.
-  Widget _nowPlayingBar() => ValueListenableBuilder<NowPlaying?>(
-    valueListenable: _nowPlaying,
-    builder: (context, playing, _) => playing == null
-        ? const SizedBox.shrink()
-        : NowPlayingBar(
-            playing: playing,
-            onPause: _pauseNowPlaying,
-            onResume: _resumeNowPlaying,
-            onStop: _stopNowPlaying,
-            onSeek: _seekNowPlaying,
-          ),
-  );
 }
 
 String nowPlayingClock(int milliseconds) {
