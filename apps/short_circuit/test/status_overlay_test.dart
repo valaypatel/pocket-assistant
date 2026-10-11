@@ -81,4 +81,44 @@ void main() {
     await tester.tap(find.text('Stop'));
     expect(stopped, 1);
   });
+
+  testWidgets('the snackbar drops to the bottom edge on a pushed page', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorObservers: [statusRouteObserver],
+        builder: (context, child) => StatusOverlay(child: child!),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const Scaffold(body: Text('detail')),
+                ),
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      ),
+    );
+    statusSnack.value = StatusSnackBar(
+      icon: Icons.graphic_eq,
+      text: 'Playing on Circuit',
+      onAction: () {},
+    );
+    await tester.pumpAndSettle();
+    final homeY = tester.getBottomLeft(find.byType(StatusSnackBar)).dy;
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    expect(find.text('detail'), findsOneWidget);
+    expect(
+      tester.getBottomLeft(find.byType(StatusSnackBar)).dy,
+      greaterThan(homeY),
+    );
+    Navigator.of(tester.element(find.text('detail'))).pop();
+    await tester.pumpAndSettle();
+    expect(tester.getBottomLeft(find.byType(StatusSnackBar)).dy, homeY);
+  });
 }

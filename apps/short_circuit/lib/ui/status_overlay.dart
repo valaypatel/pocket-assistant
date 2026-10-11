@@ -14,6 +14,39 @@ final ValueNotifier<double> statusSnackLift = ValueNotifier(
   StatusOverlay._navigationHeight,
 );
 
+/// False while a page (a note's own page, say) is open over Home: that page has no navigation
+/// bar or Capture button, so the snackbar floats just above the bottom edge instead.
+final ValueNotifier<bool> statusOnTabPage = ValueNotifier(true);
+
+/// Watches the pages pushed over Home so the snackbar knows where the bottom of the screen is.
+class StatusRouteObserver extends NavigatorObserver {
+  void _set(Route<dynamic>? top) {
+    final onTabPage = top == null || top.isFirst || top is! PageRoute;
+    if (statusOnTabPage.value == onTabPage) return;
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => statusOnTabPage.value = onTabPage,
+    );
+  }
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      _set(route);
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      _set(previousRoute);
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      _set(previousRoute);
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) =>
+      _set(newRoute);
+}
+
+final statusRouteObserver = StatusRouteObserver();
+
 /// True while a sheet that sits where the pill is (the full recording view) is open.
 final ValueNotifier<bool> statusPillHidden = ValueNotifier(false);
 
@@ -63,10 +96,12 @@ class StatusOverlay extends StatelessWidget {
             ),
           ),
         ),
-        ValueListenableBuilder<double>(
-          valueListenable: statusSnackLift,
-          builder: (context, lift, child) => Positioned(
-            bottom: media.padding.bottom + lift,
+        ListenableBuilder(
+          listenable: Listenable.merge([statusSnackLift, statusOnTabPage]),
+          builder: (context, child) => Positioned(
+            bottom:
+                media.padding.bottom +
+                (statusOnTabPage.value ? statusSnackLift.value : 16),
             left: 12,
             right: 12,
             child: child!,

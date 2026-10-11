@@ -1029,6 +1029,7 @@ class ShortCircuitApp extends StatelessWidget {
     return MaterialApp(
       title: 'Short-Circuit',
       theme: buildScTheme(),
+      navigatorObservers: [statusRouteObserver],
       builder: (context, child) =>
           StatusOverlay(child: child ?? const SizedBox.shrink()),
       home: const CircuitHomePage(),
