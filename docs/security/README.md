@@ -64,6 +64,26 @@ implementation is `docs/security/reference/note_format.py`, which also writes
 (and refuses to record if that fails), and the app's tests open the same files, so
 the two implementations are held to the same bytes.
 
+## Moments (`.MOM`)
+
+A tap on the lower key during a recording adds a Moment, a bookmark. Each one-minute part
+that has any gets a small file next to it on the SD card, `N0000141.MOM`, holding the
+Moments' offsets in milliseconds from the start of that part (pauses are not counted).
+It is an ordinary CNT1 file sealed with the notes key, so the card still holds only
+ciphertext. Differences from an audio note:
+
+- the **note id in the header is the part's note number OR `0x80000000`**. The nonce is the
+  note id plus the chunk number, so without the flag the file's first chunk would reuse the
+  audio's nonce under the same key. Note numbers stay far below 2^31, so a flagged number
+  can never meet a real note. A reader must check that the header names the note the file
+  belongs to, so a Moments file moved to another note does not open.
+- sample rate, channels and bits are all 0.
+- the payload is a `u32` count (at most 120) then that many `u32` offsets, in recording order.
+
+The firmware writes and reads it in `circuit_moments.h`, and removes it with its note. The
+sync does not send it yet, and the app does not show Moments yet. The reference
+implementation and test vector for this file follow with the app side.
+
 ## Recordings made on the phone
 
 A voice note recorded on the phone itself uses the same format and the same rules, with

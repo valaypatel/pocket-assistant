@@ -49,7 +49,9 @@
 #include "circuit_demo_screens.h"
 #include "circuit_recording_icon.h"
 #include "circuit_crypto.h"
+#include "circuit_moments.h"
 #include "circuit_notes.h"
+#include "circuit_rtc.h"
 #include "circuit_selftest_vector.h"
 #include "circuit_sync_server.h"
 
@@ -82,6 +84,11 @@ constexpr size_t kAudioPacketBytes = 158;
 // The upper side button is the BOOT button (GPIO0). The lower GPIO18 button
 // is power-related, so it deliberately remains outside the audio controls.
 constexpr gpio_num_t kRecordButtonPin = GPIO_NUM_0;
+// The lower key (GPIO18). A short press during a recording adds a Moment. Longer than this is not a tap.
+#ifndef CIRCUIT_DEV_CONSOLE
+constexpr gpio_num_t kLowerKeyPin = GPIO_NUM_18;
+#endif
+constexpr TickType_t kLowerTapMaxTime = pdMS_TO_TICKS(600);
 constexpr TickType_t kButtonPollInterval = pdMS_TO_TICKS(20);
 constexpr TickType_t kButtonDebounceDelay = pdMS_TO_TICKS(50);
 constexpr TickType_t kForceSyncHoldTime = pdMS_TO_TICKS(2000);
@@ -304,6 +311,7 @@ void set_clock_from_phone(time_t epoch, int offset_minutes) {
     timeval tv = {.tv_sec = epoch, .tv_usec = 0};
     settimeofday(&tv, nullptr);
     clock_set = true;
+    circuit_rtc::write(epoch);  // so the next power-up starts with the right time
 }
 
 // Shows a 24-hour time as 12-hour "H:MM" with a small AM/PM beside it.
@@ -410,6 +418,32 @@ void restore_home_screen() {
     ESP_LOGI(kTag, "Home restored: counts=%s clock=%s", have_saved ? "saved" : "none", clock_kept ? "kept" : "unknown");
 }
 
+// The real-time clock chip keeps UTC while the board is off. Use it when the system clock was lost
+// (power was cut). Needs the codec started first: that is what opens the I2C bus.
+void restore_clock_from_rtc() {
+    circuit_rtc::init();
+    time_t from_chip = 0;
+    const bool chip_ok = circuit_rtc::read(&from_chip, kMinValidEpoch);
+    const time_t now = time(nullptr);
+    if (chip_ok && now < kMinValidEpoch) {
+        timeval tv = {.tv_sec = from_chip, .tv_usec = 0};
+        settimeofday(&tv, nullptr);
+        clock_set = true;
+        if (Lvgl_lock(-1)) {
+            show_local_time(from_chip);
+            Lvgl_unlock();
+        }
+        ESP_LOGW(kTag, "Clock restored from the RTC chip: %lld", static_cast<long long>(from_chip));
+    } else {
+        ESP_LOGW(kTag, "RTC chip: %s; system clock %s", chip_ok ? "holds a time" : "has no valid time",
+            now >= kMinValidEpoch ? "kept" : "not set");
+        // The system clock was kept but the chip is empty or behind: teach the chip.
+        if (now >= kMinValidEpoch && (!chip_ok || from_chip + 120 < now || from_chip > now + 120)) {
+            circuit_rtc::write(now);
+        }
+    }
+}
+
 void update_home_status(const char *value) {
     char buffer[kMaxTextBytes + 1];
     strncpy(buffer, value, sizeof(buffer) - 1);
@@ -423,8 +457,14 @@ void update_home_status(const char *value) {
     const char *offset = strtok_r(nullptr, "\n", &save);
     if (time == nullptr || date == nullptr || counts == nullptr) return;
     // First time source wins; after that Circuit keeps time on its own.
-    if (!clock_set && epoch != nullptr && offset != nullptr) {
-        set_clock_from_phone(strtoll(epoch, nullptr, 10), atoi(offset));
+    if (epoch != nullptr && offset != nullptr) {
+        const time_t phone_now = static_cast<time_t>(strtoll(epoch, nullptr, 10));
+        const time_t board_now = ::time(nullptr);
+        // Set it when none is set yet, or when the board is off by more than two minutes (the RTC
+        // or the clock drifted, or the RTC held an old value). Small differences are left alone.
+        if (!clock_set || (phone_now >= kMinValidEpoch && (phone_now > board_now ? phone_now - board_now : board_now - phone_now) > 120)) {
+            set_clock_from_phone(phone_now, atoi(offset));
+        }
     }
     // The phone repeats this message often. Touching the labels redraws the whole
     // e-paper, so do nothing when it matches what is already shown.
@@ -844,6 +884,11 @@ bool free_card_room() {
     return true;
 }
 
+// A tap on the lower key during a recording asks for a Moment. The key task only counts; the
+// recording loop turns each request into an offset within the current part (the audio position,
+// so pauses do not count).
+std::atomic<uint32_t> moment_requests{0};
+
 // A recording is stored as one-minute parts: ordinary encrypted notes with consecutive numbers,
 // each marked (circuit_notes.h, .PRT) with the number of the recording's first part, its own
 // position and whether it is the last. The phone joins them into one note. A short recording
@@ -910,6 +955,9 @@ void record_audio_task(void *argument) {
     bool writer_open = true;      // false once the current part has been closed at a join
     bool card_full = false;
     bool close_failed = false;  // a part could not be sealed at a join
+    uint32_t moments[circuit_moments::kMaxPerPart];  // offsets in the current part, in ms
+    size_t moment_count = 0;
+    uint32_t moments_taken = moment_requests.load();  // requests already turned into offsets
     while (recorded_bytes < target_bytes && !recording_stop_requested) {
         const size_t mono_bytes = (target_bytes - recorded_bytes) < (kAudioBufferBytes / kCodecCaptureChannels)
             ? target_bytes - recorded_bytes : (kAudioBufferBytes / kCodecCaptureChannels);
@@ -949,6 +997,10 @@ void record_audio_task(void *argument) {
                 close_failed = true;
                 break;
             }
+            if (moment_count > 0 && !circuit_moments::save(current_id, note_key, moments, moment_count)) {
+                ESP_LOGW(kTag, "Could not save the moments of part %lu", static_cast<unsigned long>(part));
+            }
+            moment_count = 0;
             circuit_notes::write_group(current_id, {first_id, part, false});
             previous_id = current_id;
             if (sd_free_bytes() < kMinFreeCardBytes && !free_card_room()) {
@@ -970,6 +1022,15 @@ void record_audio_task(void *argument) {
             circuit_notes::write_group(current_id, {first_id, part, false});
             const int64_t join_us = esp_timer_get_time() - join_began_us;
             if (join_us > longest_join_us) longest_join_us = join_us;
+        }
+        // Taps since the last buffer sit at the end of the audio written so far (about one buffer of
+        // accuracy, under a tenth of a second).
+        for (uint32_t pending = moment_requests.load(); moments_taken != pending; ++moments_taken) {
+            if (moment_count < circuit_moments::kMaxPerPart) {
+                moments[moment_count++] = static_cast<uint32_t>(static_cast<uint64_t>(part_bytes) * 1000 / header.byte_rate);
+                ESP_LOGW(kTag, "Moment %u in part %lu at %lu ms", static_cast<unsigned>(moment_count),
+                    static_cast<unsigned long>(part), static_cast<unsigned long>(moments[moment_count - 1]));
+            }
         }
         if (!writer->append(buffer, mono_bytes)) break;
         recorded_bytes += mono_bytes;
@@ -1007,6 +1068,8 @@ void record_audio_task(void *argument) {
             drop_current_part();
         } else if (!writer->finish()) {
             drop_current_part();
+        } else if (moment_count > 0 && !circuit_moments::save(current_id, note_key, moments, moment_count)) {
+            ESP_LOGW(kTag, "Could not save the moments of part %lu", static_cast<unsigned long>(part));
         }
     } else if (close_failed) {
         drop_current_part();
@@ -1652,36 +1715,13 @@ void start_playback();
 #ifdef CIRCUIT_DEV_CONSOLE
 std::atomic<bool> dev_key_down{false};  // the development console "presses" the key through this
 
-// Two-button prototype, step 1: only watches the lower key (GPIO18) and the power-latch pin (GPIO17).
-// It acts on nothing; it answers "can the firmware read the lower key, and what does a long hold do?".
+// Lower key (GPIO18) state for the development console: what the real key task below has seen.
 constexpr gpio_num_t kLowerKeyPin = GPIO_NUM_18;
 constexpr gpio_num_t kPowerLatchPin = GPIO_NUM_17;
 std::atomic<uint32_t> lower_key_presses{0};
 std::atomic<uint32_t> lower_key_longest_ms{0};
 std::atomic<bool> lower_key_down{false};
-
-void lower_key_task(void *) {
-    bool was_pressed = gpio_get_level(kLowerKeyPin) == 0;
-    TickType_t pressed_at = 0;
-    while (true) {
-        const bool is_pressed = gpio_get_level(kLowerKeyPin) == 0;
-        if (is_pressed && !was_pressed) {
-            pressed_at = xTaskGetTickCount();
-            lower_key_down = true;
-            ESP_LOGW(kTag, "DEV lower key DOWN");
-        } else if (!is_pressed && was_pressed) {
-            const uint32_t ms = (xTaskGetTickCount() - pressed_at) * portTICK_PERIOD_MS;
-            lower_key_down = false;
-            lower_key_presses++;
-            if (ms > lower_key_longest_ms.load()) lower_key_longest_ms = ms;
-            ESP_LOGW(kTag, "DEV lower key UP after %u ms", static_cast<unsigned>(ms));
-        } else if (is_pressed && (xTaskGetTickCount() - pressed_at) % pdMS_TO_TICKS(1000) < kButtonPollInterval) {
-            ESP_LOGW(kTag, "DEV lower key still held, %u ms", static_cast<unsigned>((xTaskGetTickCount() - pressed_at) * portTICK_PERIOD_MS));
-        }
-        was_pressed = is_pressed;
-        vTaskDelay(kButtonPollInterval);
-    }
-}
+std::atomic<bool> dev_lower_down{false};  // the development console "presses" the lower key through this
 // Development console (built only with -DCIRCUIT_DEV_CONSOLE=1, see tools/board_dev.py). Reads one-line
 // commands from the USB port: "copy N", "copy-sync N", "sync", "status". It exists to test sync without
 // recording by hand: "copy" makes N new unsynced notes from the newest synced single-part notes.
@@ -1843,6 +1883,46 @@ void dev_console_task(void *) {
             ESP_LOGW(kTag, "DEV crash requested");
             vTaskDelay(pdMS_TO_TICKS(200));
             esp_restart();
+        } else if (strcmp(line, "rtc") == 0) {
+            time_t chip = 0;
+            const bool chip_ok = circuit_rtc::read(&chip, kMinValidEpoch);
+            const time_t now = time(nullptr);
+            ESP_LOGW(kTag, "DEV rtc: chip=%s %lld, system=%lld, difference=%lld s, clock_set=%d",
+                chip_ok ? "valid" : "invalid", static_cast<long long>(chip), static_cast<long long>(now),
+                static_cast<long long>(now - chip), clock_set ? 1 : 0);
+        } else if (strncmp(line, "clock-skew ", 11) == 0) {
+            // Moves the system clock by N seconds (the RTC chip is left alone): the phone must put it right.
+            timeval tv = {};
+            gettimeofday(&tv, nullptr);
+            tv.tv_sec += atoi(line + 11);
+            settimeofday(&tv, nullptr);
+            ESP_LOGW(kTag, "DEV clock-skew: system clock moved by %d s", atoi(line + 11));
+        } else if (strcmp(line, "rtc-lose") == 0) {
+            // Like a power cut for the clock: forget the system time (the chip keeps its own), then restart.
+            timeval tv = {.tv_sec = 100, .tv_usec = 0};
+            settimeofday(&tv, nullptr);
+            ESP_LOGW(kTag, "DEV rtc-lose: system clock wiped, restarting");
+            vTaskDelay(pdMS_TO_TICKS(300));
+            esp_restart();
+        } else if (strncmp(line, "lower-tap", 9) == 0) {
+            // "lower-tap" or "lower-tap hold <seconds>": press the real lower key logic
+            float seconds = 0.12f;
+            if (strncmp(line + 9, " hold", 5) == 0 && sscanf(line + 14, "%f", &seconds) != 1) seconds = 1.2f;
+            dev_lower_down = true;
+            vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(seconds * 1000)));
+            dev_lower_down = false;
+            ESP_LOGW(kTag, "DEV lower key pressed for %.2f s", seconds);
+        } else if (strncmp(line, "moments ", 8) == 0) {
+            // "moments ID": read and open the moments file of note ID
+            const unsigned long id = strtoul(line + 8, nullptr, 10);
+            uint32_t offsets[circuit_moments::kMaxPerPart];
+            const size_t count = id == 0 || !note_key_ready ? 0 : circuit_moments::load(static_cast<uint32_t>(id), note_key, offsets, circuit_moments::kMaxPerPart);
+            char line_text[160] = {};
+            size_t used = 0;
+            for (size_t i = 0; i < count && used + 12 < sizeof(line_text); ++i) {
+                used += snprintf(line_text + used, sizeof(line_text) - used, "%lu ", static_cast<unsigned long>(offsets[i]));
+            }
+            ESP_LOGW(kTag, "DEV moments of note %lu: %u: %s", id, static_cast<unsigned>(count), line_text);
         } else if (strcmp(line, "lower") == 0) {
             ESP_LOGW(kTag, "DEV lower: GPIO18 level=%d (0 = pressed), GPIO17 level=%d, presses=%u, longest=%u ms, held now=%d",
                 gpio_get_level(kLowerKeyPin), gpio_get_level(kPowerLatchPin),
@@ -1931,6 +2011,51 @@ void record_button_task(void *) {
     }
 }
 
+// The lower key. Only a short press during a recording means anything so far: it adds a Moment.
+// (It is read as an ordinary input; this board does not cut the power when it is held on USB.)
+void lower_key_task(void *) {
+    // Wait for the key to be up first, so a press that was held while booting is not a tap.
+    bool was_pressed = gpio_get_level(kLowerKeyPin) == 0;
+    TickType_t pressed_at = 0;
+    while (true) {
+        bool is_pressed = gpio_get_level(kLowerKeyPin) == 0;
+#ifdef CIRCUIT_DEV_CONSOLE
+        if (dev_lower_down.load()) is_pressed = true;
+#endif
+        if (is_pressed && !was_pressed) {
+            vTaskDelay(kButtonDebounceDelay);
+            bool still = gpio_get_level(kLowerKeyPin) == 0;
+#ifdef CIRCUIT_DEV_CONSOLE
+            if (dev_lower_down.load()) still = true;
+#endif
+            if (still) {
+                pressed_at = xTaskGetTickCount();
+#ifdef CIRCUIT_DEV_CONSOLE
+                lower_key_down = true;
+                ESP_LOGW(kTag, "DEV lower key DOWN");
+#endif
+            } else {
+                was_pressed = false;
+                continue;
+            }
+        } else if (!is_pressed && was_pressed) {
+            const TickType_t held = xTaskGetTickCount() - pressed_at;
+#ifdef CIRCUIT_DEV_CONSOLE
+            lower_key_down = false;
+            lower_key_presses++;
+            if (held * portTICK_PERIOD_MS > lower_key_longest_ms.load()) lower_key_longest_ms = held * portTICK_PERIOD_MS;
+            ESP_LOGW(kTag, "DEV lower key UP after %u ms", static_cast<unsigned>(held * portTICK_PERIOD_MS));
+#endif
+            if (held <= kLowerTapMaxTime && recording_active && !recording_paused) {
+                moment_requests++;
+                ESP_LOGI(kTag, "Lower key tap: Moment requested");
+            }
+        }
+        was_pressed = is_pressed;
+        vTaskDelay(kButtonPollInterval);
+    }
+}
+
 void init_record_button() {
     gpio_config_t config = {
         .pin_bit_mask = 1ULL << kRecordButtonPin,
@@ -1941,12 +2066,10 @@ void init_record_button() {
     };
     ESP_ERROR_CHECK(gpio_config(&config));
     xTaskCreate(record_button_task, "record_button", 3072, nullptr, 3, nullptr);
-#ifdef CIRCUIT_DEV_CONSOLE
     gpio_config_t lower_config = config;
     lower_config.pin_bit_mask = 1ULL << kLowerKeyPin;
     ESP_ERROR_CHECK(gpio_config(&lower_config));
     xTaskCreate(lower_key_task, "lower_key", 3072, nullptr, 2, nullptr);
-#endif
 }
 
 void start_playback() {
@@ -2007,6 +2130,7 @@ void check_wifi_internet() {
 void on_sntp_sync(timeval *) {
     // One sync is enough; the system clock keeps time from here.
     clock_set = true;
+    circuit_rtc::write(time(nullptr));
     esp_sntp_stop();
 }
 
@@ -2668,6 +2792,7 @@ extern "C" void app_main(void) {
     restore_home_screen();
     init_sd_card();
     Codec_StartInit();
+    restore_clock_from_rtc();
     audio_ready = true;
     init_record_button();
     xTaskCreate(demo_animation_task, "demo_animation", 3072, nullptr, 2, nullptr);
