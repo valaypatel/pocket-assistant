@@ -43,12 +43,14 @@ android {
         // the key-rotation proof (see tool/sign_with_lineage.sh), and v3 needs Android 9.
         minSdk = 28
         targetSdk = flutter.targetSdkVersion
-        // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
-        // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
-        // You can force using the value of versionCode by specifying the `-P force-version-code-ignoring-abi=true`
-        // flag during build.
-        versionCode = flutter.versionCode
-        versionName = flutter.versionName
+        // The version is NOT taken from pubspec.yaml or from `flutter build --build-number`: a
+        // hand-picked number above the tester build's once forced an uninstall that wiped the
+        // app's settings and keys. CI sets APP_VERSION_CODE and APP_VERSION_NAME; a build made
+        // anywhere else is numbered by the clock (10-second steps since 2026-01-01 UTC, the same
+        // formula CI uses), so the build made last always has the higher number.
+        versionCode = System.getenv("APP_VERSION_CODE")?.toIntOrNull()
+            ?: ((System.currentTimeMillis() / 1000 - 1767225600L) / 10).toInt()
+        versionName = System.getenv("APP_VERSION_NAME") ?: "local"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
