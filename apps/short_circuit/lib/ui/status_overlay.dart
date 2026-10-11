@@ -8,6 +8,12 @@ part of '../main.dart';
 final ValueNotifier<Widget?> statusPill = ValueNotifier(null);
 final ValueNotifier<Widget?> statusSnack = ValueNotifier(null);
 
+/// How far above the bottom edge the snackbar floats: above the navigation bar, and above the
+/// "Capture a thought" button on the pages that show it. Pages without either use the smaller value.
+final ValueNotifier<double> statusSnackLift = ValueNotifier(
+  StatusOverlay._navigationHeight,
+);
+
 /// True while a sheet that sits where the pill is (the full recording view) is open.
 final ValueNotifier<bool> statusPillHidden = ValueNotifier(false);
 
@@ -57,10 +63,14 @@ class StatusOverlay extends StatelessWidget {
             ),
           ),
         ),
-        Positioned(
-          bottom: media.padding.bottom + _navigationHeight,
-          left: 12,
-          right: 12,
+        ValueListenableBuilder<double>(
+          valueListenable: statusSnackLift,
+          builder: (context, lift, child) => Positioned(
+            bottom: media.padding.bottom + lift,
+            left: 12,
+            right: 12,
+            child: child!,
+          ),
           child: Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 640),
@@ -269,6 +279,15 @@ extension _StatusUi on _CircuitHomePageState {
   void _publishStatusUi() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      // The Capture button sits above the navigation bar on these pages (not Settings).
+      final captureShown =
+          !_recordingAudio &&
+          (_page == _AppPage.home ||
+              _page == _AppPage.notes ||
+              _page == _AppPage.group ||
+              _page == _AppPage.tasks);
+      statusSnackLift.value =
+          StatusOverlay._navigationHeight + (captureShown ? 70 : 0);
       statusPill.value = _statusPill();
       statusSnack.value = _statusSnack();
     });
