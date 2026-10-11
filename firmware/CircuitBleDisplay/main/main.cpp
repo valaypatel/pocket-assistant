@@ -1685,14 +1685,13 @@ int dev_copy_notes(int wanted) {
     return copied;
 }
 
-// Asks for a sync the way the phone does (so playback gives way to it), then waits for it to end.
+// Asks for a sync the way the phone does (so playback gives way to it). It does not wait for the sync
+// to end: a task kept alive for that would hold its stack, internal RAM a sync needs. The sync's own
+// "SYNCSTAT" log line says when it is over.
 void dev_sync_and_wait() {
     for (int i = 0; i < 240 && !(ble_encrypted && connection_id != UINT16_MAX); ++i) vTaskDelay(pdMS_TO_TICKS(500));
     start_audio_sync(false);
     ESP_LOGW(kTag, "DEV sync requested");
-    vTaskDelay(pdMS_TO_TICKS(4000));
-    for (int i = 0; i < 600 && circuit_sync::is_open(); ++i) vTaskDelay(pdMS_TO_TICKS(500));
-    ESP_LOGW(kTag, "DEV sync ended, %u note(s) still waiting", static_cast<unsigned>(circuit_notes::count_unsynced()));
 }
 
 // The console must stay responsive during a sync (to test pressing the key meanwhile), so a sync

@@ -116,10 +116,10 @@ def send(command, wait_for, timeout):
     while time.time() < deadline:
         with open(LOG, errors="replace") as f:
             f.seek(start)
-            lines = [l.rstrip() for l in f.read().splitlines() if "DEV" in l or "CircuitHeap" in l or "SYNCSTAT" in l]
+            lines = [l.rstrip() for l in f.read().splitlines() if "DEV" in l or "CircuitHeap" in l or "SYNCSTAT" in l or "Sync requested" in l]
         for line in lines[seen:]:
             print(line)
-            if wait_for and wait_for in line:
+            if wait_for and any(w in line for w in ([wait_for] if isinstance(wait_for, str) else wait_for)):
                 return 0
         seen = len(lines)
         time.sleep(1)
@@ -141,9 +141,9 @@ def main():
     if cmd == "copy":
         return send(f"copy {n}", "DEV copy done", 60)
     if cmd == "sync":
-        return send("sync", "DEV sync ended", 400)
+        return send("sync", ("SYNCSTAT", "no new notes", "Nothing to sync", "0 file(s)"), 600)
     if cmd == "copy-sync":
-        return send(f"copy-sync {n}", "DEV sync ended", 400)
+        return send(f"copy-sync {n}", ("SYNCSTAT", "0 file(s)"), 600)
     if cmd == "status":
         return send("status", "DEV status", 10)
     if cmd == "rec":
@@ -160,7 +160,7 @@ def main():
         what = " ".join(args[1:]) if len(args) > 1 else "tap"
         return send("key " + what, "DEV key pressed", 15)
     if cmd == "resend":
-        return send("resend", "DEV sync ended", 600)
+        return send("resend", ("SYNCSTAT", "0 file(s)"), 900)
     if cmd == "crash":
         return send("crash", "DEV crash requested", 10)
     if cmd == "list":
