@@ -106,19 +106,20 @@ jobs:
 
       - name: Work out the version
         id: version
+        # CI is the only place that decides the version; the code ignores pubspec.yaml's.
+        # The name is the tag's for a release and beta.<run number> otherwise. The number is the
+        # time, in 10-second steps since 2026-01-01 UTC, so whichever build was made last has the
+        # higher number: an update from App Distribution or a release is never refused as a
+        # downgrade, which would force an uninstall and wipe the app's settings. A build made by
+        # hand gets the same formula from android/app/build.gradle.kts.
         run: |
           if [[ "$GITHUB_REF" == refs/tags/app-v* ]]; then
             name="${GITHUB_REF_NAME#app-v}"
             [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::The tag must look like app-v1.2.3"; exit 1; }
           else
-            name="$(sed -nE 's/^version: *([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)"
+            name="beta.${GITHUB_RUN_NUMBER}"
           fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
-          # The time, in 10-second steps since 2026-01-01 UTC (apps/short_circuit/tool/build_number.sh
-          # does the same for a build made by hand). Whichever build was made last has the higher
-          # number, so an update from App Distribution or a release is never refused as a downgrade,
-          # which would force an uninstall and wipe the app's settings. It is always above the old
-          # "1000 + run number" builds already out there.
           echo "number=$(( ($(date -u +%s) - 1767225600) / 10 ))" >> "$GITHUB_OUTPUT"
 
       - name: Set up signing
@@ -162,7 +163,9 @@ jobs:
         env:
           VERSION_NAME: ${{ steps.version.outputs.name }}
           VERSION_NUMBER: ${{ steps.version.outputs.number }}
-        run: flutter build apk --release --build-name="$VERSION_NAME" --build-number="$VERSION_NUMBER"
+          APP_VERSION_NAME: ${{ steps.version.outputs.name }}
+          APP_VERSION_CODE: ${{ steps.version.outputs.number }}
+        run: flutter build apk --release
 
       - name: Attach the key-rotation proof
         if: steps.signing.outputs.signed == 'true'

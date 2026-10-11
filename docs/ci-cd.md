@@ -142,12 +142,15 @@ updates in place and keeps its notes, settings and pairing. For that reason the 
 needs Android 9 or later (`minSdk = 28`) and is signed with the v3 scheme only,
 which is the one that carries the proof. The old key is not needed again.
 
-Every build is numbered by the time it was made (10-second steps since 2026-01-01 UTC), by CI
-and by hand alike, so the build made last always has the higher number. Android refuses to
-install a lower number over a higher one, and the only way round that is to uninstall, which
-wipes the app's settings, keys and notes. So never pick a number yourself: a build made by hand
-for a phone uses `flutter build apk --release --build-number="$(tool/build_number.sh)"`. (Builds
-before 7 October 2026 were `1000 + the run number`; the time-based numbers are far above them.)
+The app's version is **not** read from `pubspec.yaml` (its `version:` line is a placeholder) or
+from `flutter build --build-number`. `android/app/build.gradle.kts` takes it from the environment
+and nothing else: CI sets `APP_VERSION_NAME` (the tag for a release, `beta.<run number>`
+otherwise) and `APP_VERSION_CODE`; a build made anywhere else is called `local` and numbered by
+the clock. The number is the time in 10-second steps since 2026-01-01 UTC, by CI and by hand
+alike, so the build made last always has the higher number. This matters because Android
+refuses to install a lower number over a higher one, and the only way round that is to
+uninstall, which wipes the app's settings, keys and notes. (Builds before 7 October 2026 were
+`1000 + the run number`; the time-based numbers are far above them.)
 If the rotation secret
 (`ANDROID_LINEAGE_BASE64`) is ever missing, the build warns, and the APK will not
 update an app that was installed signed with the previous key.

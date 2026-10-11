@@ -16,6 +16,8 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
+# PLACEHOLDER: Flutter needs this line, but the app's version is not read from it. CI decides
+# the version name and number (see android/app/build.gradle.kts and .github/workflows/app.yml).
 version: 1.0.0+1
 
 environment:
