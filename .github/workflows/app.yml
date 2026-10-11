@@ -4,14 +4,18 @@ on:
   pull_request:
     paths:
       - "apps/short_circuit/**"
-      - "docs/security/**" # the test vectors both sides check against
+      - "docs/security/test-vectors.json" # the vectors both sides check against; the README alone does not rebuild
+      - "docs/security/reference/**"
       - ".github/workflows/app.yml"
+      - ".github/scripts/release-notes.sh"
   push:
-    branches: [main]
+    branches: [main, development]
     paths:
       - "apps/short_circuit/**"
-      - "docs/security/**" # the test vectors both sides check against
+      - "docs/security/test-vectors.json" # the vectors both sides check against; the README alone does not rebuild
+      - "docs/security/reference/**"
       - ".github/workflows/app.yml"
+      - ".github/scripts/release-notes.sh"
     tags: ["app-v*"]
   workflow_dispatch:
 
@@ -46,6 +50,18 @@ jobs:
       - name: Analyze (errors and warnings fail; infos do not)
         run: flutter analyze --no-fatal-infos
       - run: flutter test
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            apps/short_circuit/android/**/*.gradle*
+            apps/short_circuit/android/**/gradle-wrapper.properties
+      - name: Check the phone's note encryption against the shared test vectors
+        run: |
+          flutter build apk --config-only
+          cd android && ./gradlew :app:testDebugUnitTest --no-daemon
 
   apk:
     name: Build release APK
@@ -90,18 +106,21 @@ jobs:
 
       - name: Work out the version
         id: version
+        # CI is the only place that decides the version; the code ignores pubspec.yaml's.
+        # The name is the tag's for a release and beta.<run number> otherwise. The number is the
+        # time, in 10-second steps since 2026-01-01 UTC, so whichever build was made last has the
+        # higher number: an update from App Distribution or a release is never refused as a
+        # downgrade, which would force an uninstall and wipe the app's settings. A build made by
+        # hand gets the same formula from android/app/build.gradle.kts.
         run: |
           if [[ "$GITHUB_REF" == refs/tags/app-v* ]]; then
             name="${GITHUB_REF_NAME#app-v}"
             [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::The tag must look like app-v1.2.3"; exit 1; }
           else
-            name="$(sed -nE 's/^version: *([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)"
+            name="beta.${GITHUB_RUN_NUMBER}"
           fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
-          # Always above any build made by hand (those use small numbers, 1 to a few hundred), so an
-          # update from App Distribution or a release is never refused as a downgrade, and rising
-          # each run.
-          echo "number=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
+          echo "number=$(( ($(date -u +%s) - 1767225600) / 10 ))" >> "$GITHUB_OUTPUT"
 
       - name: Set up signing
         id: signing
@@ -144,7 +163,9 @@ jobs:
         env:
           VERSION_NAME: ${{ steps.version.outputs.name }}
           VERSION_NUMBER: ${{ steps.version.outputs.number }}
-        run: flutter build apk --release --build-name="$VERSION_NAME" --build-number="$VERSION_NUMBER"
+          APP_VERSION_NAME: ${{ steps.version.outputs.name }}
+          APP_VERSION_CODE: ${{ steps.version.outputs.number }}
+        run: flutter build apk --release
 
       - name: Attach the key-rotation proof
         if: steps.signing.outputs.signed == 'true'
@@ -201,15 +222,26 @@ jobs:
 
   distribute:
     name: Send to Firebase App Distribution
-    # Release tags and manual runs only (not every merge), and only once Firebase is set
-    # up (see docs/ci-cd.md). The build is the signed one made by the apk job.
+    # Every push to development (so each change is tried on a phone before it reaches main),
+    # release tags and manual runs. Not main: that is the production branch, released by tag.
+    # Only once Firebase is set up (see docs/ci-cd.md). The build is the signed one made by the
+    # apk job.
     if: >-
-      (startsWith(github.ref, 'refs/tags/app-v') || github.event_name == 'workflow_dispatch')
+      (startsWith(github.ref, 'refs/tags/app-v')
+        || github.event_name == 'workflow_dispatch'
+        || (github.event_name == 'push' && github.ref == 'refs/heads/development'))
       && vars.FIREBASE_APP_ID != ''
     needs: apk
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read # to read the pull request this build came from, for the release notes
     steps:
+      # Before the download, which this would otherwise clean away.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: short-circuit-apk
@@ -220,10 +252,24 @@ jobs:
           [[ "$SIGNED" == "true" ]] || { echo "::error::This build uses a throwaway debug key and cannot update the app on your phone. Set the signing secrets first."; exit 1; }
       - id: apk
         run: echo "path=$(ls short-circuit-*.apk | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Write the release notes
+        # The build, then the "How to test" section of the pull request(s) it came from.
+        # Best effort: a build with no notes is still sent.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.apk.outputs.version }}
+        run: |
+          gh api "repos/$REPO/commits/$SHA/pulls" 2>/dev/null > prs.json || echo '[]' > prs.json
+          bash .github/scripts/release-notes.sh < prs.json | head -c 8000 > release-notes.txt || true
+          [[ -s release-notes.txt ]] || echo "Short-Circuit $VERSION from $REF_NAME (${SHA::7})" > release-notes.txt
+          cat release-notes.txt
       - uses: wzieba/Firebase-Distribution-Github-Action@bd494989dd4bec0343f78adee87fe66e48279ad6 # v1.7.1
         with:
           appId: ${{ vars.FIREBASE_APP_ID }}
           serviceCredentialsFileContent: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
           groups: ${{ vars.FIREBASE_TESTER_GROUP || 'testers' }}
           file: ${{ steps.apk.outputs.path }}
-          releaseNotes: "Short-Circuit ${{ needs.apk.outputs.version }} from ${{ github.ref_name }} (${{ github.sha }})"
+          releaseNotesFile: release-notes.txt

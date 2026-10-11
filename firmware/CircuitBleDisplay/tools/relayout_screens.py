@@ -41,7 +41,7 @@ HEADER_ICONS = [("wifi", 138, 3), ("phone", 161, 5), ("hard-drive", 181, 5)]
 # Icons that are separate LVGL images placed at run time (note counts beside
 # their numbers, header icons by connection state). Emitted as circuit_icon_<name>
 # with dashes turned into underscores.
-COUNT_ICONS = ["clock", "check", "wifi", "wifi-off", "wifi-low", "wifi-high", "wifi-zero", "phone", "hard-drive"]
+COUNT_ICONS = ["clock", "check", "wifi", "wifi-off", "wifi-low", "wifi-high", "wifi-zero", "phone", "hard-drive", "mic-off"]
 
 # Where the animated recording icon sits (an LVGL image of its own, see main.cpp).
 RECORD_BOX = (20, 92, 116, 182)

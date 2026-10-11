@@ -37,28 +37,60 @@ String _dayLabel(DateTime value) {
   return '${local.day} ${_months[local.month - 1].substring(0, 3)}';
 }
 
-Future<bool> _confirmDeleteNote(BuildContext context) async =>
-    await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Delete this note?'),
-        content: const Text(
-          'This removes only the phone copy. Circuit keeps nothing once a note is synced.',
-        ),
-        actions: scDialogActions(
-          dialogContext,
-          confirmIcon: LucideIcons.trash2,
-          confirmTooltip: 'Delete note',
-          danger: true,
-          onCancel: () => Navigator.pop(dialogContext, false),
-          onConfirm: () => Navigator.pop(dialogContext, true),
-        ),
+/// What to delete when a note that came from Circuit is deleted in the app.
+enum NoteDeleteChoice { everywhere, phoneOnly }
+
+/// Asks before a note is deleted. A note that came from Circuit also lives on Circuit's card, so
+/// the person chooses between deleting it everywhere and deleting only the phone's copy.
+/// Returns null if they cancel.
+Future<NoteDeleteChoice?> _chooseNoteDelete(
+  BuildContext context, {
+  bool fromCircuit = false,
+}) => showDialog<NoteDeleteChoice>(
+  context: context,
+  builder: (dialogContext) => AlertDialog(
+    title: const Text('Delete this note?'),
+    content: Text(
+      fromCircuit
+          ? 'It is also on Circuit\'s card. Delete it there too, or keep it on Circuit and remove only the phone copy?'
+          : 'This cannot be undone.',
+    ),
+    actionsOverflowDirection: VerticalDirection.down,
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(dialogContext),
+        child: const Text('Cancel'),
       ),
-    ) ??
-    false;
+      if (fromCircuit)
+        TextButton(
+          onPressed: () =>
+              Navigator.pop(dialogContext, NoteDeleteChoice.phoneOnly),
+          child: const Text('Phone only'),
+        ),
+      TextButton(
+        style: TextButton.styleFrom(foregroundColor: Sc.danger),
+        onPressed: () =>
+            Navigator.pop(dialogContext, NoteDeleteChoice.everywhere),
+        child: Text(fromCircuit ? 'Everywhere' : 'Delete'),
+      ),
+    ],
+  ),
+);
 
 extension _ScPages on _CircuitHomePageState {
-  bool get _circuitAvailable => _textCharacteristic != null || _relayActive;
+  Future<bool> _confirmDeleteListNote(CircuitNote note) async {
+    final choice = await _chooseNoteDelete(
+      context,
+      fromCircuit: _boardIdOf(note) != null,
+    );
+    _pendingDeleteChoice = choice;
+    return choice != null;
+  }
+
+  /// Circuit is connected right now. The background service merely running does not count:
+  /// it also runs while it is still trying, and then nothing can be sent or received.
+  bool get _circuitAvailable =>
+      _textCharacteristic != null || _relayLink == RelayLink.connected;
 
   void _toast(String message) {
     if (!mounted) return;
@@ -88,65 +120,14 @@ extension _ScPages on _CircuitHomePageState {
       ? _wifiDetail.trim()
       : null;
 
-  Widget _deviceChip() {
-    final wifiColor = _wifiState == 'connected'
-        ? Sc.green
-        : _wifiState == 'connecting'
-        ? Sc.orange
-        : const Color(0xffa6a9af);
-    final available = _circuitAvailable;
-    return Semantics(
-      button: true,
-      label: available ? 'Circuit, connected' : 'Circuit, not connected',
-      hint: 'Opens device settings',
-      excludeSemantics: true,
-      child: GestureDetector(
-        onTap: () => _goTo(_AppPage.circuit),
-        child: Container(
-          key: _deviceChipKey,
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
-          decoration: BoxDecoration(
-            color: Sc.chip,
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: available
-                      ? const Color(0xff3b9a68)
-                      : const Color(0xffa6a9af),
-                  boxShadow: available
-                      ? const [
-                          BoxShadow(color: Color(0x203b9a68), spreadRadius: 4),
-                        ]
-                      : null,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Icon(
-                _wifiState == 'failed' ? LucideIcons.wifiOff : LucideIcons.wifi,
-                size: 15,
-                color: wifiColor,
-              ),
-              const SizedBox(width: 6),
-              Icon(
-                LucideIcons.smartphone,
-                size: 15,
-                color: _relayActive ? Sc.orange : const Color(0xffa6a9af),
-              ),
-              const SizedBox(width: 8),
-              const ScDeviceMark(size: 22),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  Widget _deviceChip() => CircuitChip(
+    chipKey: _deviceChipKey,
+    connected: _circuitAvailable,
+    link: _relayLink,
+    wifiState: _wifiState,
+    stayConnected: _relayActive,
+    onTap: () => _goTo(_AppPage.circuit),
+  );
 
   String _ago(DateTime time) {
     final seconds = DateTime.now().difference(time).inSeconds;
@@ -166,7 +147,7 @@ extension _ScPages on _CircuitHomePageState {
         padding: const EdgeInsets.all(15),
         decoration: BoxDecoration(
           color: Sc.dangerSoft,
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: BorderRadius.circular(14),
           border: Border.all(color: const Color(0xfff3c6bb)),
         ),
         child: Column(
@@ -180,7 +161,7 @@ extension _ScPages on _CircuitHomePageState {
                   'Sync needs attention',
                   style: TextStyle(
                     fontSize: 14,
-                    fontWeight: FontWeight.w800,
+                    fontWeight: FontWeight.w600,
                     color: Sc.danger,
                   ),
                 ),
@@ -226,7 +207,7 @@ extension _ScPages on _CircuitHomePageState {
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: Sc.hero,
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: BorderRadius.circular(14),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -245,12 +226,12 @@ extension _ScPages on _CircuitHomePageState {
                 const Expanded(
                   child: Text(
                     'Syncing a voice note',
-                    style: TextStyle(fontWeight: FontWeight.w800),
+                    style: TextStyle(fontWeight: FontWeight.w600),
                   ),
                 ),
                 Text(
                   '${_syncProgress ?? 0}%',
-                  style: const TextStyle(fontWeight: FontWeight.w800),
+                  style: const TextStyle(fontWeight: FontWeight.w600),
                 ),
               ],
             ),
@@ -306,7 +287,7 @@ extension _ScPages on _CircuitHomePageState {
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 13,
-                      fontWeight: FontWeight.w800,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
@@ -360,7 +341,8 @@ extension _ScPages on _CircuitHomePageState {
   String _noteSubtitle(CircuitNote note) {
     final local = note.createdAt.toLocal();
     final when =
-        '${_dayLabel(note.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}';
+        '${_dayLabel(note.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}'
+        ' · ${note.source}';
     if (note.id == _syncingNoteId) return '$when · Syncing';
     final song = note.song;
     if (note.isSong && song != null) {
@@ -385,13 +367,7 @@ extension _ScPages on _CircuitHomePageState {
     }
     if (note.status.startsWith('Waiting for Wi-Fi'))
       return '$when · Waiting for Wi-Fi';
-    if (note.enrichmentStatus == 'enriching') return '$when · AI reviewing';
-    if (note.enrichmentStatus == 'failed') return '$when · AI review failed';
-    if (note.actionSuggestions.any((item) => item.state == 'pending'))
-      return '$when · Action to review';
-    if (note.transcript != null) return '$when · Transcribed';
-    if (note.audioPath != null) return '$when · Ready to transcribe';
-    return '$when · Waiting to sync';
+    return '$when · ${noteStageLabel(note)}';
   }
 
   VoidCallback? _openNote(CircuitNote note) {
@@ -404,6 +380,9 @@ extension _ScPages on _CircuitHomePageState {
             onIdentify: _identifySongNote,
             onPlay: _playSyncedNote,
             onDelete: _deleteNote,
+            onDeletePhoneOnly: _boardIdOf(note) == null
+                ? null
+                : (id) => _deleteNote(id, phoneOnly: true),
             onOpenSettings: _openMusicSettings,
             onUseAsNote: (id) => _transcribeNote(id, asSpeech: true),
           ),
@@ -420,9 +399,13 @@ extension _ScPages on _CircuitHomePageState {
           status: note.status,
           transcript: note.transcript ?? '',
           onForceTranscribe: _transcribeNote,
+          onSyncNote: _syncLatestRecording,
           audioPath: note.audioPath,
           onPlayNote: _playSyncedNote,
           onDeleteNote: _deleteNote,
+          onDeletePhoneOnly: _boardIdOf(note) == null
+              ? null
+              : (id) => _deleteNote(id, phoneOnly: true),
           onCreateReminder: _extractReminder,
           onAddTask: (title, detail) => _addTask(title, detail: detail),
           summary: note.summary,
@@ -435,6 +418,7 @@ extension _ScPages on _CircuitHomePageState {
           noteById: (id) => _notes.where((n) => n.id == id).firstOrNull,
           onEnrich: _retryEnrichment,
           onEditNote: _editNote,
+          isCall: note.isCall,
           onOpenChat: () => Navigator.of(context).push(
             MaterialPageRoute<void>(
               builder: (_) => NoteChatPage(
@@ -517,6 +501,7 @@ extension _ScPages on _CircuitHomePageState {
           : note.title ??
                 (note.audioPath == null ? 'Voice recording' : 'Voice note'),
       subtitle: _noteSubtitle(note),
+      badge: NoteSourceBadge(source: note.source),
       subtitleColor: attention ? Sc.danger : null,
       onTap: _openNote(note),
       trailing: ScPlayButton(
@@ -544,142 +529,226 @@ extension _ScPages on _CircuitHomePageState {
 
   List<Widget> _homePage() {
     final now = DateTime.now();
-    final review = _notes
-        .where((n) => n.audioPath != null && n.transcript == null)
-        .length;
-    final openTasks = _tasks.where((t) => !t.done).length;
-    final total = review + openTasks;
-    final synced = _notes.where((n) => n.audioPath != null).length;
-    final attention = _notes.where(_noteNeedsAttention).toList();
-    final worth = <CircuitNote>[
-      ...attention,
-      ..._notes.where(
-        (n) =>
-            !attention.contains(n) &&
-            n.audioPath != null &&
-            n.transcript == null,
-      ),
-      ..._notes.where(
-        (n) =>
-            !attention.contains(n) &&
-            !(n.audioPath != null && n.transcript == null),
-      ),
-    ].take(3).toList();
-    final parts = <String>[
-      if (review > 0) '$review note${review == 1 ? '' : 's'} ready to review',
-      if (openTasks > 0) '$openTasks open task${openTasks == 1 ? '' : 's'}',
-    ];
+    final attention = _notes
+        .where((n) => !n.isArriving && _noteNeedsAttention(n))
+        .toList();
+    final open = _tasks.where((task) => !task.done).toList();
+    final recent = _notes.where((n) => !n.isArriving).take(3).toList();
     return [
       Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          const Padding(
-            padding: EdgeInsets.only(top: 2, right: 12),
-            child: ScBrandMark(size: 38),
-          ),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                ScEyebrow(
-                  '${_weekdays[now.weekday - 1]} · ${now.day} ${_months[now.month - 1]}',
-                ),
-                const SizedBox(height: 4),
-                ScTitle(
-                  _displayName.isEmpty ? 'Hello.' : 'Hey, $_displayName.',
-                ),
-              ],
+          const ScBrandMark(size: 28),
+          const SizedBox(width: 9),
+          const Expanded(
+            child: Text(
+              'short circuit',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+                letterSpacing: -.6,
+              ),
             ),
           ),
-          const SizedBox(width: 12),
           _deviceChip(),
         ],
+      ),
+      const SizedBox(height: 24),
+      ScEyebrow(
+        '${_weekdays[now.weekday - 1]} · ${now.day} ${_months[now.month - 1]}',
+      ),
+      const SizedBox(height: 6),
+      ScTitle(
+        _displayName.isEmpty ? 'A clearer head.' : 'Hello, $_displayName.',
+      ),
+      const SizedBox(height: 8),
+      const Text(
+        'A place for everything on your mind.',
+        style: TextStyle(color: Sc.muted, fontSize: 15, height: 1.5),
       ),
       const SizedBox(height: 22),
       _syncHealthCard(),
       _syncBanner(),
-      Container(
-        padding: const EdgeInsets.all(19),
-        decoration: BoxDecoration(
-          color: Sc.hero,
-          borderRadius: BorderRadius.circular(24),
-        ),
+      ScPanel(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const ScEyebrow('Your day at a glance'),
-            const SizedBox(height: 9),
+            ScEyebrow(
+              _notes.isEmpty
+                  ? 'A place to begin'
+                  : attention.isEmpty
+                  ? 'Your space'
+                  : 'Ready for you',
+            ),
+            const SizedBox(height: 10),
             Text(
-              total == 0
-                  ? "You're all caught up."
-                  : '$total thing${total == 1 ? '' : 's'} need${total == 1 ? 's' : ''} you.',
+              _notes.isEmpty
+                  ? 'Keep the thought.\nLose the clutter.'
+                  : attention.isEmpty
+                  ? 'A little less\non your mind.'
+                  : '${attention.length} note${attention.length == 1 ? '' : 's'}.\nA few next steps.',
               style: const TextStyle(
-                fontSize: 25,
-                fontWeight: FontWeight.w800,
-                letterSpacing: -1.3,
-                height: 1.1,
+                fontSize: 28,
+                height: 1.12,
+                fontWeight: FontWeight.w600,
+                letterSpacing: -1,
               ),
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 10),
             Text(
-              !_circuitAvailable
-                  ? 'Circuit is not connected. Open the Circuit chip above to connect it.'
-                  : parts.isEmpty
-                  ? 'Record a voice note with Circuit and it will show up here.'
-                  : '${parts.join(' and ')}.',
+              _notes.isEmpty
+                  ? 'Record a thought on your phone, or connect your Circuit.'
+                  : attention.isEmpty
+                  ? 'Your recordings are here whenever you need them.'
+                  : 'Check the notes that need your attention, then choose what comes next.',
               style: const TextStyle(
-                color: Color(0xff7e7167),
-                fontSize: 12,
-                height: 1.45,
+                fontSize: 14,
+                height: 1.5,
+                color: Sc.neutralInk,
+              ),
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: Sc.dark,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: _notes.isEmpty
+                  ? _showCaptureOptions
+                  : () => _selectTab(1),
+              icon: Icon(
+                _notes.isEmpty ? LucideIcons.mic : LucideIcons.arrowRight,
+                size: 18,
+              ),
+              label: Text(
+                _notes.isEmpty
+                    ? 'Capture your first thought'
+                    : attention.isEmpty
+                    ? 'Open your notes'
+                    : 'Review notes',
               ),
             ),
           ],
         ),
       ),
-      const SizedBox(height: 22),
-      Row(
-        children: [
-          Expanded(
-            child: ScStat(label: 'Notes', value: '${_notes.length}'),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: ScStat(label: 'To do', value: '$openTasks'),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: ScStat(label: 'Synced', value: '$synced'),
-          ),
-        ],
-      ),
-      const SizedBox(height: 25),
+      const SizedBox(height: 24),
       ScSectionRow(
-        'Worth a look',
-        action: 'Open inbox',
-        onAction: () => _selectTab(1),
+        'Your next step',
+        action: 'All tasks',
+        onAction: () => _selectTab(2),
       ),
-      if (worth.isEmpty)
-        const ScTile(
-          icon: LucideIcons.mic,
-          title: 'No voice notes yet',
-          subtitle: 'Tap the upper side button on Circuit to start recording.',
+      if (open.isEmpty)
+        const Text(
+          'Nothing to do right now.',
+          style: TextStyle(color: Sc.muted, fontSize: 14),
         )
       else
-        for (final note in worth) ...[
-          _noteTile(note),
-          const SizedBox(height: 10),
-        ],
+        _taskRow(open.first),
+      const SizedBox(height: 24),
+      ScSectionRow(
+        'Recent captures',
+        action: 'All notes',
+        onAction: () => _selectTab(1),
+      ),
+      if (recent.isEmpty)
+        const ScTile(
+          icon: LucideIcons.mic,
+          title: 'Your first note starts with you',
+          subtitle: 'Use Capture a thought below. You can start with just your phone.',
+        )
+      else
+        for (final note in recent) _noteTile(note),
     ];
+  }
+
+  /// One capture entry point, with an explicit microphone/device choice.
+  Future<void> _showCaptureOptions() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      isScrollControlled: true,
+      showDragHandle: true,
+      backgroundColor: Sc.bg,
+      builder: (sheetContext) => SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+          24,
+          0,
+          24,
+          24 + MediaQuery.viewInsetsOf(sheetContext).bottom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const ScEyebrow('Capture'),
+            const SizedBox(height: 8),
+            const ScTitle('Where’s the thought?'),
+            const SizedBox(height: 8),
+            const Text(
+              'Choose where to record.',
+              style: TextStyle(color: Sc.muted, fontSize: 15),
+            ),
+            const SizedBox(height: 20),
+            ScTile(
+              icon: LucideIcons.smartphone,
+              title: 'This phone',
+              subtitle: 'Record directly into your notes. No Circuit needed.',
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _startPhoneRecording();
+              },
+              trailing: const Icon(LucideIcons.chevronRight, size: 18),
+            ),
+            ScTile(
+              icon: LucideIcons.radio,
+              title: 'Circuit',
+              subtitle: _circuitAvailable
+                  ? 'Record on your connected device.'
+                  : 'Connect Circuit to use its microphone.',
+              onTap: () {
+                Navigator.pop(sheetContext);
+                if (_circuitAvailable) {
+                  _recordAudio();
+                } else {
+                  _goTo(_AppPage.circuit);
+                }
+              },
+              trailing: const Icon(LucideIcons.chevronRight, size: 18),
+            ),
+            ScTile(
+              icon: LucideIcons.music,
+              title: 'Identify a song',
+              subtitle: _circuitAvailable
+                  ? 'Capture a short clip on Circuit.'
+                  : 'Connect Circuit to capture a song.',
+              onTap: () {
+                Navigator.pop(sheetContext);
+                if (_circuitAvailable) {
+                  _identifySong();
+                } else {
+                  _goTo(_AppPage.circuit);
+                }
+              },
+              trailing: const Icon(LucideIcons.chevronRight, size: 18),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   // ---- notes tab -----------------------------------------------------------
 
   List<Widget> _notesPage() {
     final query = _noteSearchController.text.trim().toLowerCase();
+    // A long recording still collecting its parts is not shown, or counted, until it is whole.
+    final shownNotes = _notes.where((note) => !note.isArriving).toList();
+    final arriving = _notes.length - shownNotes.length;
+    final inSource = shownNotes
+        .where((note) => noteMatchesSource(note, _noteSource))
+        .toList();
     final visibleNotes = query.isEmpty
-        ? _notes
-        : _notes.where((note) {
+        ? inSource
+        : inSource.where((note) {
             final searchable = [
               note.title,
               note.transcript,
@@ -695,9 +764,10 @@ extension _ScPages on _CircuitHomePageState {
           }).toList();
     // Review items are displayed in the queue above; exclude them from the
     // library list so a recording never appears as two cards.
-    final libraryNotes = visibleNotes
-        .where((note) => !_noteNeedsAttention(note))
-        .toList();
+    final libraryNotes =
+        visibleNotes.where((note) => !_noteNeedsAttention(note)).toList()
+          ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final now = DateTime.now();
     return [
       if (_selecting)
         _selectionHeader()
@@ -711,36 +781,55 @@ extension _ScPages on _CircuitHomePageState {
               tooltip: 'Select notes to group',
               onPressed: _startSelecting,
             ),
-            const SizedBox(width: 8),
-            ScIconButton(
-              size: 44,
-              icon: _noteSearchOpen ? LucideIcons.x : LucideIcons.search,
-              tooltip: _noteSearchOpen ? 'Close search' : 'Search notes',
-              onPressed: () => _update(() {
-                if (_noteSearchOpen) _noteSearchController.clear();
-                _noteSearchOpen = !_noteSearchOpen;
-              }),
-            ),
           ],
         ),
-      if (_noteSearchOpen) ...[
-        const SizedBox(height: 10),
-        TextField(
-          controller: _noteSearchController,
-          autofocus: true,
-          onChanged: (_) => _update(() {}),
-          decoration: const InputDecoration(
-            hintText: 'Search',
-            prefixIcon: Icon(LucideIcons.search, size: 18),
-            isDense: true,
-          ),
+      const SizedBox(height: 8),
+      const Text(
+        'Every thought has a place.',
+        style: TextStyle(color: Sc.muted, fontSize: 15),
+      ),
+      const SizedBox(height: 16),
+      TextField(
+        controller: _noteSearchController,
+        onChanged: (_) => _update(() {}),
+        decoration: InputDecoration(
+          hintText: 'Search notes, transcripts, tags',
+          prefixIcon: const Icon(LucideIcons.search, size: 18),
+          suffixIcon: query.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: 'Clear search',
+                  icon: const Icon(LucideIcons.x, size: 18),
+                  onPressed: () => _update(_noteSearchController.clear),
+                ),
+        ),
+      ),
+      if (shownNotes.isNotEmpty) ...[
+        const SizedBox(height: 12),
+        NoteSourceFilter(
+          selected: _noteSource,
+          counts: {
+            noteSourceAll: shownNotes.length,
+            'Phone': shownNotes.where((n) => n.source == 'Phone').length,
+            'Circuit': shownNotes.where((n) => n.source == 'Circuit').length,
+          },
+          onChanged: (choice) => _update(() => _noteSource = choice),
+        ),
+      ],
+      if (arriving > 0) ...[
+        const SizedBox(height: 12),
+        Text(
+          arriving == 1
+              ? 'A longer recording is still arriving from Circuit. It appears here when all of it is on your phone.'
+              : '$arriving longer recordings are still arriving from Circuit. They appear here when all of each is on your phone.',
+          style: const TextStyle(color: Sc.muted, fontSize: 13),
         ),
       ],
       const SizedBox(height: 14),
       _syncHealthCard(),
       _syncBanner(),
       _groupsRow(),
-      if (_notes.any(_noteNeedsAttention)) ...[
+      if (visibleNotes.any(_noteNeedsAttention)) ...[
         const SizedBox(height: 18),
         const ScGroupLabel('Needs attention'),
         for (final note in visibleNotes.where(_noteNeedsAttention).take(5)) ...[
@@ -754,12 +843,15 @@ extension _ScPages on _CircuitHomePageState {
                 padding: const EdgeInsets.symmetric(horizontal: 22),
                 decoration: BoxDecoration(
                   color: Sc.dangerSoft,
-                  borderRadius: BorderRadius.circular(18),
+                  borderRadius: BorderRadius.circular(14),
                 ),
                 child: const Icon(LucideIcons.trash2, color: Sc.danger),
               ),
-              confirmDismiss: (_) => _confirmDeleteNote(context),
-              onDismissed: (_) => _deleteNote(note.id),
+              confirmDismiss: (_) => _confirmDeleteListNote(note),
+              onDismissed: (_) => _deleteNote(
+                note.id,
+                phoneOnly: _pendingDeleteChoice == NoteDeleteChoice.phoneOnly,
+              ),
               child: _noteTile(note, actions: true),
             ),
           ),
@@ -768,13 +860,28 @@ extension _ScPages on _CircuitHomePageState {
         const SizedBox(height: 10),
       ],
       if (visibleNotes.isEmpty)
-        const ScTile(
+        ScTile(
           icon: LucideIcons.mic,
-          title: 'No matching notes',
-          subtitle: 'Try another word or search tag.',
+          title: query.isEmpty && _noteSource != noteSourceAll
+              ? 'No $_noteSource notes'
+              : 'No matching notes',
+          subtitle: query.isEmpty && _noteSource != noteSourceAll
+              ? 'Choose All to see every note.'
+              : _notes.isEmpty
+              ? 'Capture a thought on your phone or Circuit to begin.'
+              : 'Try another word or search tag.',
         )
       else
-        for (final note in libraryNotes) ...[
+        for (final (index, note) in libraryNotes.indexed) ...[
+          if (index == 0 ||
+              noteAge(note.createdAt.toLocal(), now) !=
+                  noteAge(
+                    libraryNotes[index - 1].createdAt.toLocal(),
+                    now,
+                  )) ...[
+            if (index > 0) const SizedBox(height: 8),
+            ScGroupLabel(noteAge(note.createdAt.toLocal(), now).label),
+          ],
           _selectableNote(
             note,
             Dismissible(
@@ -785,13 +892,16 @@ extension _ScPages on _CircuitHomePageState {
                 padding: const EdgeInsets.symmetric(horizontal: 22),
                 decoration: BoxDecoration(
                   color: Sc.dangerSoft,
-                  borderRadius: BorderRadius.circular(18),
+                  borderRadius: BorderRadius.circular(14),
                 ),
                 child: const Icon(LucideIcons.trash2, color: Sc.danger),
               ),
-              confirmDismiss: (_) => _confirmDeleteNote(context),
-              onDismissed: (_) => _deleteNote(note.id),
-              child: _noteTile(note, actions: true),
+              confirmDismiss: (_) => _confirmDeleteListNote(note),
+              onDismissed: (_) => _deleteNote(
+                note.id,
+                phoneOnly: _pendingDeleteChoice == NoteDeleteChoice.phoneOnly,
+              ),
+              child: _noteTile(note),
             ),
           ),
           const SizedBox(height: 10),
@@ -861,7 +971,7 @@ extension _ScPages on _CircuitHomePageState {
                     task.title,
                     style: TextStyle(
                       fontSize: 14,
-                      fontWeight: FontWeight.w800,
+                      fontWeight: FontWeight.w600,
                       decoration: task.done ? TextDecoration.lineThrough : null,
                       color: task.done ? Sc.faint : Sc.ink,
                     ),
@@ -876,6 +986,11 @@ extension _ScPages on _CircuitHomePageState {
                 ],
               ),
             ),
+            IconButton(
+              tooltip: 'Delete task',
+              onPressed: () => _deleteTask(task.id),
+              icon: const Icon(LucideIcons.trash2, size: 18, color: Sc.muted),
+            ),
           ],
         ),
       ),
@@ -886,15 +1001,23 @@ extension _ScPages on _CircuitHomePageState {
     final open = _tasks.where((t) => !t.done).toList();
     final done = _tasks.where((t) => t.done).toList();
     return [
-      const ScEyebrow('Actions'),
-      const SizedBox(height: 4),
-      const ScTitle('Tasks'),
+      Row(
+        children: [
+          const Expanded(child: ScTitle('Tasks')),
+          ScIconButton(
+            icon: LucideIcons.plus,
+            tooltip: 'Add task',
+            tone: ScTone.primary,
+            onPressed: _promptAddTask,
+          ),
+        ],
+      ),
       const SizedBox(height: 8),
       const Text(
-        'Things to do from your notes. Check them off as you go; swipe left to remove one.',
-        style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.45),
+        'Turn a thought into a next step.',
+        style: TextStyle(color: Sc.muted, fontSize: 15, height: 1.5),
       ),
-      const SizedBox(height: 20),
+      const SizedBox(height: 24),
       const ScGroupLabel('To do'),
       if (open.isEmpty)
         const Padding(
@@ -910,16 +1033,6 @@ extension _ScPages on _CircuitHomePageState {
         const ScGroupLabel('Done'),
         for (final task in done) _taskRow(task),
       ],
-      const SizedBox(height: 20),
-      Align(
-        alignment: Alignment.centerRight,
-        child: ScIconButton(
-          icon: LucideIcons.plus,
-          tooltip: 'Add task',
-          tone: ScTone.primary,
-          onPressed: _promptAddTask,
-        ),
-      ),
     ];
   }
 
@@ -952,12 +1065,12 @@ extension _ScPages on _CircuitHomePageState {
   }
 
   List<Widget> _settingsPage() => [
-    const ScEyebrow('App settings'),
+    const ScEyebrow('Your space'),
     const SizedBox(height: 4),
     const ScTitle('Settings'),
     const SizedBox(height: 8),
     const Text(
-      'Manage your Circuit, choose how notes are transcribed, and personalise the app.',
+      'Make Short-Circuit work your way.',
       style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.45),
     ),
     const SizedBox(height: 22),
@@ -966,7 +1079,7 @@ extension _ScPages on _CircuitHomePageState {
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Sc.circuitCard,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(14),
       ),
       child: InkWell(
         onTap: () => _goTo(_AppPage.circuit),
@@ -982,7 +1095,7 @@ extension _ScPages on _CircuitHomePageState {
                     'Circuit',
                     style: TextStyle(
                       fontSize: 17,
-                      fontWeight: FontWeight.w800,
+                      fontWeight: FontWeight.w600,
                       letterSpacing: -.4,
                     ),
                   ),
@@ -1008,185 +1121,45 @@ extension _ScPages on _CircuitHomePageState {
       ),
     ),
     const SizedBox(height: 24),
-    const ScGroupLabel('AI provider'),
-    InkWell(
-      borderRadius: BorderRadius.circular(18),
+    const ScGroupLabel('Your providers'),
+    ScTile(
+      icon: LucideIcons.languages,
+      title: 'Google Gemini',
+      subtitle: _geminiConnected
+          ? 'Transcription · API key saved'
+          : 'Add an API key to transcribe notes',
+      trailing: const Icon(LucideIcons.chevronRight, size: 18),
       onTap: () async {
         await Navigator.of(context).push(
           MaterialPageRoute<void>(builder: (_) => const GeminiSettingsPage()),
         );
-        await _loadGeminiState();
+        if (mounted) await _loadGeminiState();
       },
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: Sc.warmCard,
-          borderRadius: BorderRadius.circular(18),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 34,
-              height: 34,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(11),
-              ),
-              child: const Icon(
-                LucideIcons.bot,
-                size: 19,
-                color: Color(0xffdb5b37),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Google Gemini',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
-                  ),
-                  Text(
-                    _geminiConnected
-                        ? 'API key saved'
-                        : 'Add an API key to transcribe notes',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Color(0xff8e857d),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const Icon(
-              LucideIcons.chevronRight,
-              size: 18,
-              color: Color(0xff9f968d),
-            ),
-          ],
-        ),
-      ),
     ),
-    const SizedBox(height: 12),
-    InkWell(
-      borderRadius: BorderRadius.circular(18),
+    ScTile(
+      icon: LucideIcons.sparkles,
+      title: 'AI service',
+      subtitle: _aiConnected
+          ? 'Summaries, actions and chat · Ready'
+          : 'Connect your service for summaries and chat',
+      trailing: const Icon(LucideIcons.chevronRight, size: 18),
       onTap: () async {
         await Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (_) => const AiServiceSettingsPage(),
           ),
         );
-        await _loadAiState();
+        if (mounted) await _loadAiState();
       },
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: Sc.warmCard,
-          borderRadius: BorderRadius.circular(18),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 34,
-              height: 34,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(11),
-              ),
-              child: const Icon(
-                LucideIcons.sparkles,
-                size: 18,
-                color: Color(0xffdb5b37),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'AI service',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
-                  ),
-                  Text(
-                    _aiConnected
-                        ? 'Smart notes and action suggestions ready'
-                        : 'Connect an AI service for smart note review',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Color(0xff8e857d),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const Icon(
-              LucideIcons.chevronRight,
-              size: 18,
-              color: Color(0xff9f968d),
-            ),
-          ],
-        ),
-      ),
     ),
-    const SizedBox(height: 12),
-    InkWell(
-      borderRadius: BorderRadius.circular(18),
+    ScTile(
+      icon: LucideIcons.music,
+      title: 'Music recognition',
+      subtitle: _musicConnected
+          ? 'Your recognition service · Ready'
+          : 'Connect your recognition service',
+      trailing: const Icon(LucideIcons.chevronRight, size: 18),
       onTap: _openMusicSettings,
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: Sc.warmCard,
-          borderRadius: BorderRadius.circular(18),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 34,
-              height: 34,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(11),
-              ),
-              child: const Icon(
-                LucideIcons.music,
-                size: 18,
-                color: Color(0xffdb5b37),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Music recognition',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
-                  ),
-                  Text(
-                    _musicConnected
-                        ? 'Identify song is ready'
-                        : 'Add your service to identify songs',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Color(0xff8e857d),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const Icon(
-              LucideIcons.chevronRight,
-              size: 18,
-              color: Color(0xff9f968d),
-            ),
-          ],
-        ),
-      ),
     ),
     const SizedBox(height: 24),
     const ScGroupLabel('What AI can do'),
@@ -1236,6 +1209,13 @@ extension _ScPages on _CircuitHomePageState {
       ),
     ],
     const SizedBox(height: 24),
+    const ScGroupLabel('Testing'),
+    ScRow(
+      title: 'Test mode',
+      caption: 'Lets a computer start syncs, playback and recordings over USB or Wi-Fi debugging',
+      trailing: Switch(value: _testMode, onChanged: _setTestMode),
+    ),
+    const SizedBox(height: 24),
     const ScGroupLabel('You'),
     ScRow(
       title: 'Your name',
@@ -1254,7 +1234,7 @@ extension _ScPages on _CircuitHomePageState {
             children: [
               Text(
                 'Short-Circuit',
-                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
               ),
               Text(
                 'Voice notes from Circuit, on your phone.',
@@ -1291,6 +1271,12 @@ extension _ScPages on _CircuitHomePageState {
     if (confirmed != true) return;
     if (_relayActive) await _stopPhoneRelay();
     await _device?.disconnect();
+    // Forget means forget: also drop Android's pairing record, which Samsung's own
+    // Bluetooth settings do not list for this kind of device.
+    final forgetId = _savedCircuitId ?? _device?.remoteId.str;
+    if (forgetId != null) {
+      await _removeAndroidPairing(BluetoothDevice.fromId(forgetId));
+    }
     final preferences = await SharedPreferences.getInstance();
     await preferences.remove(_savedCircuitIdKey);
     if (!mounted) return;
@@ -1301,6 +1287,7 @@ extension _ScPages on _CircuitHomePageState {
       _textCharacteristic = null;
       _relayCharacteristic = null;
       _relayActive = false;
+      _relayLink = RelayLink.off;
       _wifiState = 'none';
       _status = 'Circuit forgotten. Scan to pair again.';
     });
@@ -1312,46 +1299,48 @@ extension _ScPages on _CircuitHomePageState {
     final waiting = _notes.where((n) => n.audioPath == null).length;
     return [
       ScBackRow(label: 'Home', onBack: _goBack, eyebrow: 'Device settings'),
-      Container(
-        margin: const EdgeInsets.only(top: 4, bottom: 24),
-        padding: const EdgeInsets.all(17),
-        decoration: BoxDecoration(
-          color: Sc.circuitCard,
-          borderRadius: BorderRadius.circular(21),
-        ),
+      const ScTitle('Your Circuit.'),
+      const SizedBox(height: 10),
+      Text(
+        available
+            ? 'Connected and ready when you are.'
+            : 'Connect your device to bring your thoughts here.',
+        style: const TextStyle(color: Sc.muted, fontSize: 15, height: 1.5),
+      ),
+      const Padding(
+        padding: EdgeInsets.symmetric(vertical: 24),
+        child: Center(child: ScDeviceMark(size: 112)),
+      ),
+      ScPanel(
+        color: Sc.circuitCard,
         child: Row(
           children: [
-            const ScDeviceMark(size: 43),
-            const SizedBox(width: 13),
+            Icon(
+              available ? LucideIcons.checkCheck : LucideIcons.bluetooth,
+              size: 20,
+              color: Sc.circuitMark,
+            ),
+            const SizedBox(width: 12),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Circuit',
-                    style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -.5,
-                    ),
-                  ),
-                  Text(
-                    available
-                        ? (_relayActive
-                              ? 'Connected via Short-Circuit'
-                              : 'Connected over Bluetooth')
-                        : 'Not connected',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Color(0xff6e7d72),
-                    ),
-                  ),
-                ],
+              child: Text(
+                available
+                    ? (_relayActive
+                          ? 'Connected through your phone'
+                          : 'Connected over Bluetooth')
+                    : _needsPairingRepair
+                    ? 'Pairing needs repair'
+                    : 'Not connected',
+                style: const TextStyle(
+                  color: Sc.circuitMark,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ],
         ),
       ),
+      const SizedBox(height: 20),
       _syncHealthCard(),
       _syncBanner(),
       if (!available) ...[
@@ -1425,7 +1414,7 @@ extension _ScPages on _CircuitHomePageState {
       ),
       ScRow(
         title: 'Notes waiting',
-        caption: 'Syncs automatically on Wi‑Fi',
+        caption: 'Hold Circuit\'s button 2 s to sync',
         value: (_boardWaiting ?? waiting) == 0
             ? 'All synced'
             : '${_boardWaiting ?? waiting} on Circuit',
@@ -1524,7 +1513,11 @@ extension _ScPages on _CircuitHomePageState {
               label: 'Record',
               tooltip: 'Record a voice note on Circuit',
               color: Sc.accent,
-              onTap: !available || _audioBusy || _recordingAudio
+              onTap:
+                  !available ||
+                      _audioBusy ||
+                      _recordingAudio ||
+                      _circuitPlayback != CircuitPlaybackPhase.idle
                   ? null
                   : _recordAudio,
             ),
@@ -1538,7 +1531,11 @@ extension _ScPages on _CircuitHomePageState {
               tooltip:
                   'Listen for $_songClipSeconds seconds and identify the song',
               color: Sc.dark,
-              onTap: !available || _audioBusy || _recordingAudio
+              onTap:
+                  !available ||
+                      _audioBusy ||
+                      _recordingAudio ||
+                      _circuitPlayback != CircuitPlaybackPhase.idle
                   ? null
                   : _identifySong,
             ),
@@ -1549,19 +1546,56 @@ extension _ScPages on _CircuitHomePageState {
       ScActionBar(
         children: [
           ScIconButton(
-            icon: LucideIcons.play,
-            tooltip: 'Play latest recording on Circuit',
-            caption: 'Play',
+            icon: _circuitPlayback == CircuitPlaybackPhase.playing
+                ? LucideIcons.square
+                : LucideIcons.play,
+            tooltip: _circuitPlayback == CircuitPlaybackPhase.playing
+                ? (_circuitPlaybackSupportsStop
+                      ? 'Stop playback on Circuit'
+                      : 'Playing on Circuit')
+                : 'Play latest recording on Circuit',
+            caption: switch (_circuitPlayback) {
+              CircuitPlaybackPhase.idle => 'Play',
+              CircuitPlaybackPhase.requesting => 'Starting',
+              CircuitPlaybackPhase.playing =>
+                _circuitPlaybackSupportsStop ? 'Stop' : 'Playing',
+              CircuitPlaybackPhase.stopping => 'Stopping',
+            },
+            busy:
+                _circuitPlayback == CircuitPlaybackPhase.requesting ||
+                _circuitPlayback == CircuitPlaybackPhase.stopping,
             onPressed: available && !_audioBusy && !_recordingAudio
-                ? _playAudio
+                ? (_circuitPlayback == CircuitPlaybackPhase.playing
+                      ? (_circuitPlaybackSupportsStop
+                            ? _stopCircuitPlayback
+                            : null)
+                      : _circuitPlayback == CircuitPlaybackPhase.idle
+                      ? _playAudio
+                      : null)
                 : null,
           ),
           ScIconButton(
             icon: LucideIcons.eraser,
             tooltip: 'Free up Circuit storage',
             caption: 'Free space',
-            onPressed: available && !_audioBusy && !_recordingAudio
+            onPressed:
+                available &&
+                    !_audioBusy &&
+                    !_recordingAudio &&
+                    _circuitPlayback == CircuitPlaybackPhase.idle
                 ? _cleanCircuitNotes
+                : null,
+          ),
+          ScIconButton(
+            icon: LucideIcons.refreshCw,
+            tooltip: 'Send old notes again',
+            caption: 'Send again',
+            onPressed:
+                available &&
+                    !_audioBusy &&
+                    !_recordingAudio &&
+                    _circuitPlayback == CircuitPlaybackPhase.idle
+                ? _resendCircuitNotes
                 : null,
           ),
           if (_relayActive)
@@ -1588,6 +1622,16 @@ extension _ScPages on _CircuitHomePageState {
             ),
         ],
       ),
+      if (_circuitPlaybackFeedback != null) ...[
+        const SizedBox(height: 16),
+        Semantics(
+          liveRegion: true,
+          child: Text(
+            _circuitPlaybackFeedback!,
+            style: const TextStyle(fontSize: 14, color: Sc.ink, height: 1.5),
+          ),
+        ),
+      ],
       const SizedBox(height: 8),
       Text(
         _status,
@@ -1615,7 +1659,7 @@ extension _ScPages on _CircuitHomePageState {
         'Connected to $_wifiSsid',
         _wifiDetail.isEmpty
             ? 'Circuit is online.'
-            : 'Online at $_wifiDetail. Notes sync automatically when your phone is on this network.',
+            : 'Online at $_wifiDetail. Hold Circuit\'s button for 2 seconds to sync notes when your phone is on this network.',
       ),
       'connecting' => (
         LucideIcons.wifi,
@@ -1646,7 +1690,7 @@ extension _ScPages on _CircuitHomePageState {
       padding: const EdgeInsets.all(15),
       decoration: BoxDecoration(
         color: Sc.warmCard,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(14),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1670,7 +1714,7 @@ extension _ScPages on _CircuitHomePageState {
                   title,
                   style: const TextStyle(
                     fontSize: 14,
-                    fontWeight: FontWeight.w800,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
                 const SizedBox(height: 4),
@@ -1678,7 +1722,7 @@ extension _ScPages on _CircuitHomePageState {
                   subtitle,
                   style: const TextStyle(
                     fontSize: 11.5,
-                    color: Color(0xff8e857d),
+                    color: Sc.muted,
                     height: 1.4,
                   ),
                 ),
@@ -1780,7 +1824,7 @@ extension _ScPages on _CircuitHomePageState {
                       ssid,
                       style: const TextStyle(
                         fontSize: 14,
-                        fontWeight: FontWeight.w800,
+                        fontWeight: FontWeight.w600,
                         color: Color(0xff332d28),
                       ),
                     ),
@@ -1791,7 +1835,7 @@ extension _ScPages on _CircuitHomePageState {
                       style: TextStyle(
                         fontSize: 11,
                         color: Sc.green,
-                        fontWeight: FontWeight.w800,
+                        fontWeight: FontWeight.w600,
                       ),
                     )
                   else
@@ -1898,41 +1942,82 @@ extension _ScPages on _CircuitHomePageState {
     );
   }
 
-  Future<void> _openRecordingSheet() => showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    showDragHandle: true,
-    backgroundColor: Sc.bg,
-    builder: (_) =>
-        RecordingSheet(read: _recordingSnapshot, onStop: _stopRecording),
-  );
+  Future<void> _openRecordingSheet() async {
+    // The sheet sits where the status pill is, so the pill steps aside while it is open.
+    statusPillHidden.value = true;
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        showDragHandle: true,
+        backgroundColor: Sc.bg,
+        builder: (_) =>
+            RecordingSheet(read: _recordingSnapshot, onStop: _stopRecording),
+      );
+    } finally {
+      statusPillHidden.value = false;
+    }
+  }
 
   // ---- shell ---------------------------------------------------------------
 
+  Widget _captureEntry() => ValueListenableBuilder<Map<String, dynamic>?>(
+    valueListenable: _phoneRecording,
+    builder: (context, recording, _) {
+      final active = recording != null;
+      final elapsed = (recording?['elapsedMs'] as num?)?.toInt() ?? 0;
+      return FilledButton.icon(
+        style: FilledButton.styleFrom(
+          backgroundColor: active ? Sc.dark : Sc.accent,
+          foregroundColor: active ? Colors.white : Sc.ink,
+          minimumSize: const Size.fromHeight(52),
+        ),
+        onPressed: active ? _startPhoneRecording : _showCaptureOptions,
+        icon: Icon(active ? LucideIcons.audioLines : LucideIcons.mic, size: 20),
+        label: Text(
+          active
+              ? '${recording["state"] == "paused" ? "Paused" : "Recording"} ${phoneRecordingClock(elapsed)} · Open controls'
+              : 'Capture a thought',
+        ),
+      );
+    },
+  );
+
+  Widget? _inlineSnack() {
+    final snack = _statusSnack();
+    return snack == null
+        ? null
+        : Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+            child: snack,
+          );
+  }
+
   Widget _buildShell() {
-    final content = ListView(
-      padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
-      children: switch (_page) {
-        _AppPage.home => _homePage(),
-        _AppPage.notes => _notesPage(),
-        _AppPage.tasks => _tasksPage(),
-        _AppPage.settings => _settingsPage(),
-        _AppPage.circuit => _circuitPage(),
-        _AppPage.wifi => _wifiPage(),
-        _AppPage.hiddenWifi => _hiddenWifiPage(),
-        _AppPage.group => _groupPage(),
-      },
+    _publishSyncUi();
+    _publishStatusUi();
+    final content = Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 640),
+        child: ListView(
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
+          children: switch (_page) {
+            _AppPage.home => _homePage(),
+            _AppPage.notes => _notesPage(),
+            _AppPage.tasks => _tasksPage(),
+            _AppPage.settings => _settingsPage(),
+            _AppPage.circuit => _circuitPage(),
+            _AppPage.wifi => _wifiPage(),
+            _AppPage.hiddenWifi => _hiddenWifiPage(),
+            _AppPage.group => _groupPage(),
+          },
+        ),
+      ),
     );
-    // While Circuit records, a compact pill grows out of the Circuit indicator on Home (or out of
-    // the top edge on other pages) and folds back into it when recording ends, so notes, tasks
-    // and settings stay usable.
-    final body = RecordingMorph(
-      active: _recordingAudio,
-      chipKey: _deviceChipKey,
-      island: () => _recordingIsland(decorated: false),
-      child: content,
-    );
+    // Recording, sync and playback show on every screen from one overlay (status_overlay.dart).
+    final body = content;
     final tab = switch (_page) {
       _AppPage.home => 0,
       _AppPage.notes || _AppPage.group => 1,
@@ -1947,7 +2032,143 @@ extension _ScPages on _CircuitHomePageState {
       },
       child: Scaffold(
         body: SafeArea(bottom: false, child: body),
-        bottomNavigationBar: ScNavBar(index: tab, onSelect: _selectTab),
+        bottomNavigationBar: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Playback gets its own row here, above Capture a thought, so nothing is covered.
+            ?_inlineSnack(),
+            if (tab >= 0 && tab != 3 && !_recordingAudio)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
+                child: _captureEntry(),
+              ),
+            ScNavBar(index: tab, onSelect: _selectTab),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The three indicators at the top of Home. Each says what is true now:
+///  - the dot: Circuit is connected (green), being reached (orange), or not (grey);
+///  - Wi-Fi: Circuit's own Wi-Fi, only while Circuit is connected, since otherwise it is old news;
+///  - the phone: Stay connected is on (green once it has a link, orange while it is trying).
+class CircuitChip extends StatelessWidget {
+  const CircuitChip({
+    super.key,
+    this.chipKey,
+    required this.connected,
+    required this.link,
+    required this.wifiState,
+    required this.stayConnected,
+    required this.onTap,
+  });
+
+  final Key? chipKey;
+  final bool connected;
+  final RelayLink link;
+  final String wifiState;
+  final bool stayConnected;
+  final VoidCallback onTap;
+
+  static const grey = Color(0xffa6a9af);
+
+  bool get _reaching =>
+      !connected && (link == RelayLink.trying || link == RelayLink.needsRepair);
+
+  Color get dotColor => connected
+      ? const Color(0xff3b9a68)
+      : _reaching
+      ? Sc.orange
+      : grey;
+
+  Color get wifiColor => !connected
+      ? grey
+      : wifiState == 'connected'
+      ? Sc.green
+      : wifiState == 'connecting'
+      ? Sc.orange
+      : grey;
+
+  Color get stayColor => !stayConnected
+      ? grey
+      : connected
+      ? Sc.green
+      : Sc.orange;
+
+  String get description {
+    final circuit = connected
+        ? 'Circuit, connected'
+        : link == RelayLink.needsRepair
+        ? 'Circuit, needs pairing again'
+        : link == RelayLink.trying
+        ? 'Circuit, connecting'
+        : 'Circuit, not connected';
+    final wifi = !connected
+        ? ''
+        : wifiState == 'connected'
+        ? '. Wi-Fi connected'
+        : wifiState == 'connecting'
+        ? '. Wi-Fi connecting'
+        : '. Wi-Fi not connected';
+    return '$circuit$wifi. Stay connected ${stayConnected ? 'on' : 'off'}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: description,
+      hint: 'Opens device settings',
+      excludeSemantics: true,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          key: chipKey,
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+          decoration: BoxDecoration(
+            color: Sc.chip,
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                key: const ValueKey('circuit-dot'),
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: dotColor,
+                  boxShadow: connected
+                      ? const [
+                          BoxShadow(color: Color(0x203b9a68), spreadRadius: 4),
+                        ]
+                      : null,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(
+                connected && wifiState == 'failed'
+                    ? LucideIcons.wifiOff
+                    : LucideIcons.wifi,
+                key: const ValueKey('circuit-wifi'),
+                size: 15,
+                color: wifiColor,
+              ),
+              const SizedBox(width: 6),
+              Icon(
+                LucideIcons.smartphone,
+                key: const ValueKey('circuit-stay'),
+                size: 15,
+                color: stayColor,
+              ),
+              const SizedBox(width: 8),
+              const ScDeviceMark(size: 22),
+            ],
+          ),
+        ),
       ),
     );
   }

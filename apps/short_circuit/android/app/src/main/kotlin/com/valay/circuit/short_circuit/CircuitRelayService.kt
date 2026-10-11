@@ -55,6 +55,7 @@ class CircuitRelayService : Service() {
         private const val notificationId = 42
         private const val preferencesName = "circuit_relay"
         private const val addressKey = "circuit_address"
+        private const val stoppedKey = "stopped_by_user"
         private val serviceUuid = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb")
         private val commandUuid = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb")
         private val relayUuid = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb")
@@ -66,10 +67,35 @@ class CircuitRelayService : Service() {
         @Volatile var wifiStatus: String? = null
         @Volatile private var latestSyncedFile: String? = null
         @Volatile private var audioStatusListener: ((String) -> Unit)? = null
+        /**
+         * Brings the relay back after the system ended it (reboot, app update,
+         * the process being killed). A relay the person switched off stays off.
+         */
+        fun resumeIfWanted(context: Context) {
+            if (relayStatus != "Stopped") return
+            val prefs = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+            if (prefs.getString(addressKey, null) == null || prefs.getBoolean(stoppedKey, false)) return
+            try {
+                val intent = Intent(context, CircuitRelayService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+                else context.startService(intent)
+            } catch (error: Exception) {
+                // Android can refuse a background start; opening the app retries.
+                Log.w("CircuitRelay", "Could not resume the relay: ${error.message}")
+            }
+        }
+
+        /** Records the person's choice so a restart knows whether to resume. */
+        fun rememberChoice(context: Context, stopped: Boolean) {
+            context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+                .edit().putBoolean(stoppedKey, stopped).apply()
+        }
+
         fun writeToCircuit(value: String): Boolean = activeService?.writeCommand(value) ?: false
-        fun playSyncedRecording(path: String): Boolean = activeService?.playRecording(path) ?: false
-        fun playWavBytes(bytes: ByteArray): Boolean = activeService?.playBytes(bytes) ?: false
-        fun stopPlayback() { activeService?.stopPlayback() }
+        // Playback does not need the relay to be running; see NotePlayer.
+        fun playSyncedRecording(path: String): Boolean = NotePlayer.playFile(path)
+        fun playWavBytes(bytes: ByteArray): Boolean = NotePlayer.playBytes(bytes)
+        fun stopPlayback() { NotePlayer.stop() }
         fun playLatestSyncedRecording(): Boolean = latestSyncedFile?.let(::playSyncedRecording) ?: false
         fun clearAudio(): Boolean = activeService?.clearAudioFiles() ?: false
 
@@ -126,7 +152,6 @@ class CircuitRelayService : Service() {
     private var syncExpectedBytes = 0L
     private var syncReceivedBytes = 0L
     private var syncCompleteStatus: String? = null
-    private var mediaPlayer: android.media.MediaPlayer? = null
     private val reconnectRunnable = Runnable { circuitAddress?.let(::connect) }
     // Turning Bluetooth off kills the connection without a callback, and nothing then
     // brought it back when Bluetooth returned. Follow the adapter instead.
@@ -189,7 +214,8 @@ class CircuitRelayService : Service() {
             return START_NOT_STICKY
         }
         shouldReconnect = true
-        getSharedPreferences(preferencesName, MODE_PRIVATE).edit().putString(addressKey, circuitAddress).apply()
+        getSharedPreferences(preferencesName, MODE_PRIVATE).edit()
+            .putString(addressKey, circuitAddress).putBoolean(stoppedKey, false).apply()
         reconnectHandler.removeCallbacks(reconnectRunnable)
         relayStatus = "Connecting to Circuit…"
         startAsForeground(relayStatus)
@@ -399,7 +425,13 @@ class CircuitRelayService : Service() {
             wifiNetworks = request.lines().drop(1).map { it.trim() }.filter { it.isNotEmpty() }.distinct().sorted()
             return
         }
-        if (request.startsWith("@sync-status\n")) Diagnostics.boardHealth(this, request)
+        if (request.startsWith("@sync-status\n")) {
+            Diagnostics.boardHealth(this, request)
+            // Board health and playback snapshots belong to Dart as well as diagnostics.
+            // Keep them separate from the last audio event, which is replayed on reopening.
+            audioStatusListener?.invoke(request)
+            return
+        }
         if (request.startsWith("@wifi-status\n")) {
             // Delivered to Dart on the same channel as audio status, but cached
             // separately so it never overwrites the audio state.
@@ -550,6 +582,15 @@ class CircuitRelayService : Service() {
         }
     }
 
+    private fun waitForWifi(timeoutMs: Long): Network? {
+        val until = SystemClock.elapsedRealtime() + timeoutMs
+        while (true) {
+            wifiNetwork()?.let { return it }
+            if (SystemClock.elapsedRealtime() >= until) return null
+            Thread.sleep(500)
+        }
+    }
+
     private fun pinnedSocketFactory(fingerprint: String): SSLSocketFactory {
         val trust = object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) =
@@ -568,7 +609,7 @@ class CircuitRelayService : Service() {
 
     private fun runWifiSync(host: String, port: Int, token: String, fingerprint: String, generation: Int) {
         fun superseded() = generation != syncGeneration
-        val network = wifiNetwork()
+        var network = wifiNetwork()
         Log.i("CircuitSync", "Wi-Fi network available: ${network != null}")
         if (network == null) {
             publishAudioStatus("Sync needs Wi-Fi: connect your phone to the same network as Circuit")
@@ -576,7 +617,7 @@ class CircuitRelayService : Service() {
         }
         val factory = pinnedSocketFactory(fingerprint)
         fun open(path: String, method: String = "GET", from: Long = 0): HttpsURLConnection =
-            (network.openConnection(URL("https://$host:$port$path")) as HttpsURLConnection).apply {
+            (network!!.openConnection(URL("https://$host:$port$path")) as HttpsURLConnection).apply {
                 sslSocketFactory = factory
                 hostnameVerifier = HostnameVerifier { _, _ -> true }  // identity is the pinned fingerprint
                 requestMethod = method
@@ -591,21 +632,17 @@ class CircuitRelayService : Service() {
                 if (responseCode != 200) throw IOException("Circuit refused the sync (HTTP $responseCode)")
                 inputStream.bufferedReader().use { it.readText() }
             }
-            val notes = listing.lines().filter { it.isNotBlank() }.mapNotNull { line ->
-                val f = line.split(',')
-                if (f.size < 3) null else Triple(f[0].toLongOrNull() ?: return@mapNotNull null,
-                    f[1].toLongOrNull() ?: return@mapNotNull null, f[2].toLongOrNull() ?: 0L)
-            }
+            val notes = NoteListing.parse(listing)
             if (notes.isEmpty()) {
                 publishAudioStatus("Sync complete: no new notes")
                 return
             }
-            val totalBytes = notes.sumOf { it.second }
+            val totalBytes = notes.sumOf { it.bytes }
             var doneBytes = 0L
             var lastPercent = -1
             Log.i("CircuitSync", "Listing ok: ${notes.size} notes, $totalBytes bytes")
             publishAudioStatus("Sync started\n$totalBytes bytes")
-            for ((id, bytes, epoch) in notes) {
+            for ((id, bytes, epoch, group) in notes) {
                 if (superseded()) return
                 // The same recording may already be here under a different time stamp
                 // (an acknowledgement was lost and Circuit offered it again). Reuse it
@@ -620,15 +657,29 @@ class CircuitRelayService : Service() {
                     var interruptions = 0
                     var attempts = 0
                     var progressedTo = partial.length()
+                    var lastProgressMs = SystemClock.elapsedRealtime()
                     while (partial.length() < bytes) {
                         // Circuit's memory is tight, so on a long download it can drop the connection
-                        // now and then. Resuming picks up where it stopped, so only attempts that make
-                        // no progress count against the limit.
+                        // now and then. Resuming picks up where it stopped, so only time without
+                        // progress counts: Circuit keeps its Wi-Fi sync open for 25 seconds after the
+                        // phone goes quiet, so keep trying for that long, with a pause between tries
+                        // (a Wi-Fi network that has only just come back refuses at once).
                         if (partial.length() > progressedTo) {
                             progressedTo = partial.length()
+                            lastProgressMs = SystemClock.elapsedRealtime()
                             attempts = 0
                         }
-                        if (++attempts > 4) throw IOException("Connection to Circuit kept dropping")
+                        attempts++
+                        if (attempts > 1) {
+                            if (SystemClock.elapsedRealtime() - lastProgressMs > 24000) {
+                                throw IOException("Connection to Circuit kept dropping")
+                            }
+                            Thread.sleep(1500)
+                        }
+                        // A phone that lost Wi-Fi comes back with a new network, and the old one can no
+                        // longer be used (the socket cannot be bound to it). Wait briefly for Wi-Fi to
+                        // return and carry on with the new one; give up at once if it does not.
+                        network = waitForWifi(20000) ?: throw IOException("Wi-Fi connection lost")
                         try {
                             val have = partial.length()
                             val connection = open("/notes/$id", from = have)
@@ -676,6 +727,9 @@ class CircuitRelayService : Service() {
                         "kb_s" to bytes / 1024 / seconds,
                     )
                 }
+                // One minute of a longer recording: remember which one and which part, so the app can
+                // join the parts. Written before the app is told the file is here.
+                if (group != null) File(filesDir, "${NoteListing.groupPrefix}$id.txt").writeText(group)
                 doneBytes += bytes
                 Log.i("CircuitSync", "Saved note $id as ${target.name} ($bytes B)")  // the extension says whether it is encrypted
                 val ack = open("/ack/$id", "POST")
@@ -693,6 +747,7 @@ class CircuitRelayService : Service() {
                     error is javax.net.ssl.SSLException -> "certificate"
                     error is java.net.SocketTimeoutException || error is java.net.ConnectException ||
                         error is java.net.NoRouteToHostException -> "unreachable"
+                    error.message?.contains("Wi-Fi connection lost") == true -> "wifi_lost"
                     error.message?.contains("kept dropping") == true -> "dropping"
                     error.message?.contains("incomplete") == true -> "incomplete"
                     else -> "other"
@@ -702,7 +757,13 @@ class CircuitRelayService : Service() {
                 is javax.net.ssl.SSLException -> "Circuit's certificate did not match this phone"
                 is java.net.SocketTimeoutException, is java.net.ConnectException, is java.net.NoRouteToHostException ->
                     "Circuit is not reachable on this Wi-Fi. Check both are on the same network and that Short-Circuit has Local network access in Android settings"
-                else -> "${error.javaClass.simpleName}: ${error.message ?: "no details"}"
+                else -> when {
+                    error.message?.contains("Wi-Fi connection lost") == true ->
+                        "The phone lost its Wi-Fi connection. Reconnect to the same network as Circuit and sync again; what already arrived is kept"
+                    error.message?.contains("kept dropping") == true ->
+                        "The connection to Circuit kept dropping. Sync again; what already arrived is kept"
+                    else -> "${error.javaClass.simpleName}: ${error.message ?: "no details"}"
+                }
             }
             publishAudioStatus("Sync failed: $reason (${error.javaClass.simpleName})")
         }
@@ -711,58 +772,9 @@ class CircuitRelayService : Service() {
     private fun clearAudioFiles(): Boolean {
         latestSyncedFile = null
         filesDir.listFiles()
-            ?.filter { isNoteFile(it) }
+            ?.filter { isNoteFile(it) || it.name.startsWith(NoteListing.groupPrefix) }
             ?.forEach { it.delete() }
         return writeCommand("@audio-clear")
-    }
-
-    private fun playRecording(path: String): Boolean = try {
-        val file = File(path)
-        if (!file.exists()) return false
-        stopPlayback()
-        mediaPlayer = android.media.MediaPlayer().apply {
-            setDataSource(file.absolutePath)
-            setOnCompletionListener {
-                release()
-                if (mediaPlayer === this) mediaPlayer = null
-            }
-            prepare()
-            start()
-        }
-        true
-    } catch (_: Exception) { false }
-
-    /** Plays a WAV held in memory (an encrypted note the app has opened), so no plain file is written. */
-    private fun playBytes(wav: ByteArray): Boolean = try {
-        stopPlayback()
-        val source = object : android.media.MediaDataSource() {
-            override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
-                if (position >= wav.size) return -1
-                val count = minOf(size, wav.size - position.toInt())
-                System.arraycopy(wav, position.toInt(), buffer, offset, count)
-                return count
-            }
-            override fun getSize(): Long = wav.size.toLong()
-            override fun close() {}
-        }
-        mediaPlayer = android.media.MediaPlayer().apply {
-            setDataSource(source)
-            setOnCompletionListener {
-                release()
-                if (mediaPlayer === this) mediaPlayer = null
-            }
-            prepare()
-            start()
-        }
-        true
-    } catch (_: Exception) { false }
-
-    private fun stopPlayback() {
-        mediaPlayer?.let {
-            try { it.stop() } catch (_: Exception) { }
-            it.release()
-        }
-        mediaPlayer = null
     }
 
     private fun hasBluetoothPermission() = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||

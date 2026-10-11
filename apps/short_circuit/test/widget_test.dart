@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:short_circuit/main.dart';
 
@@ -14,6 +15,28 @@ void main() {
     expect(
       shouldStartCircuitPairing(isBonded: true, userRequestedPairing: true),
       isFalse,
+    );
+  });
+
+  test('tapping Connect replaces an old pairing instead of reusing it', () {
+    // The record Android holds may be stale, and Samsung hides it from its settings.
+    expect(
+      shouldReplaceCircuitPairing(isBonded: true, userRequestedPairing: true),
+      isTrue,
+    );
+    // An automatic reconnect never touches pairing.
+    expect(
+      shouldReplaceCircuitPairing(isBonded: true, userRequestedPairing: false),
+      isFalse,
+    );
+    expect(
+      shouldReplaceCircuitPairing(isBonded: false, userRequestedPairing: true),
+      isFalse,
+    );
+    // After the old one is removed, pairing starts.
+    expect(
+      shouldStartCircuitPairing(isBonded: false, userRequestedPairing: true),
+      isTrue,
     );
   });
 
@@ -44,14 +67,22 @@ void main() {
     await tester.pumpWidget(const ShortCircuitApp());
     await tester.pump(const Duration(seconds: 1));
 
-    expect(find.text('Hello.'), findsOneWidget);
-    expect(find.text('YOUR DAY AT A GLANCE'), findsOneWidget);
+    expect(find.text('A clearer head.'), findsOneWidget);
+    expect(find.text('A PLACE TO BEGIN'), findsOneWidget);
     // The Circuit indicator is the device icon, not the word.
     expect(find.byType(ScDeviceMark), findsWidgets);
     expect(find.text('Circuit'), findsNothing);
     for (final label in ['Home', 'Notes', 'Tasks', 'Settings']) {
       expect(find.text(label), findsWidgets);
     }
+
+    await tester.tap(find.text('Capture a thought'));
+    await tester.pumpAndSettle();
+    expect(find.text('Where’s the thought?'), findsOneWidget);
+    expect(find.text('This phone'), findsOneWidget);
+    expect(find.text('Circuit'), findsOneWidget);
+    Navigator.of(tester.element(find.text('This phone'))).pop();
+    await tester.pumpAndSettle();
 
     await tester.tap(find.text('Tasks'));
     await tester.pump(const Duration(milliseconds: 300));

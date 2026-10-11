@@ -9,6 +9,7 @@ class SongPage extends StatefulWidget {
     required this.onIdentify,
     required this.onPlay,
     required this.onDelete,
+    this.onDeletePhoneOnly,
     required this.onOpenSettings,
     required this.onUseAsNote,
     this.openLink,
@@ -19,6 +20,7 @@ class SongPage extends StatefulWidget {
   final Future<void> Function(String id) onIdentify;
   final Future<void> Function(String? path) onPlay;
   final Future<void> Function(String id) onDelete;
+  final Future<void> Function(String id)? onDeletePhoneOnly;
   final VoidCallback onOpenSettings;
 
   /// Turns a clip wrongly taken for a song back into a voice note.
@@ -51,9 +53,16 @@ class _SongPageState extends State<SongPage> {
   }
 
   Future<void> _delete() async {
-    final confirmed = await _confirmDeleteNote(context);
-    if (!confirmed || !mounted) return;
-    await widget.onDelete(widget.noteId);
+    final choice = await _chooseNoteDelete(
+      context,
+      fromCircuit: widget.onDeletePhoneOnly != null,
+    );
+    if (choice == null || !mounted) return;
+    if (choice == NoteDeleteChoice.phoneOnly) {
+      await widget.onDeletePhoneOnly!(widget.noteId);
+    } else {
+      await widget.onDelete(widget.noteId);
+    }
     if (mounted) Navigator.pop(context);
   }
 
@@ -129,7 +138,7 @@ class _SongPageState extends State<SongPage> {
           Text(
             title,
             textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 6),
           Text(
@@ -165,8 +174,8 @@ class _SongPageState extends State<SongPage> {
             song.title ?? 'Unknown title',
             textAlign: TextAlign.center,
             style: const TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.w800,
+              fontSize: 28,
+              fontWeight: FontWeight.w600,
               letterSpacing: -.5,
             ),
           ),
@@ -205,7 +214,7 @@ class _SongPageState extends State<SongPage> {
           const SizedBox(height: 14),
           const Text(
             'Identifying…',
-            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
           ),
         ],
       );
@@ -229,14 +238,17 @@ class _SongPageState extends State<SongPage> {
       backgroundColor: Sc.bg,
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
+          padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
           children: [
             ScBackRow(
               label: 'Notes',
               onBack: () => Navigator.pop(context),
               eyebrow: 'Song identification',
             ),
-            const SizedBox(height: 20),
+            const ScEyebrow('Music recognition'),
+            const SizedBox(height: 8),
+            ScTitle(song.matched ? 'A good find.' : 'Find that song.'),
+            const SizedBox(height: 24),
             body,
             const SizedBox(height: 14),
             Center(
@@ -390,7 +402,7 @@ class _MusicSettingsPageState extends State<MusicSettingsPage> {
       child: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
-              padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
+              padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
               children: [
                 ScBackRow(
                   label: 'Settings',

@@ -20,8 +20,16 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'telemetry.dart';
 part 'backup.dart';
+part 'board_parts.dart';
+part 'sync_state.dart';
+part 'circuit_playback.dart';
 part 'groups.dart';
+part 'long_notes.dart';
 part 'music.dart';
+part 'note_dates.dart';
+part 'note_source.dart';
+part 'now_playing.dart';
+part 'phone_recording.dart';
 part 'secure_notes.dart';
 part 'ui/backup_page.dart';
 part 'ui/chat_page.dart';
@@ -30,6 +38,8 @@ part 'ui/pages.dart';
 part 'ui/recording_view.dart';
 part 'ui/song_page.dart';
 part 'ui/theme.dart';
+part 'test_control.dart';
+part 'ui/status_overlay.dart';
 
 const _circuitName = 'Circuit';
 final _textServiceId = Guid('0000fff0-0000-1000-8000-00805f9b34fb');
@@ -56,12 +66,105 @@ bool shouldStartCircuitPairing({
   required bool userRequestedPairing,
 }) => !isBonded && userRequestedPairing;
 
+/// Tapping Connect on a Circuit found by scanning means "pair this one". If Android
+/// already lists it as paired, that record may be stale (the board forgot the phone, but
+/// the phone did not forget the board) and Samsung hides such devices from its settings,
+/// so the person cannot remove it by hand. The old record is replaced, as Repair does.
+bool shouldReplaceCircuitPairing({
+  required bool isBonded,
+  required bool userRequestedPairing,
+}) => isBonded && userRequestedPairing;
+
+/// 'Phone' or 'Circuit' from the recording's file. This phone's recorder names its files
+/// phone-note-<number>.cnote; everything else, from Circuit's synced files (circuit-note-...)
+/// to a recording still waiting to sync or a song clip, was made by the board.
+String noteSourceOf(String? audioPath) =>
+    (audioPath?.split('/').last ?? '').startsWith('phone-note-')
+    ? 'Phone'
+    : 'Circuit';
+
+/// The two counts Circuit shows on its own screen: notes still waiting to reach the phone,
+/// and notes that have. They are Circuit's notes only. A recording made on the phone never
+/// went through the board, so it must not appear in the board's totals.
+({int pending, int synced}) boardNoteCounts(Iterable<CircuitNote> notes) {
+  var pending = 0;
+  var synced = 0;
+  for (final note in notes) {
+    if (note.source == 'Phone') continue;
+    note.audioPath == null ? pending++ : synced++;
+  }
+  return (pending: pending, synced: synced);
+}
+
+/// How far along a note is, from its audio to its AI review. "Transcribed" means the text is
+/// there but the AI review has not run; once it has, the note says so.
+String noteStageLabel(CircuitNote note) {
+  if (note.enrichmentStatus == 'enriching') return 'AI reviewing';
+  if (note.enrichmentStatus == 'failed') return 'AI review failed';
+  if (note.actionSuggestions.any((item) => item.state == 'pending')) {
+    return 'Action to review';
+  }
+  if (note.transcript != null) {
+    return note.enrichmentStatus == 'ready' ? 'AI reviewed' : 'Transcribed';
+  }
+  if (note.audioPath != null) return 'Ready to transcribe';
+  return 'Waiting to sync';
+}
+
+/// What the phone's link to Circuit is doing, read from the background service's status.
+/// "Running" is not "connected": the service also runs while it is still trying.
+enum RelayLink { off, trying, connected, needsRepair }
+
+RelayLink relayLinkFromStatus(String? status) {
+  if (status == null || status == 'Stopped') return RelayLink.off;
+  if (status.startsWith('Circuit needs repair')) return RelayLink.needsRepair;
+  // Bluetooth is up in both; the second only means the phone has no internet to sync with.
+  if (status == 'Connected to Circuit' ||
+      status == 'Phone internet unavailable') {
+    return RelayLink.connected;
+  }
+  return RelayLink
+      .trying; // connecting, securing, waiting to reconnect, Bluetooth off
+}
+
 /// Whether a note should get its AI review without being asked: only with an AI service set up
 /// and the Settings toggle on. The "Run AI review" button always works.
 bool shouldEnrichAutomatically({
   required bool aiConnected,
   required bool autoEnrich,
 }) => aiConnected && autoEnrich;
+
+/// The text of Gemini's answer. An answer with no text because the request was blocked or
+/// cut short is an error to report, not "no speech": silence comes back as an empty or
+/// [[NOISE]] answer to a request that went through.
+String? geminiAnswerText(Map<String, dynamic> decoded) {
+  final candidates = decoded['candidates'] as List<dynamic>?;
+  if (candidates == null || candidates.isEmpty) {
+    final blocked =
+        (decoded['promptFeedback'] as Map<String, dynamic>?)?['blockReason'];
+    throw Exception(
+      'Gemini gave no answer${blocked == null ? '' : ' (blocked: $blocked)'}.',
+    );
+  }
+  final candidate = candidates.first as Map<String, dynamic>;
+  final parts =
+      (candidate['content'] as Map<String, dynamic>?)?['parts']
+          as List<dynamic>?;
+  final text = parts
+      ?.whereType<Map<String, dynamic>>()
+      .map((part) => part['text'])
+      .whereType<String>()
+      .join()
+      .trim();
+  final reason = candidate['finishReason'] as String?;
+  if ((text == null || text.isEmpty) &&
+      reason != null &&
+      reason != 'STOP' &&
+      reason != 'FINISH_REASON_UNSPECIFIED') {
+    throw Exception('Gemini stopped without an answer ($reason).');
+  }
+  return text;
+}
 
 class GeminiClient {
   const GeminiClient();
@@ -118,6 +221,7 @@ class GeminiClient {
   Future<GeminiTranscription> transcribeWav(
     Uint8List wavBytes, {
     bool detectMusic = true,
+    PartContext? part,
   }) async {
     final key = await apiKey();
     if (key == null || key.trim().isEmpty) {
@@ -141,7 +245,9 @@ class GeminiClient {
                         'Transcribe this voice note exactly. Preserve Gujarati script, English, and mixed Gujarati-English. Return the complete transcription only. Do not summarise, classify, translate, or add a title.'
                         '${detectMusic ? ' Exception: if the recording is mainly music or a song playing, with no one speaking to record a note, reply with exactly [[MUSIC]] and nothing else.' : ''}'
                         ' If two or more different people clearly speak, start each change of speaker on a new line labelled "Speaker 1:", "Speaker 2:" and so on, using the same label for the same voice throughout. If only one person speaks, add no label.'
-                        ' If it is only silence or background noise, reply with exactly [[NOISE]].',
+                        ' If the recording sounds like a phone call (a conversation heard through a phone, with telephone-quality audio, ringing, or a call being answered or ended), begin your reply with [[CALL]] followed by the transcription.'
+                        ' If it is only silence or background noise, reply with exactly [[NOISE]].'
+                        '${_partInstruction(part)}',
                   },
                   {
                     'inline_data': {
@@ -160,23 +266,33 @@ class GeminiClient {
       throw Exception('Gemini ${response.statusCode}: ${response.body}');
     }
     final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-    final candidates = decoded['candidates'] as List<dynamic>?;
-    final content = candidates?.isNotEmpty == true
-        ? (candidates!.first as Map<String, dynamic>)['content']
-              as Map<String, dynamic>?
-        : null;
-    final text = content?['parts'] as List<dynamic>?;
-    final result = text
-        ?.whereType<Map<String, dynamic>>()
-        .map((part) => part['text'])
-        .whereType<String>()
-        .join()
-        .trim();
-    return parseTranscriptionText(result, allowMusic: detectMusic);
+    return parseTranscriptionText(
+      geminiAnswerText(decoded),
+      allowMusic: detectMusic,
+    );
+  }
+
+  /// For one part of a long recording: where it sits, and the text before it, so the
+  /// model carries names, topics and speaker labels on without repeating anything.
+  static String _partInstruction(PartContext? part) {
+    if (part == null) return '';
+    final buffer = StringBuffer(
+      ' This is part ${part.number} of ${part.count} of one longer recording, in order. '
+      'It may begin or end in the middle of a sentence: transcribe exactly what is said in this part only.',
+    );
+    if (part.earlier.isNotEmpty) {
+      buffer.write(
+        ' The transcript so far ends with the text between the markers, for context only; '
+        'do not repeat it, and keep the same speaker labels for the same voices.'
+        '\n<<<\n${part.earlier}\n>>>',
+      );
+    }
+    return buffer.toString();
   }
 
   /// Turns Gemini's plain-text answer into a transcription. A recording of
-  /// music comes back as the [[MUSIC]] marker and silence as [[NOISE]].
+  /// music comes back as the [[MUSIC]] marker, silence as [[NOISE]], and a phone
+  /// call as a [[CALL]] prefix ahead of the transcript.
   static GeminiTranscription parseTranscriptionText(
     String? answer, {
     bool allowMusic = true,
@@ -185,7 +301,7 @@ class GeminiClient {
     if (result.isEmpty ||
         result.startsWith('[[NOISE]]') ||
         (!allowMusic && result.startsWith('[[MUSIC]]'))) {
-      throw Exception('No speech detected.');
+      throw const NoSpeechDetected();
     }
     if (result.startsWith('[[MUSIC]]')) {
       return const GeminiTranscription(
@@ -195,10 +311,14 @@ class GeminiClient {
         audioType: 'music',
       );
     }
+    final isCall = result.startsWith('[[CALL]]');
+    final text = isCall ? result.substring('[[CALL]]'.length).trim() : result;
+    if (text.isEmpty) throw Exception('No speech detected.');
     return GeminiTranscription(
       category: 'note',
-      title: const GeminiClient()._fallbackHeading(result),
-      transcript: result,
+      title: const GeminiClient()._fallbackHeading(text),
+      transcript: text,
+      isCall: isCall,
     );
   }
 
@@ -610,6 +730,7 @@ class GeminiTranscription {
     required this.title,
     required this.transcript,
     this.audioType = 'speech',
+    this.isCall = false,
   });
 
   final String category;
@@ -618,6 +739,9 @@ class GeminiTranscription {
 
   /// 'speech', or 'music' when the recording is a song rather than a note.
   final String audioType;
+
+  /// The recording sounds like a phone call.
+  final bool isCall;
 
   bool get isMusic => audioType == 'music';
 }
@@ -656,6 +780,9 @@ class CircuitNote {
     this.kind = 'voice',
     this.song,
     this.titleEdited = false,
+    this.audioParts = const [],
+    this.partTexts = const [],
+    this.isCall = false,
   });
 
   final String id;
@@ -685,7 +812,26 @@ class CircuitNote {
   /// True once the user has chosen the title; AI review then leaves it alone.
   final bool titleEdited;
 
+  /// A long recording is stored as an ordered series of one-minute files. This lists all
+  /// of them (the first is also [audioPath]); it is empty for a note with a single file.
+  final List<String> audioParts;
+
+  /// The text of each part, in order, kept as transcription goes so that a failure
+  /// resumes at the first part still missing. null = not done yet, '' = silent part.
+  final List<String?> partTexts;
+
+  /// Every audio file the note owns, in playing order.
+  List<String> get audioFiles => audioParts.isNotEmpty
+      ? audioParts
+      : (audioPath == null ? const [] : [audioPath!]);
+
+  /// Transcription judged this recording to be a phone call.
+  final bool isCall;
+
   bool get isSong => kind == 'song';
+
+  /// Where the recording was made: 'Phone' (this phone's own recorder) or 'Circuit'.
+  String get source => noteSourceOf(audioPath);
 
   factory CircuitNote.fromJson(Map<String, dynamic> json) => CircuitNote(
     id: json['id'] as String,
@@ -715,6 +861,13 @@ class CircuitNote {
         ? SongResult.fromJson(json['song'] as Map<String, dynamic>)
         : null,
     titleEdited: json['titleEdited'] == true,
+    audioParts: (json['audioParts'] as List<dynamic>? ?? const [])
+        .map((value) => value.toString())
+        .toList(),
+    partTexts: (json['partTexts'] as List<dynamic>? ?? const [])
+        .map((value) => value?.toString())
+        .toList(),
+    isCall: json['isCall'] == true,
   );
 
   CircuitNote copyWith({
@@ -734,6 +887,9 @@ class CircuitNote {
     SongResult? song,
     String? kind,
     bool? titleEdited,
+    List<String>? audioParts,
+    List<String?>? partTexts,
+    bool? isCall,
     bool clearSong = false,
   }) => CircuitNote(
     id: id,
@@ -754,6 +910,9 @@ class CircuitNote {
     kind: kind ?? this.kind,
     song: clearSong ? null : (song ?? this.song),
     titleEdited: titleEdited ?? this.titleEdited,
+    audioParts: audioParts ?? this.audioParts,
+    partTexts: partTexts ?? this.partTexts,
+    isCall: isCall ?? this.isCall,
   );
 
   Map<String, dynamic> toJson() => {
@@ -778,6 +937,9 @@ class CircuitNote {
     if (isSong) 'kind': kind,
     if (song != null) 'song': song!.toJson(),
     if (titleEdited) 'titleEdited': true,
+    if (audioParts.isNotEmpty) 'audioParts': audioParts,
+    if (partTexts.isNotEmpty) 'partTexts': partTexts,
+    if (isCall) 'isCall': true,
   };
 }
 
@@ -867,6 +1029,9 @@ class ShortCircuitApp extends StatelessWidget {
     return MaterialApp(
       title: 'Short-Circuit',
       theme: buildScTheme(),
+      navigatorObservers: [statusRouteObserver],
+      builder: (context, child) =>
+          StatusOverlay(child: child ?? const SizedBox.shrink()),
       home: const CircuitHomePage(),
     );
   }
@@ -879,11 +1044,15 @@ class CircuitHomePage extends StatefulWidget {
   State<CircuitHomePage> createState() => _CircuitHomePageState();
 }
 
-class _CircuitHomePageState extends State<CircuitHomePage> {
+class _CircuitHomePageState extends State<CircuitHomePage>
+    with
+        WidgetsBindingObserver,
+        _PhoneRecordingState,
+        _NowPlayingState,
+        _LongNoteState {
   final _wifiSsidController = TextEditingController();
   final _wifiPasswordController = TextEditingController();
   final _noteSearchController = TextEditingController();
-  bool _noteSearchOpen = false;
   final Map<String, ScanResult> _circuits = {};
 
   StreamSubscription<List<ScanResult>>? _scanSubscription;
@@ -906,6 +1075,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   bool _autoEnrich =
       true; // AI review (title, summary, tags, actions) after a transcript
   bool _shareDiagnostics = true;
+  bool _testMode = false; // lets adb drive the app, see test_control.dart
   bool _geminiConnected = false;
   bool _aiConnected = false;
   bool _musicConnected = false;
@@ -933,12 +1103,13 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   String _displayName = '';
   DateTime? _recordingStartedAt;
   Timer? _clockTicker;
-  bool _pruneRequested = false;
   // Automatic retry of AI review: how often each note was tried, and when.
   final Map<String, int> _enrichAttempts = {};
   final Map<String, DateTime> _enrichLastAttempt = {};
   // Notes deleted in the app whose copy on Circuit still has to be removed.
   final Set<int> _pendingBoardDeletes = {};
+  NoteDeleteChoice?
+  _pendingDeleteChoice; // what the person picked in the delete dialog
   DateTime? _lastBoardDeleteSent;
   String? _lastHomeCounts;
   DateTime? _lastHomeSentAt;
@@ -961,10 +1132,17 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   DateTime? _wifiConnectingSince;
   Timer? _wifiPollTimer;
   bool _audioBusy = false;
+  CircuitPlaybackPhase _circuitPlayback = CircuitPlaybackPhase.idle;
+  String? _circuitPlaybackFeedback;
+  bool _circuitPlaybackSupportsStop = false;
+  Timer? _playbackRequestTimer;
   bool _recordingAudio = false;
   final _deviceChipKey =
       GlobalKey(); // where the recording pill grows from and folds back to
-  bool _relayActive = false;
+  bool _relayActive = false; // the background service is running
+  RelayLink _relayLink = RelayLink.off; // what its link to Circuit is doing
+  String _noteSource =
+      noteSourceAll; // the Notes page filter: All, Phone or Circuit
   // Android no longer holds Circuit's pairing; the user chooses when to pair again.
   bool _needsPairingRepair = false;
   List<String> _wifiNetworks = [];
@@ -987,12 +1165,19 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _scanSubscription = FlutterBluePlus.onScanResults.listen(
       _onScanResults,
       onError: (Object error) => _setStatus('Scan failed: $error'),
     );
+    _nowPlaying.addListener(_publishStatusUi);
+    _phoneRecording.addListener(_publishStatusUi);
     _restoreLastCircuit();
-    _loadNotes().then((_) => _reconcileSyncedNotes());
+    _initTestControl();
+    _loadNotes().then((_) {
+      _reconcileSyncedNotes();
+      _listenForPhoneRecording();
+    });
     unawaited(_loadGroups());
     unawaited(_relayChannel.invokeMethod<bool>('requestLocalNetwork'));
     _loadPreferences();
@@ -1005,7 +1190,6 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     });
     _wifiPollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _requestWifiStatus();
-      _checkForLostNotes();
       _checkSyncHealth();
       _processBoardDeletes();
       _retryEnrichmentIfDue();
@@ -1030,10 +1214,29 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Back on screen: the widget may have opened the app to record, or may have recorded
+    // while the app was away.
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_recoverPhoneRecording().then((_) => _checkLaunchAction()));
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _nowPlaying.removeListener(_publishStatusUi);
+    _phoneRecording.removeListener(_publishStatusUi);
+    statusPill.value = null;
+    statusSnack.value = null;
     _scanSubscription?.cancel();
     _connectionSubscription?.cancel();
     _relaySubscription?.cancel();
+    _phoneRecorderSubscription?.cancel();
+    _phoneRecording.dispose();
+    _nowPlayingTimer?.cancel();
+    _nowPlaying.dispose();
+    _playbackRequestTimer?.cancel();
     _audioStatusSubscription?.cancel();
     _relayStatusTimer?.cancel();
     _homeStatusTimer?.cancel();
@@ -1054,6 +1257,8 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         Telemetry.event('pairing_repair_needed');
       }
       final active = status != 'Stopped' && !needsRepair;
+      final link = relayLinkFromStatus(status);
+      if (link != _relayLink) setState(() => _relayLink = link);
       if (active || _relayActive || needsRepair) {
         setState(() {
           _relayActive = active;
@@ -1212,6 +1417,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
                   transcript: transcription.transcript,
                   title: note.titleEdited ? note.title : transcription.title,
                   category: transcription.category,
+                  isCall: transcription.isCall,
                   enrichmentStatus: 'pending',
                 )
               : note,
@@ -1235,6 +1441,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   }) async {
     if (_transcribingNoteId != null) return null;
     final note = _notes.where((item) => item.id == id).firstOrNull;
+    if ((note?.audioFiles.length ?? 0) > 1) return _transcribeLongNote(id);
     final path = note?.audioPath;
     if (path == null || ((note?.isSong ?? false) && !asSpeech)) return null;
     if (asSpeech && (note?.isSong ?? false)) {
@@ -1509,8 +1716,15 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     });
     try {
       await FlutterBluePlus.stopScan();
-      final isBonded =
-          await device.bondState.first == BluetoothBondState.bonded;
+      var isBonded = await device.bondState.first == BluetoothBondState.bonded;
+      if (shouldReplaceCircuitPairing(
+        isBonded: isBonded,
+        userRequestedPairing: userRequestedPairing,
+      )) {
+        _setStatus('Replacing the old pairing…');
+        await _removeAndroidPairing(device);
+        isBonded = false;
+      }
       if (!isBonded && !userRequestedPairing) {
         debugPrint('Short-Circuit: not bonded; waiting for Repair pairing');
         if (mounted) {
@@ -1522,6 +1736,12 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         }
         return;
       }
+      // Connect first: flutter_blue_plus can only pair a device that is connected, and
+      // createBond on a disconnected one fails at once with "device is not connected".
+      await device.connect(
+        license: License.nonprofit,
+        timeout: const Duration(seconds: 15),
+      );
       if (shouldStartCircuitPairing(
         isBonded: isBonded,
         userRequestedPairing: userRequestedPairing,
@@ -1529,22 +1749,9 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         _setStatus(
           'Enter Circuit’s six-digit code in the Android pairing prompt…',
         );
-        final paired = device.bondState
-            .where((state) => state == BluetoothBondState.bonded)
-            .first
-            .timeout(const Duration(seconds: 90));
-        try {
-          await device.createBond();
-          await paired;
-        } catch (_) {
-          paired.ignore(); // already timed out or failed: nothing is listening
-          rethrow;
-        }
+        // Waits (up to 90 s) until Android reports the pairing finished.
+        await device.createBond(timeout: 90);
       }
-      await device.connect(
-        license: License.nonprofit,
-        timeout: const Duration(seconds: 15),
-      );
       final preferences = await SharedPreferences.getInstance();
       _connectionSubscription?.cancel();
       _connectionSubscription = device.connectionState.listen((state) {
@@ -1600,6 +1807,18 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     }
   }
 
+  /// Removes Android's pairing record for this Circuit. Nothing on the board or in the
+  /// notes changes; the next pairing makes a new record.
+  Future<void> _removeAndroidPairing(BluetoothDevice device) async {
+    try {
+      if (await device.bondState.first == BluetoothBondState.bonded) {
+        await device.removeBond();
+      }
+    } catch (error) {
+      debugPrint('Short-Circuit: could not clear the old pairing: $error');
+    }
+  }
+
   /// The user's choice to pair again. Only Android's own pairing record is replaced:
   /// notes, keys and settings on the phone and the board are not touched.
   Future<void> _repairPairing() async {
@@ -1609,13 +1828,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       return;
     }
     final device = BluetoothDevice.fromId(deviceId);
-    try {
-      if (await device.bondState.first == BluetoothBondState.bonded) {
-        await device.removeBond();
-      }
-    } catch (error) {
-      debugPrint('Short-Circuit: could not clear the old pairing: $error');
-    }
+    await _removeAndroidPairing(device);
     await _connect(device, savedReconnect: true, userRequestedPairing: true);
   }
 
@@ -1767,7 +1980,9 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       _applySyncStatus(status);
       return;
     }
-    if (!mounted || status == _lastAudioStatus) return;
+    if (!mounted) return;
+    if (_applyCircuitPlaybackStatus(status)) return;
+    if (status == _lastAudioStatus) return;
     _lastAudioStatus = status;
     if (status.startsWith('Recording started') && !_recordingAudio) {
       // Started with Circuit's button rather than from the app.
@@ -1800,7 +2015,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       final isSong = _songClipArmed;
       _songClipArmed = false;
       _addPendingNote(
-        'Recording saved on Circuit. It syncs automatically when Circuit and this phone are on the same Wi-Fi.',
+        'Recording saved on Circuit. Hold Circuit\'s button for 2 seconds to bring it to this phone (same Wi-Fi).',
         boardId: boardId,
         song: isSong,
       );
@@ -1865,6 +2080,23 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       }
       return;
     }
+    if (status.startsWith('Sync: nothing waiting for #')) {
+      // Asked for one note and Circuit has nothing waiting for it (it may have synced already).
+      // Unlike "no new notes" this says nothing about the other notes, so nothing is pruned.
+      final noteId = _syncingNoteId;
+      setState(() {
+        _audioBusy = false;
+        _syncActive = false;
+        _syncingNoteId = null;
+        _syncProgress = null;
+      });
+      if (noteId != null) {
+        unawaited(
+          _setNoteStatus(noteId, 'Circuit has nothing waiting for this note.'),
+        );
+      }
+      return;
+    }
     if (status.startsWith('Sync: no new notes')) {
       // Circuit has nothing waiting.
       setState(() {
@@ -1903,17 +2135,20 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       }
       return;
     }
-    final syncingNoteId = _syncingNoteId;
-    if (syncingNoteId == null) return;
     if (status.startsWith('Sync started') ||
         status.startsWith('Sync in progress')) {
+      // The figure is kept whatever the sync is for: after the first note of several has arrived
+      // no note is "being synced" any more, but the sync is still going and still has a progress.
       final match = RegExp(r'(\d+)%').firstMatch(status);
       if (match != null) {
         setState(() => _syncProgress = int.parse(match.group(1)!));
+      } else if (_syncProgress == null) {
+        setState(() => _syncProgress = 0);
       }
       // Progress shows in the banner; rewriting the saved note on every tick is
       // slow and used to flood Circuit with status updates.
-      if (status.startsWith('Sync started')) {
+      final syncingNoteId = _syncingNoteId;
+      if (syncingNoteId != null && status.startsWith('Sync started')) {
         _setNoteStatus(syncingNoteId, status.replaceAll('\n', ' • '));
       }
     }
@@ -1937,6 +2172,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   /// "@sync-status\nwaiting=N\nreset=R\nuptime=S" from Circuit.
   void _applySyncStatus(String message) {
     if (!mounted) return;
+    _applyCircuitPlaybackSnapshot(message);
     int? field(String name) => int.tryParse(
       RegExp('$name=(-?\\d+)').firstMatch(message)?.group(1) ?? '',
     );
@@ -1950,6 +2186,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         if (waiting == 0) {
           _waitingSince = null;
           if (!_syncActive) _syncError = null; // everything made it across
+          unawaited(_pruneLostNotes());
         }
         _boardWaiting = waiting;
       }
@@ -2033,10 +2270,18 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   /// before Circuit kept every note). Remove those instead of leaving a card
   /// that can never sync.
   Iterable<CircuitNote> _notesWithoutAudio(DateTime cutoff) => _notes.where(
-    (note) => note.audioPath == null && note.createdAt.isBefore(cutoff),
+    (note) =>
+        note.audioPath == null &&
+        note.createdAt.isBefore(cutoff) &&
+        // A long recording whose parts are still arriving has none of its audio in the note yet.
+        !note.status.startsWith('Receiving') &&
+        !note.status.startsWith('Waiting for part'),
   );
 
   Future<void> _pruneLostNotes() async {
+    // Only when Circuit itself says nothing at all is waiting. A sync of one note ends with the
+    // same "saved" message, and the other notes are then still on the board.
+    if (_boardWaiting != 0) return;
     final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
     final lost = _notesWithoutAudio(cutoff)
         .where(
@@ -2066,18 +2311,6 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     );
   }
 
-  /// Once per session, if old notes are still waiting for audio, ask Circuit
-  /// whether it has anything left to send. Its answer decides their fate.
-  void _checkForLostNotes() {
-    if (_pruneRequested || !_circuitAvailable) return;
-    final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
-    if (_notesWithoutAudio(cutoff).isEmpty) return;
-    _pruneRequested = true;
-    _writeCircuit('@audio-sync').catchError((Object _) {
-      _pruneRequested = false;
-    });
-  }
-
   /// A synced file belongs to the oldest note still waiting for audio; if the
   /// recording happened while the app was closed there is none, so make one.
   /// True if a note for this Circuit recording already exists. Numbers restart
@@ -2085,7 +2318,11 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   bool _knownBoardNote(int boardId, DateTime around) => _notes.any(
     (note) =>
         note.boardId == boardId &&
-        note.createdAt.difference(around).abs() < const Duration(minutes: 10),
+        note.createdAt.difference(around).abs() <
+            // A recording made of parts is dated by its first part, which can be hours earlier.
+            (note.audioParts.isEmpty
+                ? const Duration(minutes: 10)
+                : const Duration(hours: 12)),
   );
 
   Future<void> _attachSyncedFile(
@@ -2112,6 +2349,12 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       try {
         await File(path).delete();
       } catch (_) {}
+      return;
+    }
+    // One minute of a longer recording made on Circuit: collected into one note.
+    final boardPart = await readBoardPart(path);
+    if (boardPart != null &&
+        await _attachBoardPart(path, epochSeconds, boardPart)) {
       return;
     }
     final recordedAt = epochSeconds != null && epochSeconds > 0
@@ -2285,7 +2528,14 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     _lastSyncActivity = DateTime.now();
     _syncActive = true;
     try {
-      await _writeCircuit('@audio-sync');
+      // Ask for just this note (all its parts) when Circuit gave it a number; an older board
+      // ignores the number and sends everything waiting.
+      final boardId = _boardIdOf(
+        _notes.where((n) => n.id == noteId).firstOrNull,
+      );
+      await _writeCircuit(
+        boardId == null ? '@audio-sync' : '@audio-sync\n$boardId',
+      );
     } catch (error) {
       _audioBusy = false;
       _syncingNoteId = null;
@@ -2296,6 +2546,19 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
   Future<void> _playSyncedNote(String? path) async {
     if (path == null || path.isEmpty) {
       _setStatus('This note has not finished syncing yet.');
+      return;
+    }
+    _playbackToken++; // a new request replaces any part-by-part playback in progress
+    _sequencePlaying = false;
+    final playedNote = _notes
+        .where((note) => note.audioPath == path)
+        .firstOrNull;
+    final parts = playedNote?.audioFiles;
+    final title = (playedNote?.title?.trim().isNotEmpty ?? false)
+        ? playedNote!.title!
+        : 'Voice note';
+    if (parts != null && parts.length > 1) {
+      await _playNoteParts(parts, title);
       return;
     }
     bool? started;
@@ -2316,6 +2579,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
       _setStatus('$error');
       return;
     }
+    if (started == true) _startNowPlaying(title);
     _setStatus(
       started == true
           ? 'Playing this voice note on your phone.'
@@ -2424,18 +2688,27 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     });
   }
 
-  Future<void> _deleteNote(String id) async {
+  Future<void> _deleteNote(String id, {bool phoneOnly = false}) async {
     final note = _notes.where((item) => item.id == id).firstOrNull;
     final boardId = _boardIdOf(note);
-    if (boardId != null) {
+    // "Phone only" leaves Circuit's copy on its card: it is already marked synced there, so it
+    // is not sent again unless the person asks for old notes to be re-sent.
+    if (boardId != null && !phoneOnly) {
       _pendingBoardDeletes.add(boardId);
+      // A recording made of parts is deleted on Circuit part by part.
+      _pendingBoardDeletes.addAll(await _boardPartIds(note));
       unawaited(_saveBoardDeletes());
       _lastBoardDeleteSent = null;
       _processBoardDeletes();
     }
-    if (note?.audioPath != null) {
+    final firstPart = note?.boardId;
+    final arriving = firstPart == null
+        ? const <String>[]
+        : (await _arrivedBoardFiles(firstPart)).keys.toList();
+    for (final path in {...?note?.audioFiles, ...arriving}) {
       try {
-        await File(note!.audioPath!).delete();
+        await File(path).delete();
+        await _boardPartFile(path)?.delete();
       } catch (_) {
         // The file may already have been removed.
       }
@@ -2475,8 +2748,7 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
     final date =
         '${weekdays[now.weekday - 1]} ${now.day.toString().padLeft(2, '0')} ${months[now.month - 1]}';
-    final synced = _notes.where((note) => note.audioPath != null).length;
-    final pending = _notes.length - synced;
+    final (:pending, :synced) = boardNoteCounts(_notes);
     // Saving a note triggers this, and a sync saves one many times a second.
     // Each message makes Circuit redraw, so only send when the counts changed or
     // the periodic refresh is due.
@@ -2650,13 +2922,14 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     if (mounted) {
       setState(() {
         _relayActive = false;
+        _relayLink = RelayLink.off;
         _status = 'Stay connected is off.';
       });
     }
   }
 
   Future<void> _recordAudio() async {
-    if (_audioBusy) return;
+    if (_audioBusy || _circuitPlayback != CircuitPlaybackPhase.idle) return;
     setState(() {
       _audioBusy = true;
       _recordingAudio = true;
@@ -2675,7 +2948,11 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
 
   /// Records a short clip on Circuit; once it syncs it is sent for recognition.
   Future<void> _identifySong() async {
-    if (_audioBusy || _recordingAudio) return;
+    if (_audioBusy ||
+        _recordingAudio ||
+        _circuitPlayback != CircuitPlaybackPhase.idle) {
+      return;
+    }
     setState(() {
       _audioBusy = true;
       _recordingAudio = true;
@@ -2740,6 +3017,40 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
     }
   }
 
+  /// Asks Circuit to offer every note on its card again, including ones already synced. Notes this
+  /// phone still has are not downloaded a second time; ones it no longer has (deleted on the phone
+  /// only, or lost) come back.
+  Future<void> _resendCircuitNotes() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Send old notes again?'),
+        content: const Text(
+          'Circuit offers every note still on its card. Notes you deleted from this phone only will '
+          'come back; notes already here are skipped.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Send again'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _writeCircuit('@notes-resend');
+      _setStatus('Asking Circuit to offer its old notes again…');
+    } catch (error) {
+      _setStatus('Could not ask Circuit: $error');
+    }
+  }
+
   /// Removes notes from Circuit's SD card that this phone has already saved.
   /// Notes still waiting to sync are never deleted.
   Future<void> _cleanCircuitNotes() async {
@@ -2788,20 +3099,6 @@ class _CircuitHomePageState extends State<CircuitHomePage> {
           _recordingAudio = false;
         });
       }
-    }
-  }
-
-  Future<void> _playAudio() async {
-    if (_audioBusy) return;
-    setState(() => _audioBusy = true);
-    try {
-      await _writeCircuit('@audio-play');
-      _setStatus('Circuit is playing its latest recording.');
-      await Future<void>.delayed(const Duration(seconds: 6));
-    } catch (error) {
-      _setStatus('Could not play recording: $error');
-    } finally {
-      if (mounted) setState(() => _audioBusy = false);
     }
   }
 

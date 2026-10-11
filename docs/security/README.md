@@ -64,6 +64,32 @@ implementation is `docs/security/reference/note_format.py`, which also writes
 (and refuses to record if that fails), and the app's tests open the same files, so
 the two implementations are held to the same bytes.
 
+## Recordings made on the phone
+
+A voice note recorded on the phone itself uses the same format and the same rules, with
+its own key and its own note numbers, so it never shares a key with Circuit and the
+"one note number per key" rule above holds. The key is made on first use and kept in the
+same secure storage as Circuit's keys (under `note_key_<id>`), so backup and restore treat
+it like any other.
+
+A long recording is stored as parts of about a minute, each an ordinary note file with the
+next note number (`phone-note-<n>.cnote`, `<n>+1`, ...). A new recording starts at the
+larger of "last number used + 1" and the seconds since 1 January 2026, and a recording of
+N parts takes at least 60 x N seconds, so numbers are not reused even if the saved counter
+is lost. Audio is sealed as it arrives, so a crash keeps every finished part and all but
+the last fraction of a second of the one in progress. The Kotlin writer
+(`NoteSealer.kt`) is checked against the same test vectors as the board and the app.
+
+## The home-screen widget
+
+The widget starts a phone recording with the app closed, so the recorder needs the phone's
+recording key without the app. The app hands it over when it opens, and the recorder keeps its
+own copy sealed with an AES-256-GCM key that lives in the Android Keystore and never leaves it
+(`PhoneKeyStore.kt`), the same protection the app's own copy has. It is not readable without
+the Keystore, and backup and restore still carry the key as before. The recorder also picks
+note numbers itself with the same rule as the app (`PhoneNumbering`), so a recording made with
+the app closed can never reuse a number.
+
 ## What this protects against
 
 - **A lost, stolen or read SD card.** It holds only ciphertext.

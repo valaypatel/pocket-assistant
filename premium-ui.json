@@ -1,0 +1,12 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["apps/short_circuit/lib"],
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Form", "Toast", "CRUD"],
+  "commands": {
+    "unit": "cd apps/short_circuit && flutter test",
+    "analyze": "cd apps/short_circuit && flutter analyze --no-fatal-infos",
+    "build": "cd apps/short_circuit && flutter build apk --debug"
+  },
+  "requiredCommands": ["unit", "analyze", "build"]
+}

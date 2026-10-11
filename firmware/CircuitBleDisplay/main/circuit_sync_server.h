@@ -26,6 +26,8 @@
 #include <cstring>
 #include <sys/socket.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_https_server.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -44,11 +46,23 @@
 
 namespace circuit_sync {
 
+// One line of internal-RAM numbers. "lowest" never rises, so the first stage that shows a drop is
+// where the memory went.
+inline void log_heap(const char *stage) {
+    ESP_LOGW("CircuitHeap", "%-22s free %6u  largest %6u  lowest ever %6u", stage,
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+}
+
 // How many downloads the board has cut short since it started (memory, or the phone going
 // away). Reported to the phone with the rest of the board's health.
 inline volatile uint32_t download_stops = 0;
 
 constexpr uint32_t kIdleTimeoutMs = 120000;
+// Once the phone has started downloading, silence this long means it has gone (Wi-Fi lost, app
+// closed): the session ends so the screen shows the result and the board is free again.
+constexpr uint32_t kClientGoneMs = 25000;
 constexpr uint32_t kLockoutMs = 30000;
 constexpr int kMaxBadAttempts = 3;
 constexpr size_t kChunkBytes = 4096;
@@ -71,6 +85,7 @@ struct State {
     int64_t first_request_ms = 0;
     int64_t lockout_until_ms = 0;
     uint32_t total_bytes = 0;
+    uint32_t only_recording = 0;  // sync just this recording (its board number); 0 = everything waiting
     uint32_t served_bytes = 0;
     uint32_t acked = 0;
     // Set by the application. Called from the HTTP server task.
@@ -224,13 +239,22 @@ inline uint32_t id_after(const char *uri, const char *prefix) {
 inline esp_err_t list_handler(httpd_req_t *req) {
     if (!authorize(req)) return ESP_FAIL;
     circuit_notes::Note notes[kMaxListed];
-    const size_t count = circuit_notes::list_unsynced(notes, kMaxListed);
-    char *body = static_cast<char *>(malloc(count * 40 + 1));
+    const size_t count = circuit_notes::list_unsynced_of(notes, kMaxListed, state.only_recording);
+    // "<id>,<bytes>,<recorded>" and, for a one-minute part of a longer recording,
+    // ",<first part's id>,<part number>,<1 if last>". A phone that does not know parts reads the first three.
+    constexpr size_t kLine = 72;
+    char *body = static_cast<char *>(malloc(count * kLine + 1));
     if (body == nullptr) return ESP_FAIL;
     size_t used = 0;
     for (size_t i = 0; i < count; ++i) {
-        used += snprintf(body + used, 40, "%lu,%lu,%lld\n", static_cast<unsigned long>(notes[i].id),
+        used += snprintf(body + used, kLine, "%lu,%lu,%lld", static_cast<unsigned long>(notes[i].id),
             static_cast<unsigned long>(notes[i].bytes), static_cast<long long>(notes[i].recorded));
+        circuit_notes::Group group;
+        if (circuit_notes::read_group(notes[i].id, &group)) {
+            used += snprintf(body + used, kLine, ",%lu,%lu,%d", static_cast<unsigned long>(group.first),
+                static_cast<unsigned long>(group.part), group.final ? 1 : 0);
+        }
+        body[used++] = '\n';
     }
     body[used] = '\0';
     httpd_resp_set_type(req, "text/plain");
@@ -243,21 +267,33 @@ inline esp_err_t note_handler(httpd_req_t *req) {
     if (!authorize(req)) return ESP_FAIL;
     const uint32_t id = id_after(req->uri, "/notes/");
     circuit_notes::Note note;
-    if (id == 0 || !circuit_notes::describe(id, &note)) return ESP_FAIL;
+    if (id == 0 || !circuit_notes::describe(id, &note)) {
+        ESP_LOGW("CircuitSync", "Download refused: note %lu not found on the card", static_cast<unsigned long>(id));
+        return ESP_FAIL;
+    }
 
     uint32_t start = 0;
     char range[48] = {};
     if (httpd_req_get_hdr_value_str(req, "Range", range, sizeof(range)) == ESP_OK &&
         strncmp(range, "bytes=", 6) == 0) {
         start = static_cast<uint32_t>(strtoul(range + 6, nullptr, 10));
-        if (start >= note.bytes) return ESP_FAIL;
+        if (start >= note.bytes) {
+            ESP_LOGW("CircuitSync", "Download refused: note %lu asked from byte %lu but has %lu", static_cast<unsigned long>(id),
+                static_cast<unsigned long>(start), static_cast<unsigned long>(note.bytes));
+            return ESP_FAIL;
+        }
     }
 
+    log_heap(start > 0 ? "sync: note (resume)" : "sync: note start");
     char path[48];
     circuit_notes::note_path(note, path, sizeof(path));
     FILE *file = fopen(path, "rb");
     uint8_t *buffer = static_cast<uint8_t *>(malloc(kChunkBytes));
     if (file == nullptr || buffer == nullptr) {
+        ESP_LOGW("CircuitSync", "Download refused: note %lu file %s, buffer %s (internal RAM free %u, largest %u)",
+            static_cast<unsigned long>(id), file == nullptr ? "would not open" : "ok", buffer == nullptr ? "not allocated" : "ok",
+            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
         if (file != nullptr) fclose(file);
         free(buffer);
         return ESP_FAIL;
@@ -274,11 +310,28 @@ inline esp_err_t note_handler(httpd_req_t *req) {
     }
     esp_err_t status = ESP_OK;
     size_t read = 0;
-    while ((read = fread(buffer, 1, kChunkBytes, file)) > 0) {
+    uint32_t position = start;
+    int read_failures = 0;
+    while (true) {
+        read = fread(buffer, 1, kChunkBytes, file);
+        if (read == 0) {
+            // A read that fails while internal RAM is nearly gone (the SD driver cannot get its small
+            // buffer) looks like the end of the file. Wait a moment and read the same place again.
+            if (ferror(file) && position < note.bytes && ++read_failures <= 5) {
+                clearerr(file);
+                vTaskDelay(pdMS_TO_TICKS(60));
+                fseek(file, position, SEEK_SET);
+                continue;
+            }
+            break;
+        }
+        read_failures = 0;
+        position += read;
         status = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer), read);
         if (status != ESP_OK) break;
         state.last_activity_ms = now_ms();
         state.served_bytes += read;
+        if (state.served_bytes / (256 * 1024) != (state.served_bytes - read) / (256 * 1024)) log_heap("sync: transferring");
         if (state.on_progress != nullptr && state.total_bytes > 0) {
             const uint64_t percent = static_cast<uint64_t>(state.served_bytes) * 100 / state.total_bytes;
             state.on_progress(percent > 100 ? 100 : static_cast<uint32_t>(percent));
@@ -324,7 +377,8 @@ inline bool is_open() { return state.server != nullptr; }
 inline bool locked_out() { return now_ms() < state.lockout_until_ms; }
 inline bool expired() {
     return is_open() && (state.bad_attempts >= kMaxBadAttempts ||
-                         now_ms() - state.last_activity_ms > kIdleTimeoutMs);
+                         now_ms() - state.last_activity_ms >
+                             (state.first_request_ms != 0 ? kClientGoneMs : kIdleTimeoutMs));
 }
 
 inline void close_session() {
@@ -334,18 +388,25 @@ inline void close_session() {
     }
     memset(state.token, 0, sizeof(state.token));
     state.client_ip = 0;
+    state.only_recording = 0;
 }
+
+// Files still waiting that this session is for: one recording's, or everything's.
+inline size_t waiting_in_session() { return circuit_notes::count_unsynced_of(state.only_recording); }
 
 // Starts a session. On success fills the port, token and fingerprint the app
 // needs, and the number and size of notes waiting.
 inline bool open_session(uint16_t *port, char *token, size_t token_size, const char **fingerprint,
-                         uint32_t *note_count, uint32_t *total_bytes) {
+                         uint32_t *note_count, uint32_t *total_bytes, uint32_t only_recording = 0) {
     State &s = state;
+    log_heap("sync: before session");
     if (is_open() || locked_out() || token_size < sizeof(s.token) || !ensure_identity()) return false;
+    log_heap("sync: identity ready");
 
     circuit_notes::Note notes[kMaxListed];
-    const size_t count = circuit_notes::list_unsynced(notes, kMaxListed);
+    const size_t count = circuit_notes::list_unsynced_of(notes, kMaxListed, only_recording);
     if (count == 0) return false;
+    s.only_recording = only_recording;
     s.total_bytes = 0;
     for (size_t i = 0; i < count; ++i) s.total_bytes += notes[i].bytes;
     s.served_bytes = 0;
@@ -365,6 +426,9 @@ inline bool open_session(uint16_t *port, char *token, size_t token_size, const c
     config.prvtkey_len = strlen(s.key_pem) + 1;
     config.port_secure = s.port;
     config.httpd.stack_size = 10240;
+    // The server's stack lives in PSRAM: internal RAM is the scarce part during a sync. Nothing the
+    // server task runs writes flash (the certificate is stored by the task that opens the session).
+    config.httpd.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     config.httpd.max_open_sockets = 2;
     config.httpd.lru_purge_enable = true;
     config.httpd.recv_wait_timeout = 10;
@@ -375,6 +439,7 @@ inline bool open_session(uint16_t *port, char *token, size_t token_size, const c
         s.server = nullptr;
         return false;
     }
+    log_heap("sync: server up");
     static const httpd_uri_t list = {.uri = "/notes", .method = HTTP_GET, .handler = list_handler, .user_ctx = nullptr};
     static const httpd_uri_t note = {.uri = "/notes/*", .method = HTTP_GET, .handler = note_handler, .user_ctx = nullptr};
     static const httpd_uri_t ack = {.uri = "/ack/*", .method = HTTP_POST, .handler = ack_handler, .user_ctx = nullptr};

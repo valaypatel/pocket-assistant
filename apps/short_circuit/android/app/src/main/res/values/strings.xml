@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_description">Record a voice note on this phone with one tap.</string>
+    <string name="widget_record">Record a note</string>
+    <string name="widget_tap_to_start">Tap to start</string>
+    <string name="widget_recording">Recording</string>
+    <string name="widget_paused">Paused</string>
+    <string name="widget_record_description">Record a voice note</string>
+    <string name="widget_stop_description">Stop and save the recording</string>
+    <string name="widget_pause_description">Pause the recording</string>
+    <string name="widget_resume_description">Resume the recording</string>
+</resources>

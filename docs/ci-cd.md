@@ -5,11 +5,20 @@ in its own area change, so an app change does not rebuild the firmware.
 
 | Workflow | Runs on | What it does |
 |---|---|---|
-| `app.yml` | `apps/short_circuit/**` | Format check, `flutter analyze`, `flutter test`, then builds the release APK. A tag `app-vX.Y.Z` publishes a GitHub release. |
+| `app.yml` | `apps/short_circuit/**` | Format check, `flutter analyze`, `flutter test`, then builds the release APK. A push to `development` sends that APK to the testers. A tag `app-vX.Y.Z` publishes a GitHub release. |
 | `firmware.yml` | `firmware/**` | Builds the ESP32-S3 firmware in the ESP-IDF 5.5.3 container and uploads the bootloader, partition table and app as separate files. A tag `firmware-vX.Y.Z` publishes a release. |
 | `lambda.yml` | `services/music-lambda/**` | Python tests, builds the Lambda package, `terraform fmt` and `validate`. On `main` it deploys the code to AWS and smoke-tests it. |
 
+`app.yml` and `firmware.yml` also run when `docs/security/test-vectors.json` or `docs/security/reference/**`
+change, because both sides check themselves against those. Editing the rest of `docs/security`
+(the README) runs nothing, so a text edit does not cost a build.
+
 Pull requests run the checks only. Nothing is deployed or released from a PR.
+
+**Branches.** `development` is where work lands: pull requests target it, and every push to it
+sends a signed build to the testers (below), so each change is tried on a phone first. `main` is
+production: it only receives `development` once that build has been tried, and a release is a tag
+on `main`. A push to `main` builds the APK but does not send it.
 Every action is pinned to a commit SHA, and Dependabot proposes updates weekly.
 
 ## Nothing to set up
@@ -100,8 +109,14 @@ not committed. Locally it lives at `apps/short_circuit/android/app/google-servic
 the build works and the app sends nothing. What is and is not sent is described at the top
 of `apps/short_circuit/lib/telemetry.dart`.
 
-**Firebase App Distribution.** A release tag (`app-v*`) or a manual run of the App workflow
-sends the signed APK to the testers in Firebase. It is skipped until the repository
+**Release notes.** Each tester build's notes say which build it is, then the "How to test on the
+phone" section of the pull request(s) that produced it. The pull request template
+(`.github/pull_request_template.md`) has that section: write numbered steps a tester can follow,
+and they arrive in the notes (HTML comments are dropped). A build with no such section says so.
+The notes are made by `.github/scripts/release-notes.sh`, which never fails the build.
+
+**Firebase App Distribution.** A push to `development`, a release tag (`app-v*`) or a manual run
+of the App workflow sends the signed APK to the testers in Firebase. It is skipped until the repository
 variable `FIREBASE_APP_ID` exists. One-time setup:
 
 1. Firebase console > Release & Monitor > App Distribution > Get started, and make a tester
@@ -127,11 +142,16 @@ updates in place and keeps its notes, settings and pairing. For that reason the 
 needs Android 9 or later (`minSdk = 28`) and is signed with the v3 scheme only,
 which is the one that carries the proof. The old key is not needed again.
 
-CI builds are numbered `1000 + the run number`, so they are always above a build made by
-hand (those use small numbers: pass `--build-number` below 1000 to `flutter build`). Android
-refuses to install a lower number over a higher one, so an update from App Distribution or a
-release is never refused as a downgrade. If a phone has a CI or released build, install the
-next one from CI too (a hand-made build with a number below it would be refused). If the rotation secret
+The app's version is **not** read from `pubspec.yaml` (its `version:` line is a placeholder) or
+from `flutter build --build-number`. `android/app/build.gradle.kts` takes it from the environment
+and nothing else: CI sets `APP_VERSION_NAME` (the tag for a release, `beta.<run number>`
+otherwise) and `APP_VERSION_CODE`; a build made anywhere else is called `local` and numbered by
+the clock. The number is the time in 10-second steps since 2026-01-01 UTC, by CI and by hand
+alike, so the build made last always has the higher number. This matters because Android
+refuses to install a lower number over a higher one, and the only way round that is to
+uninstall, which wipes the app's settings, keys and notes. (Builds before 7 October 2026 were
+`1000 + the run number`; the time-based numbers are far above them.)
+If the rotation secret
 (`ANDROID_LINEAGE_BASE64`) is ever missing, the build warns, and the APK will not
 update an app that was installed signed with the previous key.
 

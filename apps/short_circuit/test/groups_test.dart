@@ -127,6 +127,10 @@ void main() {
           note('c', DateTime(2026, 10, 3, 9), title: 'Idea for app').toJson(),
         ]),
       });
+      // Date headings take room; a taller screen keeps every tile built.
+      tester.view.physicalSize = const Size(800, 1800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
       await tester.pumpWidget(const ShortCircuitApp());
       await tester.pump(const Duration(seconds: 1));
       await tester.tap(find.text('Notes').last);
@@ -216,6 +220,9 @@ void main() {
         'circuit_notes': notesJson,
         'circuit_groups': groupsJson,
       });
+      tester.view.physicalSize = const Size(800, 1800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
       await tester.pumpWidget(const ShortCircuitApp());
       await tester.pump(const Duration(seconds: 1));
       await tester.tap(find.text('Notes').last);
@@ -229,7 +236,7 @@ void main() {
       expect(find.text('Planning'), findsOneWidget);
       expect(find.text('2 notes'), findsOneWidget);
       // The built-in group counts every spoken note.
-      expect(find.text('3 notes'), findsOneWidget);
+      expect(find.text('3 voice notes'), findsOneWidget);
       await tester.pump(const Duration(seconds: 3));
     });
 
@@ -267,12 +274,12 @@ void main() {
       ); // Planning: Groceries and Trip plan
       await tester.drag(find.text('Groceries'), const Offset(-600, 0));
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Delete note'));
+      await tester.tap(find.text('Delete'));
       await tester.pumpAndSettle();
       expect(find.text('Groceries'), findsNothing);
       // Planning is down to one note; All notes went from three to two.
       expect(find.text('1 note'), findsOneWidget);
-      expect(find.text('2 notes'), findsOneWidget);
+      expect(find.text('2 voice notes'), findsOneWidget);
       await tester.pump(const Duration(seconds: 3));
     });
 
@@ -293,6 +300,11 @@ void main() {
       // Back on Notes: the group is gone, the notes are not.
       expect(find.text('Planning'), findsNothing);
       expect(find.text('Groceries'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.text('Trip plan'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
       expect(find.text('Trip plan'), findsOneWidget);
       final saved = (await SharedPreferences.getInstance()).getString(
         'circuit_groups',

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -86,6 +87,84 @@ void main() {
       expect(back.audio.single.bytes, big);
     });
 
+    test(
+      'a recording read from disk makes the same backup as one in memory',
+      () async {
+        final tmp = Directory.systemTemp.createTempSync('backup-stream');
+        addTearDown(() => tmp.deleteSync(recursive: true));
+        final big = Uint8List.fromList(
+          List.generate((1 << 20) * 2 + 77, (i) => i * 7),
+        );
+        final small = Uint8List.fromList([4, 5, 6]);
+        final bigFile = File('${tmp.path}/big')..writeAsBytesSync(big);
+        final smallFile = File('${tmp.path}/small')..writeAsBytesSync(small);
+        final file = await BackupCodec.encode(
+          BackupData(
+            audio: [
+              BackupAudio.file('big', bigFile, big.length),
+              BackupAudio.file('small', smallFile, small.length),
+            ],
+          ),
+          _pass,
+          iterations: 10,
+        );
+        final back = await BackupCodec.decode(file, _pass);
+        expect(back.audio.map((a) => a.name), ['big', 'small']);
+        expect(back.audio[0].bytes, big);
+        expect(back.audio[1].bytes, small);
+      },
+    );
+
+    test(
+      'a recording that changes while the backup is written is caught',
+      () async {
+        final tmp = Directory.systemTemp.createTempSync('backup-change');
+        addTearDown(() => tmp.deleteSync(recursive: true));
+        final f = File('${tmp.path}/a')..writeAsBytesSync([1, 2, 3, 4]);
+        // The backup was told the file is longer than it is.
+        expect(
+          BackupCodec.encode(
+            BackupData(audio: [BackupAudio.file('a', f, 9)]),
+            _pass,
+            iterations: 10,
+          ),
+          throwsA(isA<BackupException>()),
+        );
+      },
+    );
+
+    test(
+      'a 24 MB recording on disk is backed up and restored intact',
+      () async {
+        final tmp = Directory.systemTemp.createTempSync('backup-big');
+        addTearDown(() => tmp.deleteSync(recursive: true));
+        // 24 whole chunks and a partial one, with content that does not repeat.
+        final size = (1 << 20) * 24 + 12345;
+        final f = File('${tmp.path}/big.cnote');
+        final sink = f.openWrite();
+        var seed = 12345;
+        for (var done = 0; done < size; done += 65536) {
+          final n = min(65536, size - done);
+          final block = Uint8List(n);
+          for (var i = 0; i < n; i++) {
+            seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+            block[i] = seed >> 16;
+          }
+          sink.add(block);
+        }
+        await sink.close();
+        final file = await BackupCodec.encode(
+          BackupData(audio: [BackupAudio.file('big.cnote', f, size)]),
+          _pass,
+          iterations: 10,
+        );
+        final back = await BackupCodec.decode(file, _pass);
+        expect(back.audio.single.bytes!.length, size);
+        expect(back.audio.single.bytes, f.readAsBytesSync());
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
     test('the wrong passphrase is refused', () async {
       final file = await BackupCodec.encode(
         BackupData(notes: [_note('n1')]),
@@ -170,7 +249,14 @@ void main() {
 
         final data = await BackupStore.collect();
         expect(data.notes.single['audioPath'], 'circuit-note-1-7.cnote');
-        expect(data.audio.single.bytes, [9, 8, 7]);
+        // The recording stays on disk until the backup is written; it is not read into memory here.
+        expect(data.audio.single.bytes, isNull);
+        expect(data.audio.single.length, 3);
+        expect(await data.audio.single.open().expand((b) => b).toList(), [
+          9,
+          8,
+          7,
+        ]);
         expect(data.chats.keys, ['n1']);
         expect(data.noteKeys.keys, ['000000ab']);
         expect(jsonEncode(data.noteKeys), isNot(contains('SECRET')));
@@ -338,9 +424,14 @@ void main() {
         find.widgetWithText(TextField, 'Passphrase').first,
         'short',
       );
+      await tester.scrollUntilVisible(
+        find.byTooltip('Create backup'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
       await tester.tap(find.byTooltip('Create backup'));
       await tester.pump();
-      expect(find.textContaining('at least'), findsOneWidget);
+      expect(find.textContaining('at least'), findsWidgets);
       expect(saved, isFalse);
     });
 
@@ -354,9 +445,14 @@ void main() {
         find.widgetWithText(TextField, 'Passphrase again'),
         '$_pass!',
       );
+      await tester.scrollUntilVisible(
+        find.byTooltip('Create backup'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
       await tester.tap(find.byTooltip('Create backup'));
       await tester.pump();
-      expect(find.textContaining('do not match'), findsOneWidget);
+      expect(find.textContaining('do not match'), findsWidgets);
     });
 
     testWidgets('creates a file that opens with the passphrase', (
@@ -381,6 +477,11 @@ void main() {
       await tester.enterText(
         find.widgetWithText(TextField, 'Passphrase again'),
         _pass,
+      );
+      await tester.scrollUntilVisible(
+        find.byTooltip('Create backup'),
+        200,
+        scrollable: find.byType(Scrollable).first,
       );
       await tester.tap(find.byTooltip('Create backup'));
       await tester.runAsync(
@@ -413,6 +514,8 @@ void main() {
           onRestored: () async => reloaded = true,
         ),
       );
+      await tester.tap(find.text('Restore'));
+      await tester.pumpAndSettle();
       await tester.enterText(
         find.widgetWithText(TextField, 'Passphrase').last,
         'not the right one',
@@ -428,7 +531,7 @@ void main() {
       );
       await tester.pump();
 
-      expect(find.textContaining('Wrong passphrase'), findsOneWidget);
+      expect(find.textContaining('Wrong passphrase'), findsWidgets);
       expect(reloaded, isFalse);
       expect(await tester.runAsync(() => _load('circuit_notes')), isEmpty);
     });
