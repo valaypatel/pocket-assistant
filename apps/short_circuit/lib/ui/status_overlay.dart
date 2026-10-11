@@ -45,18 +45,35 @@ final statusRouteObserver = StatusRouteObserver();
 /// True while a sheet that sits where the pill is (the full recording view) is open.
 final ValueNotifier<bool> statusPillHidden = ValueNotifier(false);
 
-class StatusOverlay extends StatelessWidget {
+class StatusOverlay extends StatefulWidget {
   const StatusOverlay({super.key, required this.child});
 
   final Widget child;
 
   @override
-  Widget build(BuildContext context) {
+  State<StatusOverlay> createState() => _StatusOverlayState();
+}
+
+class _StatusOverlayState extends State<StatusOverlay> {
+  // Its own Overlay: this sits above the app's Navigator, and anything inside it that needs an
+  // Overlay (a tooltip on the Stop button, say) would otherwise find none.
+  late final OverlayEntry _entry = OverlayEntry(builder: _content);
+
+  @override
+  void didUpdateWidget(StatusOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.child != widget.child) _entry.markNeedsBuild();
+  }
+
+  @override
+  Widget build(BuildContext context) => Overlay(initialEntries: [_entry]);
+
+  Widget _content(BuildContext context) {
     final media = MediaQuery.of(context);
     final still = media.disableAnimations;
     return Stack(
       children: [
-        Positioned.fill(child: child),
+        Positioned.fill(child: widget.child),
         Positioned(
           top: media.padding.top + 8,
           left: 12,

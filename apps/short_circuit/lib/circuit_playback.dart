@@ -35,7 +35,24 @@ extension _CircuitPlayback on _CircuitHomePageState {
     return true;
   }
 
+  /// Circuit says whether it is recording. An indicator left over from a recording that a restart
+  /// of the board cut short (no "saved" or "stopped" ever arrives) is cleared here.
+  void _applyCircuitRecordingSnapshot(String message) {
+    final recording = RegExp(
+      r'^recording=(\w+)$',
+      multiLine: true,
+    ).firstMatch(message)?.group(1);
+    if (recording == 'idle' && _recordingAudio) {
+      _update(() {
+        _recordingAudio = false;
+        _recordingStartedAt = null;
+        _songClipArmed = false;
+      });
+    }
+  }
+
   void _applyCircuitPlaybackSnapshot(String message) {
+    _applyCircuitRecordingSnapshot(message);
     if (message.contains('\nplayback_stop=1')) {
       _update(() => _circuitPlaybackSupportsStop = true);
     }

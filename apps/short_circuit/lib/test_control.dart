@@ -125,6 +125,7 @@ extension _TestControl on _CircuitHomePageState {
     'syncActive': _syncActive,
     'boardWaiting': _boardWaiting,
     'circuitPlayback': _circuitPlayback.name,
+    'circuitRecording': _recordingAudio,
     'phoneRecording': _phoneRecordingActive,
   };
 }
