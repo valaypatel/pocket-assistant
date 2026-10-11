@@ -36,6 +36,21 @@ void main() {
     },
   );
 
+  testWidgets('the note\'s page shows the sync as it goes', (tester) async {
+    addTearDown(() => syncUiState.value = const SyncUiState());
+    await tester.pumpWidget(_page(onSync: (_) async {}));
+    syncUiState.value = const SyncUiState(active: true, progress: 42);
+    await tester.pump();
+    expect(find.text('Syncing… 42%'), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+    syncUiState.value = const SyncUiState(
+      error: 'The phone lost its Wi-Fi connection.',
+    );
+    await tester.pump();
+    expect(find.text('Sync this note from Circuit'), findsOneWidget);
+    expect(find.text('The phone lost its Wi-Fi connection.'), findsOneWidget);
+  });
+
   testWidgets('a note that has arrived has no sync button', (tester) async {
     await tester.pumpWidget(
       _page(audioPath: '/files/circuit-note-1-5.cnote', onSync: (_) async {}),

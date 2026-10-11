@@ -21,6 +21,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'telemetry.dart';
 part 'backup.dart';
 part 'board_parts.dart';
+part 'sync_state.dart';
 part 'circuit_playback.dart';
 part 'groups.dart';
 part 'long_notes.dart';
@@ -2099,17 +2100,20 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       }
       return;
     }
-    final syncingNoteId = _syncingNoteId;
-    if (syncingNoteId == null) return;
     if (status.startsWith('Sync started') ||
         status.startsWith('Sync in progress')) {
+      // The figure is kept whatever the sync is for: after the first note of several has arrived
+      // no note is "being synced" any more, but the sync is still going and still has a progress.
       final match = RegExp(r'(\d+)%').firstMatch(status);
       if (match != null) {
         setState(() => _syncProgress = int.parse(match.group(1)!));
+      } else if (_syncProgress == null) {
+        setState(() => _syncProgress = 0);
       }
       // Progress shows in the banner; rewriting the saved note on every tick is
       // slow and used to flood Circuit with status updates.
-      if (status.startsWith('Sync started')) {
+      final syncingNoteId = _syncingNoteId;
+      if (syncingNoteId != null && status.startsWith('Sync started')) {
         _setNoteStatus(syncingNoteId, status.replaceAll('\n', ' • '));
       }
     }

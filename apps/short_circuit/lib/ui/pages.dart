@@ -1893,6 +1893,7 @@ extension _ScPages on _CircuitHomePageState {
   );
 
   Widget _buildShell() {
+    _publishSyncUi();
     final content = Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 640),

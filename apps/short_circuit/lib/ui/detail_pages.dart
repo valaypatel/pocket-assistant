@@ -613,14 +613,51 @@ class _TranscriptPageState extends State<TranscriptPage> {
             const SizedBox(height: 20),
             if ((live?.audioPath ?? widget.audioPath) == null &&
                 widget.onSyncNote != null) ...[
-              ScButton(
-                label: 'Sync this note from Circuit',
-                icon: LucideIcons.refreshCw,
-                busy:
-                    status.startsWith('Sync queued') ||
-                    status.startsWith('Receiving') ||
-                    status.startsWith('Waiting for part'),
-                onPressed: () => widget.onSyncNote!(widget.noteId),
+              ValueListenableBuilder<SyncUiState>(
+                valueListenable: syncUiState,
+                builder: (context, sync, _) {
+                  final syncing =
+                      sync.active || status.startsWith('Sync queued');
+                  final percent = sync.progress;
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      ScButton(
+                        label: syncing
+                            ? (percent == null
+                                  ? 'Syncing…'
+                                  : 'Syncing… $percent%')
+                            : 'Sync this note from Circuit',
+                        icon: LucideIcons.refreshCw,
+                        busy: syncing,
+                        onPressed: () => widget.onSyncNote!(widget.noteId),
+                      ),
+                      if (syncing && percent != null) ...[
+                        const SizedBox(height: 8),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(99),
+                          child: LinearProgressIndicator(
+                            value: percent / 100,
+                            minHeight: 5,
+                            color: Sc.accent,
+                            backgroundColor: Sc.line,
+                          ),
+                        ),
+                      ],
+                      if (!syncing && sync.error != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          sync.error!,
+                          style: const TextStyle(
+                            color: Sc.danger,
+                            fontSize: 12,
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
+                    ],
+                  );
+                },
               ),
               const SizedBox(height: 6),
               const Text(
