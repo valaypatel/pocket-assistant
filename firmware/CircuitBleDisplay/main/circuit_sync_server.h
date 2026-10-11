@@ -74,6 +74,7 @@ struct State {
     int64_t first_request_ms = 0;
     int64_t lockout_until_ms = 0;
     uint32_t total_bytes = 0;
+    uint32_t only_recording = 0;  // sync just this recording (its board number); 0 = everything waiting
     uint32_t served_bytes = 0;
     uint32_t acked = 0;
     // Set by the application. Called from the HTTP server task.
@@ -227,7 +228,7 @@ inline uint32_t id_after(const char *uri, const char *prefix) {
 inline esp_err_t list_handler(httpd_req_t *req) {
     if (!authorize(req)) return ESP_FAIL;
     circuit_notes::Note notes[kMaxListed];
-    const size_t count = circuit_notes::list_unsynced(notes, kMaxListed);
+    const size_t count = circuit_notes::list_unsynced_of(notes, kMaxListed, state.only_recording);
     // "<id>,<bytes>,<recorded>" and, for a one-minute part of a longer recording,
     // ",<first part's id>,<part number>,<1 if last>". A phone that does not know parts reads the first three.
     constexpr size_t kLine = 72;
@@ -347,18 +348,23 @@ inline void close_session() {
     }
     memset(state.token, 0, sizeof(state.token));
     state.client_ip = 0;
+    state.only_recording = 0;
 }
+
+// Files still waiting that this session is for: one recording's, or everything's.
+inline size_t waiting_in_session() { return circuit_notes::count_unsynced_of(state.only_recording); }
 
 // Starts a session. On success fills the port, token and fingerprint the app
 // needs, and the number and size of notes waiting.
 inline bool open_session(uint16_t *port, char *token, size_t token_size, const char **fingerprint,
-                         uint32_t *note_count, uint32_t *total_bytes) {
+                         uint32_t *note_count, uint32_t *total_bytes, uint32_t only_recording = 0) {
     State &s = state;
     if (is_open() || locked_out() || token_size < sizeof(s.token) || !ensure_identity()) return false;
 
     circuit_notes::Note notes[kMaxListed];
-    const size_t count = circuit_notes::list_unsynced(notes, kMaxListed);
+    const size_t count = circuit_notes::list_unsynced_of(notes, kMaxListed, only_recording);
     if (count == 0) return false;
+    s.only_recording = only_recording;
     s.total_bytes = 0;
     for (size_t i = 0; i < count; ++i) s.total_bytes += notes[i].bytes;
     s.served_bytes = 0;

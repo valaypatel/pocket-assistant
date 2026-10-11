@@ -137,6 +137,13 @@ __attribute__((noinline)) inline bool read_group(uint32_t id, Group *group) {
     return true;
 }
 
+// The recording a note belongs to: its first part's number for a part of a longer recording,
+// its own number for a plain note. The app calls this number the recording's board number.
+inline uint32_t recording_of(uint32_t id) {
+    Group group;
+    return read_group(id, &group) ? group.first : id;
+}
+
 inline uint32_t newest_id() {
     uint32_t newest = 0;
     for_each_file([&](uint32_t id, bool) { if (id > newest) newest = id; });
@@ -209,24 +216,55 @@ inline void note_path(const Note &note, char *out, size_t size) {
     path_for(note.id, note.encrypted ? "ENC" : "WAV", out, size);
 }
 
-// Fills `out` with notes the app has not yet confirmed, oldest first.
-inline size_t list_unsynced(Note *out, size_t capacity) {
+// Fills `out` with notes the app has not yet confirmed, oldest first. With `recording` set, only the
+// files of that recording (all its parts, or the one plain note); 0 means everything waiting.
+inline size_t list_unsynced_of(Note *out, size_t capacity, uint32_t recording) {
     size_t count = 0;
     for_each_note([&](uint32_t id) {
         Note note;
-        if (count < capacity && describe(id, &note) && !note.synced) out[count++] = note;
+        if (count < capacity && describe(id, &note) && !note.synced &&
+            (recording == 0 || recording_of(id) == recording)) {
+            out[count++] = note;
+        }
     });
     std::sort(out, out + count, [](const Note &a, const Note &b) { return a.id < b.id; });
     return count;
 }
 
-inline size_t count_unsynced() {
+inline size_t list_unsynced(Note *out, size_t capacity) { return list_unsynced_of(out, capacity, 0); }
+
+inline size_t count_unsynced_of(uint32_t recording) {
     size_t count = 0;
     for_each_note([&](uint32_t id) {
         Note note;
-        if (describe(id, &note) && !note.synced) ++count;
+        if (describe(id, &note) && !note.synced && (recording == 0 || recording_of(id) == recording)) ++count;
     });
     return count;
+}
+
+inline size_t count_unsynced() { return count_unsynced_of(0); }
+
+// How many recordings have something waiting, as a person counts them: the one-minute parts of
+// a long recording are one recording, however many of them have not synced yet. (count_unsynced()
+// counts files, which is what the sync itself works through.)
+inline size_t count_unsynced_recordings() {
+    uint32_t firsts[16];
+    size_t seen = 0, others = 0;
+    for_each_note([&](uint32_t id) {
+        Note note;
+        if (!describe(id, &note) || note.synced) return;
+        Group group;
+        if (!read_group(id, &group)) {
+            ++others;
+            return;
+        }
+        for (size_t i = 0; i < seen; ++i) {
+            if (firsts[i] == group.first) return;
+        }
+        if (seen < 16) firsts[seen++] = group.first;
+        else ++others;  // too many different recordings to tell apart: count each part
+    });
+    return seen + others;
 }
 
 inline bool mark_synced(uint32_t id) {

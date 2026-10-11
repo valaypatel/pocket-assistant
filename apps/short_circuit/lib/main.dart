@@ -21,6 +21,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'telemetry.dart';
 part 'backup.dart';
 part 'board_parts.dart';
+part 'sync_state.dart';
+part 'circuit_playback.dart';
 part 'groups.dart';
 part 'long_notes.dart';
 part 'music.dart';
@@ -1103,6 +1105,10 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   DateTime? _wifiConnectingSince;
   Timer? _wifiPollTimer;
   bool _audioBusy = false;
+  CircuitPlaybackPhase _circuitPlayback = CircuitPlaybackPhase.idle;
+  String? _circuitPlaybackFeedback;
+  bool _circuitPlaybackSupportsStop = false;
+  Timer? _playbackRequestTimer;
   bool _recordingAudio = false;
   final _deviceChipKey =
       GlobalKey(); // where the recording pill grows from and folds back to
@@ -1196,6 +1202,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     _phoneRecording.dispose();
     _nowPlayingTimer?.cancel();
     _nowPlaying.dispose();
+    _playbackRequestTimer?.cancel();
     _audioStatusSubscription?.cancel();
     _relayStatusTimer?.cancel();
     _homeStatusTimer?.cancel();
@@ -1938,7 +1945,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _applySyncStatus(status);
       return;
     }
-    if (!mounted || status == _lastAudioStatus) return;
+    if (!mounted) return;
+    if (_applyCircuitPlaybackStatus(status)) return;
+    if (status == _lastAudioStatus) return;
     _lastAudioStatus = status;
     if (status.startsWith('Recording started') && !_recordingAudio) {
       // Started with Circuit's button rather than from the app.
@@ -2036,6 +2045,23 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       }
       return;
     }
+    if (status.startsWith('Sync: nothing waiting for #')) {
+      // Asked for one note and Circuit has nothing waiting for it (it may have synced already).
+      // Unlike "no new notes" this says nothing about the other notes, so nothing is pruned.
+      final noteId = _syncingNoteId;
+      setState(() {
+        _audioBusy = false;
+        _syncActive = false;
+        _syncingNoteId = null;
+        _syncProgress = null;
+      });
+      if (noteId != null) {
+        unawaited(
+          _setNoteStatus(noteId, 'Circuit has nothing waiting for this note.'),
+        );
+      }
+      return;
+    }
     if (status.startsWith('Sync: no new notes')) {
       // Circuit has nothing waiting.
       setState(() {
@@ -2074,17 +2100,20 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       }
       return;
     }
-    final syncingNoteId = _syncingNoteId;
-    if (syncingNoteId == null) return;
     if (status.startsWith('Sync started') ||
         status.startsWith('Sync in progress')) {
+      // The figure is kept whatever the sync is for: after the first note of several has arrived
+      // no note is "being synced" any more, but the sync is still going and still has a progress.
       final match = RegExp(r'(\d+)%').firstMatch(status);
       if (match != null) {
         setState(() => _syncProgress = int.parse(match.group(1)!));
+      } else if (_syncProgress == null) {
+        setState(() => _syncProgress = 0);
       }
       // Progress shows in the banner; rewriting the saved note on every tick is
       // slow and used to flood Circuit with status updates.
-      if (status.startsWith('Sync started')) {
+      final syncingNoteId = _syncingNoteId;
+      if (syncingNoteId != null && status.startsWith('Sync started')) {
         _setNoteStatus(syncingNoteId, status.replaceAll('\n', ' • '));
       }
     }
@@ -2108,6 +2137,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   /// "@sync-status\nwaiting=N\nreset=R\nuptime=S" from Circuit.
   void _applySyncStatus(String message) {
     if (!mounted) return;
+    _applyCircuitPlaybackSnapshot(message);
     int? field(String name) => int.tryParse(
       RegExp('$name=(-?\\d+)').firstMatch(message)?.group(1) ?? '',
     );
@@ -2121,6 +2151,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         if (waiting == 0) {
           _waitingSince = null;
           if (!_syncActive) _syncError = null; // everything made it across
+          unawaited(_pruneLostNotes());
         }
         _boardWaiting = waiting;
       }
@@ -2213,6 +2244,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   );
 
   Future<void> _pruneLostNotes() async {
+    // Only when Circuit itself says nothing at all is waiting. A sync of one note ends with the
+    // same "saved" message, and the other notes are then still on the board.
+    if (_boardWaiting != 0) return;
     final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
     final lost = _notesWithoutAudio(cutoff)
         .where(
@@ -2459,7 +2493,14 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     _lastSyncActivity = DateTime.now();
     _syncActive = true;
     try {
-      await _writeCircuit('@audio-sync');
+      // Ask for just this note (all its parts) when Circuit gave it a number; an older board
+      // ignores the number and sends everything waiting.
+      final boardId = _boardIdOf(
+        _notes.where((n) => n.id == noteId).firstOrNull,
+      );
+      await _writeCircuit(
+        boardId == null ? '@audio-sync' : '@audio-sync\n$boardId',
+      );
     } catch (error) {
       _audioBusy = false;
       _syncingNoteId = null;
@@ -2851,7 +2892,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   }
 
   Future<void> _recordAudio() async {
-    if (_audioBusy) return;
+    if (_audioBusy || _circuitPlayback != CircuitPlaybackPhase.idle) return;
     setState(() {
       _audioBusy = true;
       _recordingAudio = true;
@@ -2870,7 +2911,11 @@ class _CircuitHomePageState extends State<CircuitHomePage>
 
   /// Records a short clip on Circuit; once it syncs it is sent for recognition.
   Future<void> _identifySong() async {
-    if (_audioBusy || _recordingAudio) return;
+    if (_audioBusy ||
+        _recordingAudio ||
+        _circuitPlayback != CircuitPlaybackPhase.idle) {
+      return;
+    }
     setState(() {
       _audioBusy = true;
       _recordingAudio = true;
@@ -2983,20 +3028,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
           _recordingAudio = false;
         });
       }
-    }
-  }
-
-  Future<void> _playAudio() async {
-    if (_audioBusy) return;
-    setState(() => _audioBusy = true);
-    try {
-      await _writeCircuit('@audio-play');
-      _setStatus('Circuit is playing its latest recording.');
-      await Future<void>.delayed(const Duration(seconds: 6));
-    } catch (error) {
-      _setStatus('Could not play recording: $error');
-    } finally {
-      if (mounted) setState(() => _audioBusy = false);
     }
   }
 

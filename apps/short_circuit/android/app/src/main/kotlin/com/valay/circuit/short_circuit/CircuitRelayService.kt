@@ -425,7 +425,13 @@ class CircuitRelayService : Service() {
             wifiNetworks = request.lines().drop(1).map { it.trim() }.filter { it.isNotEmpty() }.distinct().sorted()
             return
         }
-        if (request.startsWith("@sync-status\n")) Diagnostics.boardHealth(this, request)
+        if (request.startsWith("@sync-status\n")) {
+            Diagnostics.boardHealth(this, request)
+            // Board health and playback snapshots belong to Dart as well as diagnostics.
+            // Keep them separate from the last audio event, which is replayed on reopening.
+            audioStatusListener?.invoke(request)
+            return
+        }
         if (request.startsWith("@wifi-status\n")) {
             // Delivered to Dart on the same channel as audio status, but cached
             // separately so it never overwrites the audio state.

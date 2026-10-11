@@ -24,7 +24,7 @@
 
 ## Workflow and state
 
-Capture opens an explicit source chooser. Phone recording works without Circuit. Device capture requires a connected Circuit. Existing microphone permissions, pause/resume, interruption, discard confirmation and part assembly remain intact. Active recording and playback provide controls while navigating.
+Capture opens an explicit source chooser. Phone recording works without Circuit. Device capture requires a connected Circuit. Existing microphone permissions, pause/resume, interruption, discard confirmation and part assembly remain intact. Active recording and phone playback provide controls while navigating. Circuit speaker playback follows board acknowledgements and periodic snapshots, with visible start/stop/failure feedback. Stop is offered only when the firmware advertises support; a request timeout never claims playback started or stopped.
 
 Notes retain local query and source filters while the widget remains alive. Clear search updates immediately. Bulk grouping acts only on selected IDs. Deleting a group keeps its notes; removing a note from a group does not delete it. Note deletion follows current implementation and confirmation copy, not the older prototype's device-deletion assumption.
 

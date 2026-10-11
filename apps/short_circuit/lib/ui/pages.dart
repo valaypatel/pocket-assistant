@@ -367,6 +367,7 @@ extension _ScPages on _CircuitHomePageState {
           status: note.status,
           transcript: note.transcript ?? '',
           onForceTranscribe: _transcribeNote,
+          onSyncNote: _syncLatestRecording,
           audioPath: note.audioPath,
           onPlayNote: _playSyncedNote,
           playerBar: _nowPlayingBar,
@@ -1440,7 +1441,11 @@ extension _ScPages on _CircuitHomePageState {
               label: 'Record',
               tooltip: 'Record a voice note on Circuit',
               color: Sc.accent,
-              onTap: !available || _audioBusy || _recordingAudio
+              onTap:
+                  !available ||
+                      _audioBusy ||
+                      _recordingAudio ||
+                      _circuitPlayback != CircuitPlaybackPhase.idle
                   ? null
                   : _recordAudio,
             ),
@@ -1454,7 +1459,11 @@ extension _ScPages on _CircuitHomePageState {
               tooltip:
                   'Listen for $_songClipSeconds seconds and identify the song',
               color: Sc.dark,
-              onTap: !available || _audioBusy || _recordingAudio
+              onTap:
+                  !available ||
+                      _audioBusy ||
+                      _recordingAudio ||
+                      _circuitPlayback != CircuitPlaybackPhase.idle
                   ? null
                   : _identifySong,
             ),
@@ -1465,18 +1474,43 @@ extension _ScPages on _CircuitHomePageState {
       ScActionBar(
         children: [
           ScIconButton(
-            icon: LucideIcons.play,
-            tooltip: 'Play latest recording on Circuit',
-            caption: 'Play',
+            icon: _circuitPlayback == CircuitPlaybackPhase.playing
+                ? LucideIcons.square
+                : LucideIcons.play,
+            tooltip: _circuitPlayback == CircuitPlaybackPhase.playing
+                ? (_circuitPlaybackSupportsStop
+                      ? 'Stop playback on Circuit'
+                      : 'Playing on Circuit')
+                : 'Play latest recording on Circuit',
+            caption: switch (_circuitPlayback) {
+              CircuitPlaybackPhase.idle => 'Play',
+              CircuitPlaybackPhase.requesting => 'Starting',
+              CircuitPlaybackPhase.playing =>
+                _circuitPlaybackSupportsStop ? 'Stop' : 'Playing',
+              CircuitPlaybackPhase.stopping => 'Stopping',
+            },
+            busy:
+                _circuitPlayback == CircuitPlaybackPhase.requesting ||
+                _circuitPlayback == CircuitPlaybackPhase.stopping,
             onPressed: available && !_audioBusy && !_recordingAudio
-                ? _playAudio
+                ? (_circuitPlayback == CircuitPlaybackPhase.playing
+                      ? (_circuitPlaybackSupportsStop
+                            ? _stopCircuitPlayback
+                            : null)
+                      : _circuitPlayback == CircuitPlaybackPhase.idle
+                      ? _playAudio
+                      : null)
                 : null,
           ),
           ScIconButton(
             icon: LucideIcons.eraser,
             tooltip: 'Free up Circuit storage',
             caption: 'Free space',
-            onPressed: available && !_audioBusy && !_recordingAudio
+            onPressed:
+                available &&
+                    !_audioBusy &&
+                    !_recordingAudio &&
+                    _circuitPlayback == CircuitPlaybackPhase.idle
                 ? _cleanCircuitNotes
                 : null,
           ),
@@ -1504,6 +1538,16 @@ extension _ScPages on _CircuitHomePageState {
             ),
         ],
       ),
+      if (_circuitPlaybackFeedback != null) ...[
+        const SizedBox(height: 16),
+        Semantics(
+          liveRegion: true,
+          child: Text(
+            _circuitPlaybackFeedback!,
+            style: const TextStyle(fontSize: 14, color: Sc.ink, height: 1.5),
+          ),
+        ),
+      ],
       const SizedBox(height: 8),
       Text(
         _status,
@@ -1849,6 +1893,7 @@ extension _ScPages on _CircuitHomePageState {
   );
 
   Widget _buildShell() {
+    _publishSyncUi();
     final content = Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 640),
