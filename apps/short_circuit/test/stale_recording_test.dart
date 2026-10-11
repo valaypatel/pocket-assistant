@@ -59,7 +59,9 @@ void main() {
         '@sync-status\nplayback=idle\nplayback_ms=0\nplayback_stop=1\nrecording=idle',
       );
       await tester.pump(const Duration(seconds: 1));
-      await tester.pump(const Duration(milliseconds: 500)); // the pill fades out
+      await tester.pump(
+        const Duration(milliseconds: 500),
+      ); // the pill fades out
       await tester.pump(const Duration(milliseconds: 500));
       expect(find.text('Recording on Circuit'), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
