@@ -31,9 +31,6 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.8
   flutter_blue_plus: 2.3.13
   # 13.x currently requires Android API 37, which Flutter's stable Android
   # toolchain cannot compile against yet. 12.0.3 supports the same BLE grants.
