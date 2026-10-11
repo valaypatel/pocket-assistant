@@ -26,6 +26,8 @@
 #include <cstring>
 #include <sys/socket.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_https_server.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -43,6 +45,15 @@
 #include "circuit_notes.h"
 
 namespace circuit_sync {
+
+// One line of internal-RAM numbers. "lowest" never rises, so the first stage that shows a drop is
+// where the memory went.
+inline void log_heap(const char *stage) {
+    ESP_LOGW("CircuitHeap", "%-22s free %6u  largest %6u  lowest ever %6u", stage,
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+}
 
 // How many downloads the board has cut short since it started (memory, or the phone going
 // away). Reported to the phone with the rest of the board's health.
@@ -266,6 +277,7 @@ inline esp_err_t note_handler(httpd_req_t *req) {
         if (start >= note.bytes) return ESP_FAIL;
     }
 
+    log_heap(start > 0 ? "sync: note (resume)" : "sync: note start");
     char path[48];
     circuit_notes::note_path(note, path, sizeof(path));
     FILE *file = fopen(path, "rb");
@@ -287,11 +299,28 @@ inline esp_err_t note_handler(httpd_req_t *req) {
     }
     esp_err_t status = ESP_OK;
     size_t read = 0;
-    while ((read = fread(buffer, 1, kChunkBytes, file)) > 0) {
+    uint32_t position = start;
+    int read_failures = 0;
+    while (true) {
+        read = fread(buffer, 1, kChunkBytes, file);
+        if (read == 0) {
+            // A read that fails while internal RAM is nearly gone (the SD driver cannot get its small
+            // buffer) looks like the end of the file. Wait a moment and read the same place again.
+            if (ferror(file) && position < note.bytes && ++read_failures <= 5) {
+                clearerr(file);
+                vTaskDelay(pdMS_TO_TICKS(60));
+                fseek(file, position, SEEK_SET);
+                continue;
+            }
+            break;
+        }
+        read_failures = 0;
+        position += read;
         status = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer), read);
         if (status != ESP_OK) break;
         state.last_activity_ms = now_ms();
         state.served_bytes += read;
+        if (state.served_bytes / (256 * 1024) != (state.served_bytes - read) / (256 * 1024)) log_heap("sync: transferring");
         if (state.on_progress != nullptr && state.total_bytes > 0) {
             const uint64_t percent = static_cast<uint64_t>(state.served_bytes) * 100 / state.total_bytes;
             state.on_progress(percent > 100 ? 100 : static_cast<uint32_t>(percent));
@@ -359,7 +388,9 @@ inline size_t waiting_in_session() { return circuit_notes::count_unsynced_of(sta
 inline bool open_session(uint16_t *port, char *token, size_t token_size, const char **fingerprint,
                          uint32_t *note_count, uint32_t *total_bytes, uint32_t only_recording = 0) {
     State &s = state;
+    log_heap("sync: before session");
     if (is_open() || locked_out() || token_size < sizeof(s.token) || !ensure_identity()) return false;
+    log_heap("sync: identity ready");
 
     circuit_notes::Note notes[kMaxListed];
     const size_t count = circuit_notes::list_unsynced_of(notes, kMaxListed, only_recording);
@@ -384,6 +415,9 @@ inline bool open_session(uint16_t *port, char *token, size_t token_size, const c
     config.prvtkey_len = strlen(s.key_pem) + 1;
     config.port_secure = s.port;
     config.httpd.stack_size = 10240;
+    // The server's stack lives in PSRAM: internal RAM is the scarce part during a sync. Nothing the
+    // server task runs writes flash (the certificate is stored by the task that opens the session).
+    config.httpd.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     config.httpd.max_open_sockets = 2;
     config.httpd.lru_purge_enable = true;
     config.httpd.recv_wait_timeout = 10;
@@ -394,6 +428,7 @@ inline bool open_session(uint16_t *port, char *token, size_t token_size, const c
         s.server = nullptr;
         return false;
     }
+    log_heap("sync: server up");
     static const httpd_uri_t list = {.uri = "/notes", .method = HTTP_GET, .handler = list_handler, .user_ctx = nullptr};
     static const httpd_uri_t note = {.uri = "/notes/*", .method = HTTP_GET, .handler = note_handler, .user_ctx = nullptr};
     static const httpd_uri_t ack = {.uri = "/ack/*", .method = HTTP_POST, .handler = ack_handler, .user_ctx = nullptr};

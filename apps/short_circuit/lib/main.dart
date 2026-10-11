@@ -37,6 +37,7 @@ part 'ui/pages.dart';
 part 'ui/recording_view.dart';
 part 'ui/song_page.dart';
 part 'ui/theme.dart';
+part 'test_control.dart';
 
 const _circuitName = 'Circuit';
 final _textServiceId = Guid('0000fff0-0000-1000-8000-00805f9b34fb');
@@ -1069,6 +1070,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   bool _autoEnrich =
       true; // AI review (title, summary, tags, actions) after a transcript
   bool _shareDiagnostics = true;
+  bool _testMode = false; // lets adb drive the app, see test_control.dart
   bool _geminiConnected = false;
   bool _aiConnected = false;
   bool _musicConnected = false;
@@ -1162,6 +1164,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       onError: (Object error) => _setStatus('Scan failed: $error'),
     );
     _restoreLastCircuit();
+    _initTestControl();
     _loadNotes().then((_) {
       _reconcileSyncedNotes();
       _listenForPhoneRecording();
