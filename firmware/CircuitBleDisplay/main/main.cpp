@@ -159,6 +159,20 @@ constexpr time_t kMinValidEpoch = 1704067200;  // 2024-01-01
 void send_relay_request(const char *request);
 void show_busy_notice();
 bool claim_audio() { return !audio_busy.exchange(true); }
+
+// What may interrupt what: a sync comes first, then recording a note; playback comes last and
+// gives way to either. A sync is never cut short by a recording, and a recording is never cut
+// short by a sync (it is refused, with the crossed-out microphone or "Audio is busy").
+//
+// If playback is the only thing using the speaker, stops it and waits for it to let go. True
+// when the audio is free to use.
+bool free_audio_from_playback() {
+    if (!audio_busy) return true;
+    if (!playback_active.load()) return false;
+    playback_stop_requested = true;
+    for (int waited_ms = 0; audio_busy && waited_ms < 3000; waited_ms += 20) vTaskDelay(pdMS_TO_TICKS(20));
+    return !audio_busy;
+}
 esp_err_t send_audio_data(const uint8_t *data, size_t length);
 
 struct TextMessage {
@@ -1137,7 +1151,7 @@ void start_recording(char *command) {
     }
     // Recording and syncing are never done together: the card, the radio and the memory are
     // shared, and a recording must not lose a word to a sync.
-    if (audio_busy || circuit_sync::is_open()) {
+    if (circuit_sync::is_open() || audio_sync_task_handle != nullptr || !free_audio_from_playback()) {
         show_busy_notice();
         return;
     }
@@ -1562,7 +1576,7 @@ void sync_supervisor_task(void *) {
 // `forced` is the device button: it falls back to BLE when Wi-Fi sync is not
 // possible. The app can only ask for Wi-Fi sync.
 void start_audio_sync(bool forced) {
-    if (audio_busy) {
+    if (!free_audio_from_playback()) {  // playing a note gives way; a recording does not
         report_audio_status("Audio is busy");
         return;
     }
