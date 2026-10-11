@@ -140,13 +140,18 @@ p = pos()
 b("rec", "16")
 time.sleep(4)
 b("lower-tap")
-time.sleep(4)
+time.sleep(2)  # the screen redraws about every 0.7 s
+cue1 = b("cue", timeout=60)
 b("lower-tap")
+time.sleep(2)
+cue2 = b("cue", timeout=60)
 ok = wait_for("Saved recording", p, 25)
+note("Q4 the screen cue appears on the first tap (filled bookmark) and changes on the second (outline)",
+     "icon=filled hidden=0" in cue1 and "icon=outline hidden=0" in cue2, (cue1.strip()[-60:] + " | " + cue2.strip()[-60:]))
 mid = saved_id(since(p))
 offsets = moments_of(mid) if mid else None
-good = bool(offsets) and len(offsets) == 2 and 2000 <= offsets[0] <= 8000 and 2500 <= offsets[1] - offsets[0] <= 6500
-note("Q4 two taps give two Moments, in order, about 4 s apart", ok and good, str(offsets))
+good = bool(offsets) and len(offsets) == 2 and 2000 <= offsets[0] <= 8000 and 2500 <= offsets[1] - offsets[0] <= 9000
+note("Q4 two taps give two Moments, in order, a few seconds apart", ok and good, str(offsets))
 note("Q4 a note without taps has no Moments file", plain_id is not None and moments_of(plain_id) == [], str(moments_of(plain_id) if plain_id else None))
 
 st = b("moments-selftest", timeout=60)

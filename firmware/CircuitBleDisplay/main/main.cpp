@@ -47,6 +47,7 @@
 #include "port_power.h"
 #include "port_codec.h"
 #include "circuit_demo_screens.h"
+#include "circuit_moment_icon.h"
 #include "circuit_recording_icon.h"
 #include "circuit_crypto.h"
 #include "circuit_moments.h"
@@ -105,6 +106,8 @@ lv_obj_t *connection_label;
 lv_obj_t *wordmark_image;
 lv_obj_t *pairing_code_label;
 lv_obj_t *recording_timer_label;
+lv_obj_t *recording_moment_icon;  // a bookmark under the timer: the cue that a lower-key tap was taken
+std::atomic<uint32_t> recording_moments{0};  // taps taken in the current recording
 lv_obj_t *recording_icon;  // the animated device icon on the recording screen (64x64)
 lv_obj_t *sync_progress_label;
 lv_obj_t *busy_icon_obj;  // "cannot record now" (a microphone crossed out), drawn where the sync figure is
@@ -544,6 +547,7 @@ void show_device_screen(DeviceScreen screen) {
     lv_obj_add_flag(message_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(pairing_code_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(recording_moment_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
@@ -607,6 +611,15 @@ void demo_animation_task(void *) {
                         lv_obj_clear_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
                     }
                     lv_obj_clear_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
+                    // The cue that a lower-key tap was taken: a bookmark under the timer. It is drawn here,
+                    // with the rest of this screen, because the key task must not wait for the e-paper's
+                    // refresh. It shows filled after the first tap, outlined after the second, and so on,
+                    // so every tap visibly changes it.
+                    const uint32_t taken = recording_moments.load();
+                    if (taken > 0) {
+                        lv_img_set_src(recording_moment_icon, taken % 2 == 1 ? &circuit_moment_filled : &circuit_moment_outline);
+                        lv_obj_clear_flag(recording_moment_icon, LV_OBJ_FLAG_HIDDEN);
+                    }
                 }
                 Lvgl_unlock();
             }
@@ -658,6 +671,7 @@ void show_pairing_code() {
     lv_label_set_text(pairing_code_label, code);
     lv_obj_clear_flag(pairing_code_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(recording_moment_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
@@ -910,6 +924,7 @@ void record_audio_task(void *argument) {
 
     recording_audio_ms = 0;
     recording_paused = false;
+    recording_moments = 0;
     show_device_screen(DeviceScreen::Recording);
 
     char note_path[48];
@@ -1912,6 +1927,17 @@ void dev_console_task(void *) {
             vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(seconds * 1000)));
             dev_lower_down = false;
             ESP_LOGW(kTag, "DEV lower key pressed for %.2f s", seconds);
+        } else if (strcmp(line, "cue") == 0) {
+            // What the recording screen's Moment icon shows right now
+            bool filled = false;
+            bool hidden = true;
+            if (Lvgl_lock(1000)) {
+                filled = lv_img_get_src(recording_moment_icon) == &circuit_moment_filled;
+                hidden = lv_obj_has_flag(recording_moment_icon, LV_OBJ_FLAG_HIDDEN);
+                Lvgl_unlock();
+            }
+            ESP_LOGW(kTag, "DEV cue: screen=%d icon=%s hidden=%d count=%u", static_cast<int>(active_screen),
+                filled ? "filled" : "outline", hidden ? 1 : 0, static_cast<unsigned>(recording_moments.load()));
         } else if (strcmp(line, "moments-selftest") == 0) {
             ESP_LOGW(kTag, "DEV moments-selftest: %s", circuit_moments::selftest() ? "PASS" : "FAIL");
         } else if (strncmp(line, "moments ", 8) == 0) {
@@ -2050,7 +2076,8 @@ void lower_key_task(void *) {
 #endif
             if (held <= kLowerTapMaxTime && recording_active && !recording_paused) {
                 moment_requests++;
-                ESP_LOGI(kTag, "Lower key tap: Moment requested");
+                const uint32_t taken = recording_moments.fetch_add(1) + 1;
+                ESP_LOGI(kTag, "Lower key tap: Moment requested (%u so far)", static_cast<unsigned>(taken));
             }
         }
         was_pressed = is_pressed;
@@ -2721,6 +2748,11 @@ void init_display() {
         recording_timer_label = make_label(&lv_font_montserrat_24, 84, LV_TEXT_ALIGN_LEFT);
         lv_obj_set_style_text_letter_space(recording_timer_label, 1, 0);
         lv_obj_align(recording_timer_label, LV_ALIGN_TOP_LEFT, 116, 124);
+
+        recording_moment_icon = lv_img_create(lv_screen_active());
+        lv_img_set_src(recording_moment_icon, &circuit_moment_outline);
+        lv_obj_align(recording_moment_icon, LV_ALIGN_TOP_LEFT, 116, 156);
+        lv_obj_add_flag(recording_moment_icon, LV_OBJ_FLAG_HIDDEN);
 
         sync_progress_label = make_label(&lv_font_montserrat_24, 84, LV_TEXT_ALIGN_LEFT);
         lv_obj_set_style_text_letter_space(sync_progress_label, 1, 0);
