@@ -9,9 +9,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:short_circuit/main.dart';
 
 // The same vectors the board checks itself against at every start.
-final _vectors =
-    jsonDecode(File('../../docs/security/test-vectors.json').readAsStringSync())
-        as Map<String, dynamic>;
+final _vectors = jsonDecode(
+  File('../../docs/security/test-vectors.json').readAsStringSync(),
+) as Map<String, dynamic>;
 final _master = Uint8List.fromList(_hex(_vectors['masterKeyHex'] as String));
 final _moments = _vectors['moments'] as Map<String, dynamic>;
 final _momentsFile = Uint8List.fromList(_hex(_moments['fileHex'] as String));
@@ -85,12 +85,10 @@ void main() {
         File(path).writeAsBytesSync(audio);
         parts.add(path);
       }
-      File(
-        '${dir.path}/circuit-moments-10.cmom',
-      ).writeAsBytesSync(await _sealMoments(10, [250, 900]));
-      File(
-        '${dir.path}/circuit-moments-11.cmom',
-      ).writeAsBytesSync(await _sealMoments(11, [100]));
+      File('${dir.path}/circuit-moments-10.cmom')
+          .writeAsBytesSync(await _sealMoments(10, [250, 900]));
+      File('${dir.path}/circuit-moments-11.cmom')
+          .writeAsBytesSync(await _sealMoments(11, [100]));
       return parts;
     }
 
@@ -99,11 +97,14 @@ void main() {
       expect(await Moments.partDurationMs(parts.first), 1000);
     });
 
-    test('moments of later parts are moved by the length of the earlier ones', () async {
-      await NoteKeys.save(_keyId, _master);
-      final parts = await twoParts();
-      expect(await Moments.forNote(parts), [250, 900, 1100]);
-    });
+    test(
+      'moments of later parts are moved by the length of the earlier ones',
+      () async {
+        await NoteKeys.save(_keyId, _master);
+        final parts = await twoParts();
+        expect(await Moments.forNote(parts), [250, 900, 1100]);
+      },
+    );
 
     test('a part without a moments file adds none', () async {
       await NoteKeys.save(_keyId, _master);
@@ -179,8 +180,7 @@ Future<Uint8List> _seal(
     final nonce = ByteData(12)
       ..setUint32(0, noteId, Endian.little)
       ..setUint64(4, index, Endian.little);
-    final aad = ByteData(36)
-      ..setUint64(28, index, Endian.little);
+    final aad = ByteData(36)..setUint64(28, index, Endian.little);
     aad.buffer.asUint8List().setRange(0, 28, head);
     final box = await gcm.encrypt(
       pcm.sublist(pos, end),

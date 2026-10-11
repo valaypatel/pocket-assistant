@@ -478,7 +478,8 @@ class _TranscriptPageState extends State<TranscriptPage> {
     final found = await Moments.forNote(files);
     final same =
         found.length == _moments.length &&
-        Iterable<int>.generate(found.length).every((i) => found[i] == _moments[i]);
+        Iterable<int>.generate(found.length)
+            .every((i) => found[i] == _moments[i]);
     if (!mounted || same) return;
     setState(() => _moments = found);
   }
