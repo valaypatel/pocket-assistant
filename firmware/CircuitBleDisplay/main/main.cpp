@@ -47,6 +47,7 @@
 #include "port_power.h"
 #include "port_codec.h"
 #include "circuit_demo_screens.h"
+#include "circuit_moment_icon.h"
 #include "circuit_recording_icon.h"
 #include "circuit_crypto.h"
 #include "circuit_moments.h"
@@ -88,7 +89,7 @@ constexpr gpio_num_t kRecordButtonPin = GPIO_NUM_0;
 #ifndef CIRCUIT_DEV_CONSOLE
 constexpr gpio_num_t kLowerKeyPin = GPIO_NUM_18;
 #endif
-constexpr TickType_t kLowerTapMaxTime = pdMS_TO_TICKS(600);
+constexpr uint32_t kLowerTapMaxMs = 600;
 constexpr TickType_t kButtonPollInterval = pdMS_TO_TICKS(20);
 constexpr TickType_t kButtonDebounceDelay = pdMS_TO_TICKS(50);
 constexpr TickType_t kForceSyncHoldTime = pdMS_TO_TICKS(2000);
@@ -105,6 +106,11 @@ lv_obj_t *connection_label;
 lv_obj_t *wordmark_image;
 lv_obj_t *pairing_code_label;
 lv_obj_t *recording_timer_label;
+lv_obj_t *recording_moment_icon;   // a bookmark under the timer: the cue that a lower-key tap was taken
+lv_obj_t *recording_moment_count;  // beside it: how many taps this recording has
+std::atomic<uint32_t> recording_moments{0};  // taps taken in the current recording
+std::atomic<int64_t> moment_cue_until_ms{0};  // the cue is shown until then (esp_timer time in ms)
+constexpr int64_t kMomentCueMs = 3000;
 lv_obj_t *recording_icon;  // the animated device icon on the recording screen (64x64)
 lv_obj_t *sync_progress_label;
 lv_obj_t *busy_icon_obj;  // "cannot record now" (a microphone crossed out), drawn where the sync figure is
@@ -257,7 +263,10 @@ struct ScreenTimeout {
     uint32_t delay_ms;
 };
 
-void show_device_screen(DeviceScreen screen);
+// With `only_if_showing` set, the change is made only if that screen is still the one showing. The check
+// is made under the display lock, so a screen that took over meanwhile (a new recording right after a
+// save) is never overwritten by a timer that was set for the old one.
+void show_device_screen(DeviceScreen screen, bool only_if_showing = false, DeviceScreen showing = DeviceScreen::Idle);
 
 // Date, clock and note counts stay on screen in every state (see
 // prototypes/circuit-epaper-states). They only appear once the phone has
@@ -501,9 +510,8 @@ void screen_timeout_task(void *argument) {
     const ScreenTimeout timeout = *static_cast<ScreenTimeout *>(argument);
     delete static_cast<ScreenTimeout *>(argument);
     vTaskDelay(pdMS_TO_TICKS(timeout.delay_ms));
-    if (active_screen == timeout.expected &&
-        !(timeout.expected == DeviceScreen::Playback && playback_active.load())) {
-        show_device_screen(DeviceScreen::Idle);
+    if (!(timeout.expected == DeviceScreen::Playback && playback_active.load())) {
+        show_device_screen(DeviceScreen::Idle, true, timeout.expected);
     }
     vTaskDelete(nullptr);
 }
@@ -523,7 +531,7 @@ void update_message(const char *message) {
     Lvgl_unlock();
 }
 
-void show_device_screen(DeviceScreen screen) {
+void show_device_screen(DeviceScreen screen, bool only_if_showing, DeviceScreen showing) {
     static constexpr const lv_image_dsc_t *kScreens[] = {
         &circuit_idle_screen,
         &circuit_record_screen,
@@ -535,6 +543,10 @@ void show_device_screen(DeviceScreen screen) {
     if (!Lvgl_lock(-1)) {
         return;
     }
+    if (only_if_showing && active_screen != showing) {
+        Lvgl_unlock();
+        return;
+    }
     active_screen = screen;
     boot_splash = false;
     if (screen == DeviceScreen::Recording) {
@@ -544,6 +556,8 @@ void show_device_screen(DeviceScreen screen) {
     lv_obj_add_flag(message_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(pairing_code_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(recording_moment_icon, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(recording_moment_count, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
@@ -607,6 +621,21 @@ void demo_animation_task(void *) {
                         lv_obj_clear_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
                     }
                     lv_obj_clear_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
+                    // The cue that a lower-key tap was taken: a bookmark under the timer with the number of
+                    // taps beside it, for about three seconds after each tap. It is drawn here, with the
+                    // rest of this screen, because the key task must not wait for the e-paper's refresh.
+                    // The bookmark stays the same; only the number changes, so it never reads as a switch.
+                    const uint32_t taken = recording_moments.load();
+                    if (taken > 0 && esp_timer_get_time() / 1000 < moment_cue_until_ms.load()) {
+                        char count_text[12];
+                        snprintf(count_text, sizeof(count_text), "%lu", static_cast<unsigned long>(taken));
+                        lv_label_set_text(recording_moment_count, count_text);
+                        lv_obj_clear_flag(recording_moment_icon, LV_OBJ_FLAG_HIDDEN);
+                        lv_obj_clear_flag(recording_moment_count, LV_OBJ_FLAG_HIDDEN);
+                    } else {
+                        lv_obj_add_flag(recording_moment_icon, LV_OBJ_FLAG_HIDDEN);
+                        lv_obj_add_flag(recording_moment_count, LV_OBJ_FLAG_HIDDEN);
+                    }
                 }
                 Lvgl_unlock();
             }
@@ -658,6 +687,7 @@ void show_pairing_code() {
     lv_label_set_text(pairing_code_label, code);
     lv_obj_clear_flag(pairing_code_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(recording_moment_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
@@ -910,6 +940,7 @@ void record_audio_task(void *argument) {
 
     recording_audio_ms = 0;
     recording_paused = false;
+    recording_moments = 0;
     show_device_screen(DeviceScreen::Recording);
 
     char note_path[48];
@@ -1712,6 +1743,7 @@ void start_audio_sync(bool forced, uint32_t only_recording = 0) {
 }
 
 void start_playback();
+void lower_key_released(uint32_t held_ms);
 #ifdef CIRCUIT_DEV_CONSOLE
 std::atomic<bool> dev_key_down{false};  // the development console "presses" the key through this
 
@@ -1720,8 +1752,6 @@ constexpr gpio_num_t kLowerKeyPin = GPIO_NUM_18;
 constexpr gpio_num_t kPowerLatchPin = GPIO_NUM_17;
 std::atomic<uint32_t> lower_key_presses{0};
 std::atomic<uint32_t> lower_key_longest_ms{0};
-std::atomic<bool> lower_key_down{false};
-std::atomic<bool> dev_lower_down{false};  // the development console "presses" the lower key through this
 // Development console (built only with -DCIRCUIT_DEV_CONSOLE=1, see tools/board_dev.py). Reads one-line
 // commands from the USB port: "copy N", "copy-sync N", "sync", "status". It exists to test sync without
 // recording by hand: "copy" makes N new unsynced notes from the newest synced single-part notes.
@@ -1905,13 +1935,34 @@ void dev_console_task(void *) {
             vTaskDelay(pdMS_TO_TICKS(300));
             esp_restart();
         } else if (strncmp(line, "lower-tap", 9) == 0) {
-            // "lower-tap" or "lower-tap hold <seconds>": press the real lower key logic
+            // "lower-tap" (a short press) or "lower-tap hold <seconds>": a finished press of that length
             float seconds = 0.12f;
             if (strncmp(line + 9, " hold", 5) == 0 && sscanf(line + 14, "%f", &seconds) != 1) seconds = 1.2f;
-            dev_lower_down = true;
-            vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(seconds * 1000)));
-            dev_lower_down = false;
+            lower_key_released(static_cast<uint32_t>(seconds * 1000));
             ESP_LOGW(kTag, "DEV lower key pressed for %.2f s", seconds);
+            // What the cue shows 1.3 s after the press (the screen redraws about every 0.7 s), read on the
+            // board so the test does not depend on how quickly the computer asks.
+            vTaskDelay(pdMS_TO_TICKS(1300));
+            char number[12] = "";
+            bool hidden = true;
+            if (Lvgl_lock(1000)) {
+                snprintf(number, sizeof(number), "%s", lv_label_get_text(recording_moment_count));
+                hidden = lv_obj_has_flag(recording_moment_icon, LV_OBJ_FLAG_HIDDEN);
+                Lvgl_unlock();
+            }
+            ESP_LOGW(kTag, "DEV cue-after-tap: screen=%d icon_hidden=%d number='%s' count=%u", static_cast<int>(active_screen),
+                hidden ? 1 : 0, number, static_cast<unsigned>(recording_moments.load()));
+        } else if (strcmp(line, "cue") == 0) {
+            // What the recording screen's Moment cue shows right now: the bookmark and the number beside it
+            char number[12] = "";
+            bool hidden = true;
+            if (Lvgl_lock(1000)) {
+                snprintf(number, sizeof(number), "%s", lv_label_get_text(recording_moment_count));
+                hidden = lv_obj_has_flag(recording_moment_icon, LV_OBJ_FLAG_HIDDEN);
+                Lvgl_unlock();
+            }
+            ESP_LOGW(kTag, "DEV cue: screen=%d icon_hidden=%d number='%s' count=%u", static_cast<int>(active_screen),
+                hidden ? 1 : 0, number, static_cast<unsigned>(recording_moments.load()));
         } else if (strcmp(line, "moments-selftest") == 0) {
             ESP_LOGW(kTag, "DEV moments-selftest: %s", circuit_moments::selftest() ? "PASS" : "FAIL");
         } else if (strncmp(line, "moments ", 8) == 0) {
@@ -1929,7 +1980,7 @@ void dev_console_task(void *) {
             ESP_LOGW(kTag, "DEV lower: GPIO18 level=%d (0 = pressed), GPIO17 level=%d, presses=%u, longest=%u ms, held now=%d",
                 gpio_get_level(kLowerKeyPin), gpio_get_level(kPowerLatchPin),
                 static_cast<unsigned>(lower_key_presses.load()), static_cast<unsigned>(lower_key_longest_ms.load()),
-                lower_key_down.load() ? 1 : 0);
+                0);
         } else if (strcmp(line, "status") == 0) {
             circuit_sync::log_heap("dev status");
             if (Lvgl_lock(1000)) {
@@ -2015,46 +2066,50 @@ void record_button_task(void *) {
 
 // The lower key. Only a short press during a recording means anything so far: it adds a Moment.
 // (It is read as an ordinary input; this board does not cut the power when it is held on USB.)
+//
+// A key interrupt timestamps the press and the release, because a polling task cannot be trusted
+// here: while the e-paper refreshes (about every 0.7 s during a recording) low-priority tasks stand
+// still for hundreds of milliseconds, so a quick tap could be missed, or look like a long press.
+// The interrupt only measures; the task below acts on each finished press.
+QueueHandle_t lower_key_events = nullptr;   // each finished press, as its length in ms
+volatile int64_t lower_down_us = 0;         // when the key went down (0 = up); written by the interrupt
+volatile int64_t lower_last_edge_us = 0;
+
+void IRAM_ATTR lower_key_isr(void *) {
+    const int64_t now = esp_timer_get_time();
+    if (now - lower_last_edge_us < 15000) return;  // contact bounce
+    lower_last_edge_us = now;
+    if (gpio_get_level(kLowerKeyPin) == 0) {
+        lower_down_us = now;
+    } else if (lower_down_us != 0) {  // a key held while booting has no recorded press: ignored
+        const uint32_t held_ms = static_cast<uint32_t>((now - lower_down_us) / 1000);
+        lower_down_us = 0;
+        BaseType_t woken = pdFALSE;
+        xQueueSendFromISR(lower_key_events, &held_ms, &woken);
+        if (woken) portYIELD_FROM_ISR();
+    }
+}
+
+// What a finished press of the lower key means. The development console calls it with a length of
+// its own, so the same rules run for a test as for a finger.
+void lower_key_released(uint32_t held_ms) {
+#ifdef CIRCUIT_DEV_CONSOLE
+    lower_key_presses++;
+    if (held_ms > lower_key_longest_ms.load()) lower_key_longest_ms = held_ms;
+    ESP_LOGW(kTag, "DEV lower key pressed for %u ms", static_cast<unsigned>(held_ms));
+#endif
+    if (held_ms <= kLowerTapMaxMs && recording_active && !recording_paused) {
+        moment_requests++;
+        const uint32_t taken = recording_moments.fetch_add(1) + 1;
+        moment_cue_until_ms = esp_timer_get_time() / 1000 + kMomentCueMs;
+        ESP_LOGI(kTag, "Lower key tap: Moment requested (%u so far)", static_cast<unsigned>(taken));
+    }
+}
+
 void lower_key_task(void *) {
-    // Wait for the key to be up first, so a press that was held while booting is not a tap.
-    bool was_pressed = gpio_get_level(kLowerKeyPin) == 0;
-    TickType_t pressed_at = 0;
+    uint32_t held_ms = 0;
     while (true) {
-        bool is_pressed = gpio_get_level(kLowerKeyPin) == 0;
-#ifdef CIRCUIT_DEV_CONSOLE
-        if (dev_lower_down.load()) is_pressed = true;
-#endif
-        if (is_pressed && !was_pressed) {
-            vTaskDelay(kButtonDebounceDelay);
-            bool still = gpio_get_level(kLowerKeyPin) == 0;
-#ifdef CIRCUIT_DEV_CONSOLE
-            if (dev_lower_down.load()) still = true;
-#endif
-            if (still) {
-                pressed_at = xTaskGetTickCount();
-#ifdef CIRCUIT_DEV_CONSOLE
-                lower_key_down = true;
-                ESP_LOGW(kTag, "DEV lower key DOWN");
-#endif
-            } else {
-                was_pressed = false;
-                continue;
-            }
-        } else if (!is_pressed && was_pressed) {
-            const TickType_t held = xTaskGetTickCount() - pressed_at;
-#ifdef CIRCUIT_DEV_CONSOLE
-            lower_key_down = false;
-            lower_key_presses++;
-            if (held * portTICK_PERIOD_MS > lower_key_longest_ms.load()) lower_key_longest_ms = held * portTICK_PERIOD_MS;
-            ESP_LOGW(kTag, "DEV lower key UP after %u ms", static_cast<unsigned>(held * portTICK_PERIOD_MS));
-#endif
-            if (held <= kLowerTapMaxTime && recording_active && !recording_paused) {
-                moment_requests++;
-                ESP_LOGI(kTag, "Lower key tap: Moment requested");
-            }
-        }
-        was_pressed = is_pressed;
-        vTaskDelay(kButtonPollInterval);
+        if (xQueueReceive(lower_key_events, &held_ms, portMAX_DELAY) == pdTRUE) lower_key_released(held_ms);
     }
 }
 
@@ -2070,8 +2125,13 @@ void init_record_button() {
     xTaskCreate(record_button_task, "record_button", 3072, nullptr, 3, nullptr);
     gpio_config_t lower_config = config;
     lower_config.pin_bit_mask = 1ULL << kLowerKeyPin;
+    lower_config.intr_type = GPIO_INTR_ANYEDGE;
     ESP_ERROR_CHECK(gpio_config(&lower_config));
-    xTaskCreate(lower_key_task, "lower_key", 3072, nullptr, 2, nullptr);
+    lower_key_events = xQueueCreate(8, sizeof(uint32_t));
+    xTaskCreate(lower_key_task, "lower_key", 3072, nullptr, 3, nullptr);
+    const esp_err_t isr_service = gpio_install_isr_service(0);  // another part may have installed it already
+    if (isr_service != ESP_OK && isr_service != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(isr_service);
+    ESP_ERROR_CHECK(gpio_isr_handler_add(kLowerKeyPin, lower_key_isr, nullptr));
 }
 
 void start_playback() {
@@ -2721,6 +2781,15 @@ void init_display() {
         recording_timer_label = make_label(&lv_font_montserrat_24, 84, LV_TEXT_ALIGN_LEFT);
         lv_obj_set_style_text_letter_space(recording_timer_label, 1, 0);
         lv_obj_align(recording_timer_label, LV_ALIGN_TOP_LEFT, 116, 124);
+
+        recording_moment_icon = lv_img_create(lv_screen_active());
+        lv_img_set_src(recording_moment_icon, &circuit_moment_filled);
+        lv_obj_align(recording_moment_icon, LV_ALIGN_TOP_LEFT, 116, 156);
+        lv_obj_add_flag(recording_moment_icon, LV_OBJ_FLAG_HIDDEN);
+
+        recording_moment_count = make_label(&lv_font_montserrat_14, 40, LV_TEXT_ALIGN_LEFT);
+        lv_obj_align(recording_moment_count, LV_ALIGN_TOP_LEFT, 142, 159);
+        lv_obj_add_flag(recording_moment_count, LV_OBJ_FLAG_HIDDEN);
 
         sync_progress_label = make_label(&lv_font_montserrat_24, 84, LV_TEXT_ALIGN_LEFT);
         lv_obj_set_style_text_letter_space(sync_progress_label, 1, 0);
