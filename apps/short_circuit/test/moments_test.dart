@@ -131,6 +131,61 @@ void main() {
       expect(momentsFileFor(path)?.path, '${dir.path}/circuit-moments-10.cmom');
     });
   });
+  group('moments and the AI', () {
+    test('the transcription is told when each bookmark was pressed', () {
+      final text = Moments.transcriptionInstruction([9216, 83000]);
+      expect(text, contains('0:09, 1:23'));
+      expect(text, contains('[[MOMENT]]'));
+      expect(Moments.transcriptionInstruction(const []), isEmpty);
+    });
+
+    test('markers are numbered in order, and carry on from a given number', () {
+      expect(
+        Moments.numberMarkers(
+          'First point. [[MOMENT]] Then more [[MOMENT]]talk.',
+        ),
+        'First point. [Moment 1] Then more [Moment 2] talk.',
+      );
+      expect(
+        Moments.numberMarkers('Only [[MOMENT]] one', first: 3),
+        'Only [Moment 3] one',
+      );
+      expect(Moments.numberMarkers('No markers here.'), 'No markers here.');
+    });
+
+    test(
+      'the review is only told about markers that are in the transcript',
+      () {
+        expect(Moments.hasMarkers('Buy milk [Moment 1] and eggs'), isTrue);
+        expect(Moments.hasMarkers('Buy milk and eggs'), isFalse);
+        expect(Moments.reviewInstruction, contains('[Moment 1]'));
+      },
+    );
+  });
+
+  group('moments of one part', () {
+    late Directory dir;
+    setUp(() => dir = Directory.systemTemp.createTempSync('moments_part_test'));
+    tearDown(() => dir.deleteSync(recursive: true));
+
+    test('forPart gives the offsets inside that part only', () async {
+      await NoteKeys.save(_keyId, _master);
+      final path = '${dir.path}/circuit-note-1000-10.cnote';
+      File(path).writeAsBytesSync(await _sealAudio(10, Uint8List(32000)));
+      File('${dir.path}/circuit-moments-10.cmom')
+          .writeAsBytesSync(await _sealMoments(10, [250, 900]));
+      expect(await Moments.forPart(path), [250, 900]);
+    });
+
+    test('forPart is empty without a file or without the key', () async {
+      final path = '${dir.path}/circuit-note-1000-10.cnote';
+      File(path).writeAsBytesSync(await _sealAudio(10, Uint8List(32000)));
+      expect(await Moments.forPart(path), isEmpty);
+      File('${dir.path}/circuit-moments-10.cmom')
+          .writeAsBytesSync(await _sealMoments(10, [250]));
+      expect(await Moments.forPart(path), isEmpty); // the key was never saved
+    });
+  });
 }
 
 // ---- sealing helpers: a Dart copy of the board's format, for building test files ----
