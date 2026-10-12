@@ -75,6 +75,29 @@ extension _TestControl on _CircuitHomePageState {
         case 'rec-stop':
           await _phoneRecorder.invokeMethod<void>('stop');
           await _testLog('rec-stop requested');
+        case 'moments':
+          // moments <board number>: the note's Moments, in ms from the start of the whole note
+          final board = int.tryParse(first ?? '');
+          final note = _notes.where((n) => _boardIdOf(n) == board).firstOrNull;
+          final files = note?.audioFiles ?? const <String>[];
+          await _testLog(
+            'moments $board ${jsonEncode(await Moments.forNote(files))}',
+          );
+        case 'play-moment':
+          // play-moment <board number> <ms>: play from a Moment, then say where playback is
+          final board = int.tryParse(first ?? '');
+          final at = int.tryParse(parts.skip(1).firstOrNull ?? '') ?? 0;
+          final note = _notes.where((n) => _boardIdOf(n) == board).firstOrNull;
+          if (note == null) {
+            await _testLog('play-moment: no note with board number $board');
+            return;
+          }
+          unawaited(_playNoteFrom(note.id, at));
+          await Future<void>.delayed(const Duration(milliseconds: 2500));
+          final now = _nowPlaying.value;
+          await _testLog(
+            'play-moment $board at $at: part ${now?.part}/${now?.parts} position ${now?.positionMs} ms',
+          );
         case 'delete':
           // delete <note id> ...: the app's own ids, as `state` lists them
           var removed = 0;

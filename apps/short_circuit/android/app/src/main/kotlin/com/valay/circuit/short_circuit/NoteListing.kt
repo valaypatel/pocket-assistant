@@ -6,6 +6,7 @@ data class ListedNote(val id: Long, val bytes: Long, val epoch: Long, val group:
 object NoteListing {
     /** Next to a downloaded part of a longer recording: "<first part's id>,<part>,<1 if last>". */
     const val groupPrefix = "circuit-group-"
+    const val momentsPrefix = "circuit-moments-"
 
     /**
      * Circuit's list of notes waiting: "id,bytes,recorded" per line, and for a part of a longer

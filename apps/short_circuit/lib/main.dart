@@ -25,6 +25,7 @@ part 'sync_state.dart';
 part 'circuit_playback.dart';
 part 'groups.dart';
 part 'long_notes.dart';
+part 'moments.dart';
 part 'music.dart';
 part 'note_dates.dart';
 part 'note_source.dart';
@@ -2587,6 +2588,28 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     );
   }
 
+  /// Plays a note from [noteMs] after its start (a Moment), across its one-minute parts.
+  Future<void> _playNoteFrom(String noteId, int noteMs) async {
+    final note = _notes.where((item) => item.id == noteId).firstOrNull;
+    final parts = note?.audioFiles ?? const <String>[];
+    if (note == null || parts.isEmpty) {
+      _setStatus('This note has not finished syncing yet.');
+      return;
+    }
+    _playbackToken++;
+    _sequencePlaying = false;
+    final spot = await Moments.locate(parts, noteMs);
+    final title = (note.title?.trim().isNotEmpty ?? false)
+        ? note.title!
+        : 'Voice note';
+    await _playNoteParts(
+      parts,
+      title,
+      firstPart: spot.part,
+      startMs: spot.offsetMs,
+    );
+  }
+
   /// Circuit's number for a note: stored when it was recorded, or read from the
   /// downloaded file's name (circuit-note-<epoch>-<number>.wav).
   int? _boardIdOf(CircuitNote? note) {
@@ -2709,6 +2732,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       try {
         await File(path).delete();
         await _boardPartFile(path)?.delete();
+        await momentsFileFor(path)?.delete();
       } catch (_) {
         // The file may already have been removed.
       }

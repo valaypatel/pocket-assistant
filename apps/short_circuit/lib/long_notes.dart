@@ -215,13 +215,18 @@ extension _LongNotes on _CircuitHomePageState {
   }
 
   /// Plays a long note's parts back to back.
-  Future<void> _playNoteParts(List<String> parts, String title) async {
+  Future<void> _playNoteParts(
+    List<String> parts,
+    String title, {
+    int firstPart = 0,
+    int startMs = 0,
+  }) async {
     final token = ++_playbackToken;
     _sequencePlaying = true; // the player bar stays up between the parts
     _setStatus('Playing this voice note on your phone.');
     try {
       await playPartsInOrder(
-        parts: parts,
+        parts: parts.sublist(firstPart),
         isCurrent: () => token == _playbackToken && mounted,
         play: (part) async {
           final started = await _relayChannel.invokeMethod<bool>(
@@ -234,6 +239,12 @@ extension _LongNotes on _CircuitHomePageState {
               part: parts.indexOf(part) + 1,
               parts: parts.length,
             );
+            // Playing from a Moment: only the first part starts part-way in.
+            if (startMs > 0 && parts.indexOf(part) == firstPart) {
+              await _relayChannel.invokeMethod<void>('seekPlayback', {
+                'positionMs': startMs,
+              });
+            }
           }
           return started == true;
         },

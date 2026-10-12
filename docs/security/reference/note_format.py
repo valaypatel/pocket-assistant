@@ -64,6 +64,33 @@ def decrypt(master, blob: bytes):
     return pcm, dict(key_id=key_id, note_id=note_id, rate=rate, channels=channels, bits=bits, chunk=chunk)
 
 
+MOMENTS_FLAG = 0x80000000  # the Moments file's header note id is the part's note id OR this
+MOMENTS_MAX = 120
+
+
+def encrypt_moments(master, key_id, note_id, offsets_ms) -> bytes:
+    """The sealed Moments file of one part: offsets in ms from the start of that part."""
+    if not 0 < len(offsets_ms) <= MOMENTS_MAX:
+        raise ValueError("1 to %d moments" % MOMENTS_MAX)
+    payload = struct.pack("<I", len(offsets_ms)) + b"".join(struct.pack("<I", ms) for ms in offsets_ms)
+    return encrypt(master, key_id, note_id | MOMENTS_FLAG, payload, rate=0, channels=0, bits=0)
+
+
+def decrypt_moments(master, note_id, blob: bytes):
+    """Returns the offsets. Raises ValueError if the file is not this note's, or was changed."""
+    if len(blob) < HEADER_LEN:
+        raise ValueError("not a CNT1 file")
+    if struct.unpack_from("<I", blob, 12)[0] != (note_id | MOMENTS_FLAG):
+        raise ValueError("moments file of another note")
+    payload, fields = decrypt(master, blob)
+    if (fields["rate"], fields["channels"], fields["bits"]) != (0, 0, 0) or len(payload) < 4:
+        raise ValueError("not a moments file")
+    (count,) = struct.unpack_from("<I", payload)
+    if not 0 < count <= MOMENTS_MAX or len(payload) != 4 + 4 * count:
+        raise ValueError("bad moments payload")
+    return list(struct.unpack_from("<%dI" % count, payload, 4))
+
+
 def wav_from_pcm(pcm: bytes, rate=16000, channels=1, bits=16) -> bytes:
     block = channels * bits // 8
     return (
@@ -82,7 +109,14 @@ def vectors():
     ):
         blob = encrypt(master, 0x01020304, 7, pcm, chunk=64)
         cases.append({"name": name, "plaintextHex": pcm.hex(), "fileHex": blob.hex()})
-    return {"format": "CNT1", "masterKeyHex": master.hex(), "keyId": 0x01020304, "noteId": 7, "chunkSize": 64, "cases": cases}
+    offsets = [512, 9216, 23296, 59999]
+    moments = {
+        "noteId": 7,
+        "offsetsMs": offsets,
+        "fileHex": encrypt_moments(master, 0x01020304, 7, offsets).hex(),
+    }
+    return {"format": "CNT1", "masterKeyHex": master.hex(), "keyId": 0x01020304, "noteId": 7, "chunkSize": 64, "cases": cases,
+            "moments": moments}
 
 
 if __name__ == "__main__":

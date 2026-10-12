@@ -627,6 +627,9 @@ class CircuitRelayService : Service() {
                 if (from > 0) setRequestProperty("Range", "bytes=$from-")
                 if (method == "POST") { doOutput = true; setFixedLengthStreamingMode(0) }
             }
+        // A board from before Moments closes the connection on /moments (and counts a bad attempt), so
+        // after the first failure the rest of this sync does not ask again.
+        var momentsSupported = true
         try {
             val listing = open("/notes").run {
                 if (responseCode != 200) throw IOException("Circuit refused the sync (HTTP $responseCode)")
@@ -730,6 +733,23 @@ class CircuitRelayService : Service() {
                 // One minute of a longer recording: remember which one and which part, so the app can
                 // join the parts. Written before the app is told the file is here.
                 if (group != null) File(filesDir, "${NoteListing.groupPrefix}$id.txt").writeText(group)
+                // The Moments (bookmarks) of this part, if it has any: a small sealed file kept beside the
+                // note. Best effort: its absence or a failed fetch never holds back the note itself.
+                if (momentsSupported) {
+                    try {
+                        val moments = open("/moments/$id").run {
+                            if (responseCode != 200) ByteArray(0) else inputStream.use { it.readBytes() }
+                        }
+                        val momentsFile = File(filesDir, "${NoteListing.momentsPrefix}$id.cmom")
+                        if (moments.isNotEmpty() && moments.size <= 1024) {
+                            momentsFile.writeBytes(moments)
+                            Log.i("CircuitSync", "Saved ${moments.size} B of moments for note $id")
+                        }
+                    } catch (error: IOException) {
+                        momentsSupported = false
+                        Log.w("CircuitSync", "Moments not fetched for note $id", error)
+                    }
+                }
                 doneBytes += bytes
                 Log.i("CircuitSync", "Saved note $id as ${target.name} ($bytes B)")  // the extension says whether it is encrypted
                 val ack = open("/ack/$id", "POST")
@@ -772,7 +792,7 @@ class CircuitRelayService : Service() {
     private fun clearAudioFiles(): Boolean {
         latestSyncedFile = null
         filesDir.listFiles()
-            ?.filter { isNoteFile(it) || it.name.startsWith(NoteListing.groupPrefix) }
+            ?.filter { isNoteFile(it) || it.name.startsWith(NoteListing.groupPrefix) || it.name.startsWith(NoteListing.momentsPrefix) }
             ?.forEach { it.delete() }
         return writeCommand("@audio-clear")
     }

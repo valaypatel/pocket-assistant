@@ -321,6 +321,7 @@ class TranscriptPage extends StatefulWidget {
     this.onSyncNote,
     required this.audioPath,
     required this.onPlayNote,
+    this.onPlayMoment,
     this.playerBar,
     required this.onDeleteNote,
     this.onDeletePhoneOnly,
@@ -352,6 +353,10 @@ class TranscriptPage extends StatefulWidget {
   final Future<void> Function(String noteId)? onSyncNote;
   final String? audioPath;
   final Future<void> Function(String? path) onPlayNote;
+
+  /// Plays the note from a Moment: the note's id and the time from the start of the whole note.
+  /// The Moments list is not shown when this is null.
+  final Future<void> Function(String noteId, int noteMs)? onPlayMoment;
 
   /// The player bar (pause, stop, position) shown at the bottom while a note plays, built by
   /// the app so it is the same bar as on Home and Notes. It appears only while something plays.
@@ -400,6 +405,9 @@ class _TranscriptPageState extends State<TranscriptPage> {
   bool _forcing = false;
   bool _extractingReminder = false;
   Timer? _ticker;
+
+  /// Bookmarks added on Circuit during the recording, in ms from the start of the note.
+  List<int> _moments = const [];
 
   CircuitNote? get _live => widget.noteById?.call(widget.noteId);
 
@@ -455,6 +463,25 @@ class _TranscriptPageState extends State<TranscriptPage> {
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
     });
+    unawaited(_loadMoments());
+  }
+
+  @override
+  void didUpdateWidget(TranscriptPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.audioPath != widget.audioPath) unawaited(_loadMoments());
+  }
+
+  Future<void> _loadMoments() async {
+    final files = _live?.audioFiles ?? [?widget.audioPath];
+    if (files.isEmpty) return;
+    final found = await Moments.forNote(files);
+    final same =
+        found.length == _moments.length &&
+        Iterable<int>.generate(found.length)
+            .every((i) => found[i] == _moments[i]);
+    if (!mounted || same) return;
+    setState(() => _moments = found);
   }
 
   void _snack(String message) {
@@ -882,6 +909,21 @@ class _TranscriptPageState extends State<TranscriptPage> {
                 ),
                 onTap: _extractingReminder ? null : _createReminder,
               ),
+            ],
+            if (_moments.isNotEmpty && widget.onPlayMoment != null) ...[
+              const SizedBox(height: 22),
+              const ScGroupLabel('Moments'),
+              for (var i = 0; i < _moments.length; i++)
+                ScRow(
+                  title: nowPlayingClock(_moments[i]),
+                  caption: 'Moment ${i + 1} · play from here',
+                  trailing: const Icon(
+                    LucideIcons.play,
+                    size: 20,
+                    color: Color(0xff6d5e51),
+                  ),
+                  onTap: () => widget.onPlayMoment!(widget.noteId, _moments[i]),
+                ),
             ],
             const SizedBox(height: 22),
             ScActionBar(
