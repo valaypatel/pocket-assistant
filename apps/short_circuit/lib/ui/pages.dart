@@ -338,10 +338,38 @@ extension _ScPages on _CircuitHomePageState {
     };
   }
 
+  /// "0:49" for a note whose audio is on the phone, once its length has been worked out.
+  String? _noteLength(CircuitNote note) {
+    final files = note.audioFiles;
+    if (files.isEmpty) return null;
+    final key = '${note.id}:${files.length}';
+    final known = _noteLengthMs[key];
+    if (known == null) {
+      if (_noteLengthLoading.add(key)) {
+        unawaited(() async {
+          var total = 0;
+          for (final path in files) {
+            try {
+              total += await Moments.partDurationMs(path);
+            } catch (_) {
+              // a file that cannot be read adds nothing
+            }
+          }
+          _noteLengthLoading.remove(key);
+          if (mounted) _update(() => _noteLengthMs[key] = total);
+        }());
+      }
+      return null;
+    }
+    return known < 1000 ? null : nowPlayingClock(known);
+  }
+
   String _noteSubtitle(CircuitNote note) {
     final local = note.createdAt.toLocal();
+    final length = _noteLength(note);
     final when =
         '${_dayLabel(note.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}'
+        '${length == null ? '' : ' · $length'}'
         ' · ${note.source}';
     if (note.id == _syncingNoteId) return '$when · Syncing';
     final song = note.song;

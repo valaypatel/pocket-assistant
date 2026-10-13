@@ -76,9 +76,19 @@ class Moments {
     final handle = await file.open();
     final Uint8List head;
     try {
-      head = await handle.read(NoteCrypto.headerBytes);
+      head = await handle.read(
+        44,
+      ); // a plain WAV's header is 44 bytes, a note's 28
     } finally {
       await handle.close();
+    }
+    if (head.length >= 44 &&
+        String.fromCharCodes(head.sublist(0, 4)) == 'RIFF') {
+      // A plain WAV from older firmware: its length from the byte rate in the header
+      final byteRate = NoteCrypto._u32(head, 28);
+      return byteRate == 0 || length <= 44
+          ? 0
+          : (length - 44) * 1000 ~/ byteRate;
     }
     if (!NoteCrypto.isEncrypted(head) || head.length < NoteCrypto.headerBytes) {
       return 0;
