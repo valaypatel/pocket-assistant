@@ -1206,6 +1206,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   bool _showOnboarding = false; // first run: the welcome screens
   bool _circuitDetailsOpen = false;
   bool _dockCollapsed = false;
+
+  /// Moments that arrived over Bluetooth ahead of their note's audio, by Circuit's note number.
+  final Map<int, (List<int>, DateTime)> _bleMoments = {};
   bool _searchOpen = false;
   bool _developerOpen =
       false; // the Developer rows in Settings are folded away until asked for
@@ -2105,6 +2108,16 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _applySyncStatus(status);
       return;
     }
+    final chunk = Moments.parseBleChunk(status);
+    if (chunk != null) {
+      // Sent after a note's audio on the Bluetooth fallback; used when that note is attached.
+      final kept = _bleMoments[chunk.$1];
+      _bleMoments[chunk.$1] = (
+        {...?kept?.$1, ...chunk.$2}.toList()..sort(),
+        DateTime.now(),
+      );
+      return;
+    }
     if (!mounted) return;
     if (_applyCircuitPlaybackStatus(status)) return;
     if (status == _lastAudioStatus) return;
@@ -2594,7 +2607,22 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         // A counter must never become an error report: the file may already be gone.
       }
     }());
+    await _applyBleMoments(noteId);
     await _transcribeAfterSync(noteId, path);
+  }
+
+  /// Gives a note its Moments if they came with its audio over Bluetooth. Only when the note carries
+  /// Circuit's number, so nothing is ever handed to the wrong note; a set is used once and then dropped.
+  Future<void> _applyBleMoments(String noteId) async {
+    _bleMoments.removeWhere(
+      (_, held) =>
+          DateTime.now().difference(held.$2) > const Duration(minutes: 3),
+    );
+    final note = _notes.where((n) => n.id == noteId).firstOrNull;
+    final boardId = note?.boardId;
+    final held = boardId == null ? null : _bleMoments.remove(boardId);
+    if (held == null || (note?.ownMoments.isNotEmpty ?? false)) return;
+    await _updateNote(noteId, (n) => n.copyWith(ownMoments: held.$1));
   }
 
   /// Picks up notes the phone downloaded in the background while the app UI was

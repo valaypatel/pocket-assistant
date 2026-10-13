@@ -143,6 +143,8 @@ def main():
         return send(f"copy {n}", "DEV copy done", 60)
     if cmd == "sync":
         return send("sync", ("SYNCSTAT", "no new notes", "Nothing to sync", "0 file(s)"), 600)
+    if cmd == "sync-ble":
+        return send("sync-ble", ("DEV sync-ble requested", "Sync complete", "Sync failed"), 600)
     if cmd == "copy-sync":
         return send(f"copy-sync {n}", ("SYNCSTAT", "0 file(s)"), 600)
     if cmd == "status":

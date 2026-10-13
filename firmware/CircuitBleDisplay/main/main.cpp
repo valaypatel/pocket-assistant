@@ -1314,6 +1314,25 @@ void toggle_pause_recording() {
     report_audio_status(recording_paused ? "Recording paused" : "Recording resumed");
 }
 
+// The Bluetooth fallback has no sidecar download like the Wi-Fi sync, so the Moments of the part just sent
+// follow it as text: "Moments\n<note number>\n<ms,ms,...>", sixteen to a message. The offsets are ms from
+// the start of this part. The link is encrypted (the notes key itself crosses it) and the phone keeps them
+// with the note; the board never sends its sealed file.
+void send_moments_over_ble(uint32_t note_id) {
+    if (!note_key_ready) return;
+    uint32_t offsets[circuit_moments::kMaxPerPart];
+    const size_t count = circuit_moments::load(note_id, note_key, offsets, circuit_moments::kMaxPerPart);
+    for (size_t i = 0; i < count;) {
+        char text[kMaxTextBytes + 1];
+        int used = snprintf(text, sizeof(text), "Moments\n%lu\n", static_cast<unsigned long>(note_id));
+        for (size_t k = 0; k < 16 && i < count && used < static_cast<int>(sizeof(text)) - 24; ++k, ++i) {
+            used += snprintf(text + used, sizeof(text) - used, "%s%lu", k == 0 ? "" : ",", static_cast<unsigned long>(offsets[i]));
+        }
+        report_audio_status(text);
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+}
+
 // Slow BLE fallback, used only for a force sync with no Wi-Fi sync available.
 // Sends the oldest unsynced note and marks it synced once every packet has been
 // acknowledged by the phone's BLE stack.
@@ -1397,6 +1416,7 @@ void audio_sync_task(void *) {
             Lvgl_unlock();
         }
         return_to_idle_after(DeviceScreen::Syncing, 3000);
+        send_moments_over_ble(oldest[0].id);
         circuit_notes::mark_synced(oldest[0].id);
         update_storage_status("Sync complete\nReady on phone");
         report_audio_status("Sync complete: ready on phone");
@@ -1692,6 +1712,10 @@ void sync_supervisor_task(void *) {
     }
 }
 
+#ifdef CIRCUIT_DEV_CONSOLE
+std::atomic<bool> dev_force_ble{false};  // "sync-ble": skip the Wi-Fi offer so the Bluetooth path is the one tested
+#endif
+
 // `forced` is the device button: it falls back to BLE when Wi-Fi sync is not
 // possible. The app can only ask for Wi-Fi sync.
 // `only_recording` (the app's "sync this note") limits the sync to that recording; 0 syncs everything.
@@ -1720,7 +1744,12 @@ void start_audio_sync(bool forced, uint32_t only_recording = 0) {
         report_audio_status("Sync already in progress");
         return;
     }
-    if (offer_wifi_sync(only_recording)) {
+#ifdef CIRCUIT_DEV_CONSOLE
+    const bool wifi_offered = !dev_force_ble.load() && offer_wifi_sync(only_recording);
+#else
+    const bool wifi_offered = offer_wifi_sync(only_recording);
+#endif
+    if (wifi_offered) {
         if (forced) {  // show progress right away; the phone connects within a second or two
             show_device_screen(DeviceScreen::Syncing);
             if (Lvgl_lock(-1)) {
@@ -1864,6 +1893,17 @@ void dev_sync_task(void *) {
     vTaskDelete(nullptr);
 }
 
+// "sync-ble": the Bluetooth fallback (what the key does with no Wi-Fi sync), forced, so it can be tested
+// without touching the Wi-Fi settings.
+void dev_sync_ble_task(void *) {
+    for (int i = 0; i < 240 && !(ble_encrypted && connection_id != UINT16_MAX); ++i) vTaskDelay(pdMS_TO_TICKS(500));
+    dev_force_ble = true;
+    start_audio_sync(true);
+    dev_force_ble = false;
+    ESP_LOGW(kTag, "DEV sync-ble requested");
+    vTaskDelete(nullptr);
+}
+
 void dev_console_task(void *) {
     usb_serial_jtag_driver_config_t config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     config.rx_buffer_size = 256;
@@ -1897,6 +1937,8 @@ void dev_console_task(void *) {
             xTaskCreate(dev_sync_task, "dev_sync", 6144, nullptr, 4, nullptr);
         } else if (strcmp(line, "sync") == 0) {
             xTaskCreate(dev_sync_task, "dev_sync", 6144, nullptr, 4, nullptr);
+        } else if (strcmp(line, "sync-ble") == 0) {
+            xTaskCreate(dev_sync_ble_task, "dev_sync_ble", 6144, nullptr, 4, nullptr);
         } else if (strncmp(line, "rec", 3) == 0 && strncmp(line, "rec-", 4) != 0) {
             // "rec [seconds]": record without the key (default: until stopped)
             unsigned long seconds = kMaxRecordingSeconds;
