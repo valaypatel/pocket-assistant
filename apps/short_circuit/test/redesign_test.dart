@@ -138,7 +138,7 @@ void main() {
     );
     await tester.pump(const Duration(seconds: 1));
     expect(tester.takeException(), isNull);
-    await tester.tap(find.text('Capture a thought'));
+    await tester.longPress(find.byTooltip(RegExp('^Record a voice note')));
     await tester.pumpAndSettle();
     expect(find.text('This phone'), findsOneWidget);
     expect(tester.takeException(), isNull);

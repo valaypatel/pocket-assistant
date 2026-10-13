@@ -856,7 +856,7 @@ extension _ScPages on _CircuitHomePageState {
           subtitle: query.isNotEmpty
               ? 'Try another word or a tag.'
               : _notes.isEmpty
-              ? 'Tap “Capture a thought”, or press the button on Circuit.'
+              ? 'Tap Record, or press the button on Circuit.'
               : 'Choose All to see every note.',
         )
       else
@@ -989,17 +989,7 @@ extension _ScPages on _CircuitHomePageState {
     final open = _tasks.where((t) => !t.done).toList();
     final done = _tasks.where((t) => t.done).toList();
     return [
-      Row(
-        children: [
-          const Expanded(child: ScTitle('Tasks')),
-          ScIconButton(
-            icon: LucideIcons.plus,
-            tooltip: 'Add task',
-            tone: ScTone.primary,
-            onPressed: _promptAddTask,
-          ),
-        ],
-      ),
+      Row(children: [const Expanded(child: ScTitle('Tasks'))]),
       const SizedBox(height: 8),
       Text(
         'Turn a thought into a next step.',
@@ -1011,7 +1001,7 @@ extension _ScPages on _CircuitHomePageState {
         Padding(
           padding: EdgeInsets.symmetric(vertical: 10),
           child: Text(
-            'Nothing to do right now. Add a task with the + button, or approve a suggested action on a note.',
+            'Nothing to do right now. Add a task with the button below, or approve a suggested action on a note.',
             style: ScType.caption.copyWith(color: context.sc.muted),
           ),
         ),
@@ -1896,25 +1886,68 @@ extension _ScPages on _CircuitHomePageState {
 
   // ---- shell ---------------------------------------------------------------
 
-  Widget _captureEntry() => ValueListenableBuilder<Map<String, dynamic>?>(
-    valueListenable: _phoneRecording,
-    builder: (context, recording, _) {
-      final active = recording != null;
-      final elapsed = (recording?['elapsedMs'] as num?)?.toInt() ?? 0;
-      return FilledButton.icon(
-        style: FilledButton.styleFrom(
-          backgroundColor: active ? context.sc.ink : context.sc.accent,
-          foregroundColor: active ? context.sc.bg : context.sc.ink,
-          minimumSize: const Size.fromHeight(52),
-        ),
-        onPressed: active ? _startPhoneRecording : _showCaptureOptions,
-        icon: Icon(active ? LucideIcons.audioLines : LucideIcons.mic, size: 20),
-        label: Text(
-          active
-              ? '${recording["state"] == "paused" ? "Paused" : "Recording"} ${phoneRecordingClock(elapsed)} · Open controls'
-              : 'Capture a thought',
-        ),
-      );
+  /// The capture dock: Record (or Add task) at rest, a full-width recording bar while recording.
+  Widget _dock(int tab) => ListenableBuilder(
+    listenable: Listenable.merge([_phoneRecording, _nowPlaying]),
+    builder: (context, _) {
+      final phone = _phoneRecording.value;
+      if (phone != null) {
+        final state = phone['state'];
+        final controllable = state == 'recording' || state == 'paused';
+        return CaptureDock(
+          mode: DockMode.recording,
+          title: 'Recording on this phone',
+          paused: state == 'paused',
+          elapsed: () => Duration(
+            milliseconds: ((_phoneRecording.value?['elapsedMs'] as num?) ?? 0)
+                .toInt(),
+          ),
+          level: () =>
+              ((_phoneRecording.value?['level'] as num?) ?? 0).toDouble(),
+          onTogglePause: controllable
+              ? () => _phoneRecorder.invokeMethod<void>(
+                  state == 'paused' ? 'resume' : 'pause',
+                )
+              : null,
+          onStop: () => _phoneRecorder.invokeMethod<void>('stop'),
+          onOpen: _openPhoneRecorder,
+        );
+      }
+      if (_recordingAudio) {
+        return CaptureDock(
+          mode: DockMode.recording,
+          title: _songClipArmed
+              ? 'Listening for a song'
+              : 'Recording on Circuit',
+          elapsed: () => _recordingSnapshot().elapsed,
+          onStop: _stopRecording,
+          onOpen: _openRecordingSheet,
+        );
+      }
+      final typing = MediaQuery.viewInsetsOf(context).bottom > 0;
+      if (tab > 1 || typing || _selecting || _page == _AppPage.group) {
+        return const CaptureDock(mode: DockMode.hidden);
+      }
+      final playing =
+          _nowPlaying.value != null ||
+          _circuitPlayback != CircuitPlaybackPhase.idle;
+      return tab == 1
+          ? CaptureDock(
+              mode: DockMode.pill,
+              collapsed: _dockCollapsed || playing,
+              pillLabel: 'Add task',
+              pillIcon: LucideIcons.plus,
+              onPill: _promptAddTask,
+            )
+          : CaptureDock(
+              mode: DockMode.pill,
+              collapsed: _dockCollapsed || playing,
+              pillLabel: 'Record',
+              pillTooltip:
+                  'Record a voice note. Hold for more ways to capture.',
+              onPill: _startPhoneRecording,
+              onLongPress: _showCaptureOptions,
+            );
     },
   );
 
@@ -1931,10 +1964,21 @@ extension _ScPages on _CircuitHomePageState {
   Widget _buildShell() {
     _publishSyncUi();
     _publishStatusUi();
+    final tab = switch (_page) {
+      _AppPage.notes || _AppPage.group => 0,
+      _AppPage.tasks => 1,
+      _AppPage.circuit || _AppPage.wifi || _AppPage.hiddenWifi => 2,
+      _AppPage.settings => 3,
+    };
+    // Room under the list so the floating dock never hides the last row.
+    final dockSpace =
+        (tab <= 1 || _recordingAudio || _phoneRecording.value != null)
+        ? 96.0
+        : 28.0;
     final list = ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-      padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
+      padding: EdgeInsets.fromLTRB(24, 18, 24, dockSpace),
       children: switch (_page) {
         _AppPage.notes => _notesPage(),
         _AppPage.tasks => _tasksPage(),
@@ -1960,13 +2004,21 @@ extension _ScPages on _CircuitHomePageState {
       ),
     );
     // Recording, sync and playback show on every screen from one overlay (status_overlay.dart).
-    final body = content;
-    final tab = switch (_page) {
-      _AppPage.notes || _AppPage.group => 0,
-      _AppPage.tasks => 1,
-      _AppPage.circuit || _AppPage.wifi || _AppPage.hiddenWifi => 2,
-      _AppPage.settings => 3,
-    };
+    final body = NotificationListener<UserScrollNotification>(
+      onNotification: (note) {
+        if (note.depth != 0) return false;
+        final collapse = note.direction == ScrollDirection.reverse
+            ? true
+            : note.direction == ScrollDirection.forward ||
+                  note.metrics.pixels <= 0
+            ? false
+            : _dockCollapsed;
+        if (collapse != _dockCollapsed)
+          _update(() => _dockCollapsed = collapse);
+        return false;
+      },
+      child: content,
+    );
     if (_showOnboarding) {
       return OnboardingPage(
         onFinish: _finishOnboarding,
@@ -1980,17 +2032,27 @@ extension _ScPages on _CircuitHomePageState {
         if (!didPop) _goBack();
       },
       child: Scaffold(
-        body: SafeArea(bottom: false, child: body),
+        body: Stack(
+          children: [
+            Positioned.fill(child: SafeArea(bottom: false, child: body)),
+            Positioned(
+              left: 20,
+              right: 20,
+              bottom: 12,
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 640),
+                  child: _dock(tab),
+                ),
+              ),
+            ),
+          ],
+        ),
         bottomNavigationBar: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Playback gets its own row here, above Capture a thought, so nothing is covered.
+            // Playback gets its own row here, above the Record button, so nothing is covered.
             ?_inlineSnack(),
-            if (tab <= 1 && !_recordingAudio)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
-                child: _captureEntry(),
-              ),
             ScNavBar(index: tab, onSelect: _selectTab),
           ],
         ),

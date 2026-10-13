@@ -362,6 +362,12 @@ extension _PhoneRecording on _CircuitHomePageState {
       );
       return;
     }
+    // A recording cannot wait and playback can: playback gives way.
+    if (_nowPlaying.value != null) await _stopNowPlaying();
+    if (_circuitPlayback == CircuitPlaybackPhase.playing &&
+        _circuitPlaybackSupportsStop) {
+      unawaited(_stopCircuitPlayback());
+    }
     try {
       final preferences = await SharedPreferences.getInstance();
       final ids = await PhoneRecordingIds.key(preferences);
@@ -381,7 +387,6 @@ extension _PhoneRecording on _CircuitHomePageState {
         'noteId': number,
       });
       Telemetry.event('phone_record_started');
-      _openPhoneRecorder();
       // The service reports back within a moment; if it never does, do not stay stuck.
       unawaited(
         Future<void>.delayed(const Duration(seconds: 5), () {

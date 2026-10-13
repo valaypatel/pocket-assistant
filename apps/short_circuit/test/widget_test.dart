@@ -73,7 +73,7 @@ void main() {
       expect(find.text(label), findsWidgets);
     }
 
-    await tester.tap(find.text('Capture a thought'));
+    await tester.longPress(find.byTooltip(RegExp('^Record a voice note')));
     await tester.pumpAndSettle();
     expect(find.text('Where’s the thought?'), findsOneWidget);
     expect(find.text('This phone'), findsOneWidget);

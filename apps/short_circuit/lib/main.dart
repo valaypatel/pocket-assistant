@@ -8,6 +8,8 @@ import 'package:cryptography/cryptography.dart';
 import 'package:cryptography_flutter/cryptography_flutter.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/semantics.dart' show SemanticsService;
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -33,6 +35,7 @@ part 'now_playing.dart';
 part 'phone_recording.dart';
 part 'secure_notes.dart';
 part 'ui/backup_page.dart';
+part 'ui/capture_dock.dart';
 part 'ui/chat_page.dart';
 part 'ui/detail_pages.dart';
 part 'ui/onboarding.dart';
@@ -1126,6 +1129,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   final Set<String> _identifyingSongs = {};
   bool _showOnboarding = false; // first run: the welcome screens
   bool _circuitDetailsOpen = false;
+  bool _dockCollapsed = false;
   bool _searchOpen = false;
   bool _developerOpen =
       false; // the Developer rows in Settings are folded away until asked for
@@ -2612,6 +2616,10 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   Future<void> _playSyncedNote(String? path) async {
     if (path == null || path.isEmpty) {
       _setStatus('This note has not finished syncing yet.');
+      return;
+    }
+    if (_phoneRecordingActive || _recordingAudio) {
+      _toast('Stop recording first');
       return;
     }
     _playbackToken++; // a new request replaces any part-by-part playback in progress

@@ -9,7 +9,7 @@ final ValueNotifier<Widget?> statusPill = ValueNotifier(null);
 final ValueNotifier<Widget?> statusSnack = ValueNotifier(null);
 
 /// False while a page (a note's own page, say) is open over Home. On the main pages the playback
-/// bar is part of the page's bottom area (above Capture a thought), so nothing is covered; on a
+/// bar is part of the page's bottom area (above the capture dock), so nothing is covered; on a
 /// pushed page, which has no such area, the overlay floats it just above the bottom edge.
 final ValueNotifier<bool> statusOnTabPage = ValueNotifier(true);
 
@@ -44,6 +44,13 @@ final statusRouteObserver = StatusRouteObserver();
 
 /// True while a sheet that sits where the pill is (the full recording view) is open.
 final ValueNotifier<bool> statusPillHidden = ValueNotifier(false);
+
+/// On the tab pages a recording is shown by the capture dock above the navigation bar, so the pill under
+/// the status bar steps aside for it. A pushed page has no dock, so the pill still shows there.
+bool _dockShowsIt(Widget? pill) =>
+    statusOnTabPage.value &&
+    pill?.key is ValueKey<String> &&
+    ((pill!.key! as ValueKey<String>).value.startsWith('recording-'));
 
 class StatusOverlay extends StatefulWidget {
   const StatusOverlay({super.key, required this.child});
@@ -82,7 +89,11 @@ class _StatusOverlayState extends State<StatusOverlay> {
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 640),
               child: ListenableBuilder(
-                listenable: Listenable.merge([statusPill, statusPillHidden]),
+                listenable: Listenable.merge([
+                  statusPill,
+                  statusPillHidden,
+                  statusOnTabPage,
+                ]),
                 builder: (context, _) => AnimatedSwitcher(
                   duration: still
                       ? Duration.zero
@@ -97,7 +108,8 @@ class _StatusOverlayState extends State<StatusOverlay> {
                       child: child,
                     ),
                   ),
-                  child: statusPillHidden.value
+                  child:
+                      statusPillHidden.value || _dockShowsIt(statusPill.value)
                       ? const SizedBox.shrink(key: ValueKey('hidden'))
                       : (statusPill.value ??
                             const SizedBox.shrink(key: ValueKey('none'))),
