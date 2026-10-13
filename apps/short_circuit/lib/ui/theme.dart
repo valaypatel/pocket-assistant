@@ -410,7 +410,7 @@ class ScIconButton extends StatelessWidget {
     final (bg, fg) = switch (tone) {
       ScTone.primary => (context.sc.accent, context.sc.ink),
       ScTone.danger => (context.sc.dangerSoft, context.sc.danger),
-      ScTone.dark => (context.sc.dark, Colors.white),
+      ScTone.dark => (context.sc.ink, context.sc.bg),
       ScTone.neutral => (context.sc.neutralButton, context.sc.neutralInk),
     };
     final targetSize = size < 48 ? 48.0 : size;
@@ -515,8 +515,13 @@ List<Widget> scDialogActions(
     message: confirmTooltip,
     child: FilledButton.icon(
       style: FilledButton.styleFrom(
-        backgroundColor: danger ? context.sc.danger : context.sc.dark,
-        foregroundColor: Colors.white,
+        backgroundColor: danger ? context.sc.danger : context.sc.ink,
+        foregroundColor: danger
+            ? (ThemeData.estimateBrightnessForColor(context.sc.danger) ==
+                      Brightness.dark
+                  ? Colors.white
+                  : context.sc.bg)
+            : context.sc.bg,
         minimumSize: const Size(48, 48),
       ),
       onPressed: onConfirm,

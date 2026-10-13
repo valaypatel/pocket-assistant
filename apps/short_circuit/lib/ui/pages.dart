@@ -1855,8 +1855,8 @@ extension _ScPages on _CircuitHomePageState {
       final elapsed = (recording?['elapsedMs'] as num?)?.toInt() ?? 0;
       return FilledButton.icon(
         style: FilledButton.styleFrom(
-          backgroundColor: active ? context.sc.dark : context.sc.accent,
-          foregroundColor: active ? Colors.white : context.sc.ink,
+          backgroundColor: active ? context.sc.ink : context.sc.accent,
+          foregroundColor: active ? context.sc.bg : context.sc.ink,
           minimumSize: const Size.fromHeight(52),
         ),
         onPressed: active ? _startPhoneRecording : _showCaptureOptions,
