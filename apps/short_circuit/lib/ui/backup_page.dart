@@ -43,6 +43,7 @@ class _BackupPageState extends State<BackupPage> {
   final _confirm = TextEditingController();
   final _restorePassphrase = TextEditingController();
   bool _includeAudio = true;
+  bool _includeKeys = false;
   bool _busy = false;
   bool _restoreMode = false;
   String? _feedback;
@@ -72,7 +73,10 @@ class _BackupPageState extends State<BackupPage> {
     }
     setState(() => _busy = true);
     try {
-      final data = await BackupStore.collect(includeAudio: _includeAudio);
+      final data = await BackupStore.collect(
+        includeAudio: _includeAudio,
+        includeKeys: _includeKeys,
+      );
       final audioBytes = data.audio.fold<int>(0, (sum, a) => sum + a.length);
       if (audioBytes > BackupCodec.maxAudioBytes) {
         return _snack(
@@ -92,7 +96,9 @@ class _BackupPageState extends State<BackupPage> {
         _confirm.clear();
         _snack(
           'Backed up ${data.notes.length} notes'
-          '${data.audio.isEmpty ? '' : ' and ${data.audio.length} recordings'}.',
+          '${data.audio.isEmpty ? '' : ' and ${data.audio.length} recordings'}'
+          '${data.settings.isEmpty ? '' : ', your settings'}'
+          '${data.secrets.isEmpty ? '' : ' and ${data.secrets.length} API ${data.secrets.length == 1 ? 'key' : 'keys'}'}.',
         );
       }
     } catch (error) {
@@ -120,7 +126,9 @@ class _BackupPageState extends State<BackupPage> {
       _restorePassphrase.clear();
       _snack(
         'Restored ${result.notesAdded} notes'
-        '${result.notesSkipped > 0 ? ', ${result.notesSkipped} were already here' : ''}.',
+        '${result.notesSkipped > 0 ? ', ${result.notesSkipped} were already here' : ''}'
+        '${result.settingsAdded > 0 ? ', ${result.settingsAdded} settings' : ''}'
+        '${result.secretsAdded > 0 ? ', ${result.secretsAdded} API ${result.secretsAdded == 1 ? 'key' : 'keys'}' : ''}.',
       );
     } on BackupException catch (error) {
       _snack(error.message);
@@ -197,6 +205,16 @@ class _BackupPageState extends State<BackupPage> {
                 onChanged: _busy
                     ? null
                     : (v) => setState(() => _includeAudio = v),
+              ),
+            ),
+            ScRow(
+              title: 'Include API keys',
+              caption: 'Gemini, AI service and music keys. Sealed in the file, so as safe as your passphrase',
+              trailing: Switch(
+                value: _includeKeys,
+                onChanged: _busy
+                    ? null
+                    : (v) => setState(() => _includeKeys = v),
               ),
             ),
             const SizedBox(height: 16),

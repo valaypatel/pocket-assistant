@@ -411,6 +411,8 @@ void main() {
     );
 
     testWidgets('refuses a short passphrase and saves nothing', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(800, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       var saved = false;
       await tester.pumpWidget(
         page(
@@ -436,6 +438,8 @@ void main() {
     });
 
     testWidgets('refuses passphrases that differ', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(800, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(page(save: (_, _) async => true));
       await tester.enterText(
         find.widgetWithText(TextField, 'Passphrase').first,
@@ -458,6 +462,8 @@ void main() {
     testWidgets('creates a file that opens with the passphrase', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(800, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.runAsync(() async {
         await _store('circuit_notes', [_note('n1')]);
       });
@@ -499,6 +505,8 @@ void main() {
     testWidgets('a wrong passphrase on restore says so and restores nothing', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(800, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final file = await tester.runAsync(
         () => BackupCodec.encode(
           BackupData(notes: [_note('n1')]),
@@ -571,5 +579,71 @@ void main() {
       final data = await BackupStore.collect();
       expect(data.audio.map((a) => a.name), ['circuit-note-5-9.cnote']);
     });
+  });
+
+  group('settings and keys', () {
+    Future<void> setUpPhone() async {
+      SharedPreferences.setMockInitialValues({
+        'theme_mode': 'dark',
+        'auto_transcribe': false,
+        'use_moments': true,
+      });
+      const store = FlutterSecureStorage();
+      await store.write(key: 'gemini_model', value: 'gemini-test');
+      await store.write(key: 'gemini_api_key', value: 'SECRET-KEY');
+      await store.write(key: 'hermes_api_key', value: 'OTHER-SECRET');
+    }
+
+    test('settings go in, API keys only when asked', () async {
+      await setUpPhone();
+      final plain = await BackupStore.collect();
+      expect(plain.settings['theme_mode'], 'dark');
+      expect(plain.settings['auto_transcribe'], false);
+      expect(plain.settings['gemini_model'], 'gemini-test');
+      expect(plain.secrets, isEmpty);
+      expect(jsonEncode(plain.settings), isNot(contains('SECRET')));
+
+      final withKeys = await BackupStore.collect(includeKeys: true);
+      expect(withKeys.secrets['gemini_api_key'], 'SECRET-KEY');
+      expect(withKeys.secrets['hermes_api_key'], 'OTHER-SECRET');
+    });
+
+    test('they survive the encrypted file', () async {
+      await setUpPhone();
+      final data = await BackupStore.collect(includeKeys: true);
+      final bytes = await BackupCodec.encode(data, _pass, iterations: 1000);
+      final back = await BackupCodec.decode(bytes, _pass);
+      expect(back.settings['theme_mode'], 'dark');
+      expect(back.secrets['gemini_api_key'], 'SECRET-KEY');
+      // The file never holds a key in the clear.
+      expect(
+        utf8.decode(bytes, allowMalformed: true),
+        isNot(contains('SECRET-KEY')),
+      );
+    });
+
+    test(
+      'a new phone gets them back, and nothing it already has is replaced',
+      () async {
+        await setUpPhone();
+        final data = await BackupStore.collect(includeKeys: true);
+
+        // A different phone: its own appearance, no keys.
+        SharedPreferences.setMockInitialValues({'theme_mode': 'light'});
+        FlutterSecureStorage.setMockInitialValues({
+          'hermes_api_key': 'ITS-OWN-KEY',
+        });
+        final result = await BackupStore.restore(data, filesDir: dir);
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getString('theme_mode'), 'light'); // kept
+        expect(prefs.getBool('auto_transcribe'), false); // added
+        const store = FlutterSecureStorage();
+        expect(await store.read(key: 'gemini_api_key'), 'SECRET-KEY'); // added
+        expect(await store.read(key: 'hermes_api_key'), 'ITS-OWN-KEY'); // kept
+        expect(await store.read(key: 'gemini_model'), 'gemini-test');
+        expect(result.settingsAdded, greaterThan(0));
+        expect(result.secretsAdded, 1);
+      },
+    );
   });
 }

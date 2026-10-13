@@ -54,6 +54,8 @@ class BackupData {
     this.chats = const {},
     this.noteKeys = const {},
     this.audio = const [],
+    this.settings = const {},
+    this.secrets = const {},
   });
 
   /// Notes as stored, with `audioPath` replaced by the recording's file name.
@@ -69,7 +71,37 @@ class BackupData {
   /// Note keys by key id (8 hex digits), base64.
   final Map<String, String> noteKeys;
   final List<BackupAudio> audio;
+
+  /// The app's own settings (appearance, the AI switches, model and service names): nothing secret.
+  final Map<String, dynamic> settings;
+
+  /// API keys, only when the person chose to include them. Sealed in the backup with everything else.
+  final Map<String, String> secrets;
 }
+
+/// Settings kept in the phone's preferences that a backup carries (all non-secret).
+const _backupPrefKeys = [
+  'theme_mode',
+  'auto_transcribe',
+  'auto_enrich',
+  'use_moments',
+  'share_diagnostics',
+];
+
+/// Settings kept in secure storage that are only names and addresses.
+const _backupSecureSettingKeys = [
+  'gemini_model',
+  'hermes_base_url',
+  'hermes_model',
+  'music_function_url',
+];
+
+/// API keys: carried only when asked for.
+const _backupSecretKeys = [
+  'gemini_api_key',
+  'hermes_api_key',
+  'music_service_key',
+];
 
 class BackupCodec {
   const BackupCodec._();
@@ -119,6 +151,8 @@ class BackupCodec {
       if (data.groups != null) 'groups': data.groups,
       'chats': data.chats,
       'noteKeys': data.noteKeys,
+      if (data.settings.isNotEmpty) 'settings': data.settings,
+      if (data.secrets.isNotEmpty) 'secrets': data.secrets,
       'audio': [
         for (final a in data.audio) {'name': a.name, 'length': a.length},
       ],
@@ -189,6 +223,10 @@ class BackupCodec {
       chats: strings(manifest['chats']),
       noteKeys: strings(manifest['noteKeys']),
       audio: audio,
+      settings: Map<String, dynamic>.from(
+        manifest['settings'] as Map<String, dynamic>? ?? const {},
+      ),
+      secrets: strings(manifest['secrets']),
     );
   }
 
@@ -321,6 +359,8 @@ class RestoreResult {
     this.groupsAdded = 0,
     this.chatsAdded = 0,
     this.keysAdded = 0,
+    this.settingsAdded = 0,
+    this.secretsAdded = 0,
   });
 
   final int notesAdded;
@@ -329,6 +369,8 @@ class RestoreResult {
   final int groupsAdded;
   final int chatsAdded;
   final int keysAdded;
+  final int settingsAdded;
+  final int secretsAdded;
 }
 
 class BackupStore {
@@ -349,7 +391,10 @@ class BackupStore {
 
   /// Gathers everything a backup holds. Recordings are copied as stored (still
   /// sealed with their note key), never decrypted.
-  static Future<BackupData> collect({bool includeAudio = true}) async {
+  static Future<BackupData> collect({
+    bool includeAudio = true,
+    bool includeKeys = false,
+  }) async {
     final preferences = await SharedPreferences.getInstance();
     final notes = <Map<String, dynamic>>[];
     final audio = <BackupAudio>[];
@@ -414,6 +459,21 @@ class BackupStore {
         }
       }
     }
+    final settings = <String, dynamic>{
+      for (final key in _backupPrefKeys)
+        if (preferences.get(key) != null) key: preferences.get(key),
+    };
+    for (final key in _backupSecureSettingKeys) {
+      final value = await _secureStorage.read(key: key);
+      if (value != null && value.isNotEmpty) settings[key] = value;
+    }
+    final secrets = <String, String>{};
+    if (includeKeys) {
+      for (final key in _backupSecretKeys) {
+        final value = await _secureStorage.read(key: key);
+        if (value != null && value.isNotEmpty) secrets[key] = value;
+      }
+    }
     return BackupData(
       notes: notes,
       tasks: await _readSecret(preferences, _tasksKey),
@@ -421,6 +481,8 @@ class BackupStore {
       chats: chats,
       noteKeys: keys,
       audio: audio,
+      settings: settings,
+      secrets: secrets,
     );
   }
 
@@ -558,6 +620,36 @@ class BackupStore {
       await _writeSecret(preferences, _tasksKey, jsonEncode(tasks));
     }
 
+    // Settings and keys: only what this phone has not set itself, like everything else in a restore.
+    var settingsAdded = 0;
+    for (final e in data.settings.entries) {
+      if (_backupPrefKeys.contains(e.key)) {
+        if (preferences.containsKey(e.key)) continue;
+        final value = e.value;
+        if (value is bool) {
+          await preferences.setBool(e.key, value);
+        } else if (value is String) {
+          await preferences.setString(e.key, value);
+        } else {
+          continue;
+        }
+        settingsAdded++;
+      } else if (_backupSecureSettingKeys.contains(e.key) &&
+          e.value is String) {
+        if ((await _secureStorage.read(key: e.key)) != null) continue;
+        await _secureStorage.write(key: e.key, value: e.value as String);
+        settingsAdded++;
+      }
+    }
+    var secretsAdded = 0;
+    for (final e in data.secrets.entries) {
+      if (!_backupSecretKeys.contains(e.key)) continue;
+      final existing = await _secureStorage.read(key: e.key);
+      if (existing != null && existing.isNotEmpty) continue;
+      await _secureStorage.write(key: e.key, value: e.value);
+      secretsAdded++;
+    }
+
     // Last, so a note never shows up before the things it points at.
     if (added.isNotEmpty) {
       await _writeSecret(
@@ -573,6 +665,8 @@ class BackupStore {
       groupsAdded: groupsAdded,
       chatsAdded: chatsAdded,
       keysAdded: keysAdded,
+      settingsAdded: settingsAdded,
+      secretsAdded: secretsAdded,
     );
   }
 }

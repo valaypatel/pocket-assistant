@@ -3358,6 +3358,10 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     await _loadNotes();
     await _loadGroups();
     await _loadPreferences();
+    // Keys that came back with the backup switch the AI services on without a restart.
+    await _loadGeminiState();
+    await _loadAiState();
+    await _loadMusicState();
   }
 
   Future<void> _loadPreferences() async {
