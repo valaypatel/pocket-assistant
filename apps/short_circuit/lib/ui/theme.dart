@@ -550,7 +550,11 @@ class ScTile extends StatelessWidget {
     super.key,
     required this.icon,
     required this.title,
-    required this.subtitle,
+    this.subtitle = '',
+    this.meta = const [],
+    this.status,
+    this.statusIcon,
+    this.statusColor,
     this.trailing,
     this.onTap,
     this.footer,
@@ -559,7 +563,17 @@ class ScTile extends StatelessWidget {
   });
   final IconData icon;
   final String title;
+
+  /// One line of detail, for tiles that are not notes. A note passes [meta] and [status] instead.
   final String subtitle;
+
+  /// Short facts shown under the title, joined with " · " (when it was made, how long, where from).
+  final List<String> meta;
+
+  /// Where the item stands ("Transcription ready", "Sync failed"), on its own line under [meta].
+  final String? status;
+  final IconData? statusIcon;
+  final Color? statusColor;
 
   /// A small marker for the corner of the icon, such as where a note was recorded.
   final Widget? badge;
@@ -569,71 +583,107 @@ class ScTile extends StatelessWidget {
   final Color? subtitleColor;
 
   @override
-  Widget build(BuildContext context) => Material(
-    color: Sc.bg,
-    shape: const Border(bottom: BorderSide(color: Sc.line)),
-    child: InkWell(
-      borderRadius: BorderRadius.circular(18),
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 2),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: Sc.surface,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Icon(icon, size: 19, color: Sc.accentInk),
-                    ),
-                    if (badge != null)
-                      Positioned(right: -6, bottom: -6, child: badge!),
-                  ],
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+  Widget build(BuildContext context) {
+    final p = context.sc;
+    final detail = meta.isNotEmpty ? meta.join(' · ') : subtitle;
+    final detailColor = subtitleColor ?? p.muted;
+    return Material(
+      color: p.bg,
+      shape: Border(bottom: BorderSide(color: p.line)),
+      child: InkWell(
+        borderRadius: ScRadius.cardBorder,
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: ScSpace.lg),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Stack(
+                    clipBehavior: Clip.none,
                     children: [
-                      Text(
-                        title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: -.2,
+                      Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: p.surface,
+                          borderRadius: ScRadius.inputBorder,
                         ),
+                        child: Icon(icon, size: 22, color: p.accentInk),
                       ),
-                      const SizedBox(height: 3),
-                      Text(
-                        subtitle,
-                        style: TextStyle(
-                          color: subtitleColor ?? Sc.muted,
-                          fontSize: 12,
-                          height: 1.45,
-                        ),
-                      ),
+                      if (badge != null)
+                        Positioned(right: -6, bottom: -6, child: badge!),
                     ],
                   ),
-                ),
-                if (trailing != null) ...[const SizedBox(width: 8), trailing!],
+                  const SizedBox(width: ScSpace.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: ScType.body.copyWith(
+                            fontWeight: FontWeight.w600,
+                            height: 22 / 16,
+                          ),
+                        ),
+                        if (detail.isNotEmpty) ...[
+                          const SizedBox(height: ScSpace.xs / 2),
+                          Text(
+                            detail,
+                            style: ScType.caption.copyWith(
+                              color: detailColor,
+                              height: 1.4,
+                            ),
+                          ),
+                        ],
+                        if (status != null && status!.isNotEmpty) ...[
+                          const SizedBox(height: ScSpace.xs),
+                          Row(
+                            children: [
+                              if (statusIcon != null) ...[
+                                Icon(
+                                  statusIcon,
+                                  size: 14,
+                                  color: statusColor ?? p.muted,
+                                ),
+                                const SizedBox(width: ScSpace.xs),
+                              ],
+                              Flexible(
+                                child: Text(
+                                  status!,
+                                  style: ScType.caption.copyWith(
+                                    color: statusColor ?? p.muted,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  if (trailing != null) ...[
+                    const SizedBox(width: ScSpace.sm),
+                    trailing!,
+                  ],
+                ],
+              ),
+              if (footer != null) ...[
+                const SizedBox(height: ScSpace.sm),
+                footer!,
               ],
-            ),
-            if (footer != null) ...[const SizedBox(height: 8), footer!],
-          ],
+            ],
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// Round dark play button.

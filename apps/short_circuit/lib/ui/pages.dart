@@ -364,38 +364,47 @@ extension _ScPages on _CircuitHomePageState {
     return known < 1000 ? null : nowPlayingClock(known);
   }
 
-  String _noteSubtitle(CircuitNote note) {
+  /// The facts a note card shows under its title: when it was made, how long it is, where it came from.
+  List<String> _noteMeta(CircuitNote note) {
     final local = note.createdAt.toLocal();
     final length = _noteLength(note);
-    final when =
-        '${_dayLabel(note.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}'
-        '${length == null ? '' : ' · $length'}'
-        ' · ${note.source}';
-    if (note.id == _syncingNoteId) return '$when · Syncing';
+    return [
+      '${_dayLabel(note.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}',
+      ?length,
+      note.source,
+    ];
+  }
+
+  /// Where the note stands, in a few words; null when there is nothing to add.
+  String? _noteStatusText(CircuitNote note) {
+    if (note.id == _syncingNoteId) return 'Syncing';
     final song = note.song;
     if (note.isSong && song != null) {
-      if (song.matched) {
-        return song.artist == null ? when : '$when · ${song.artist}';
-      }
-      if (note.audioPath == null) return '$when · Waiting to sync';
+      if (song.matched) return song.artist;
+      if (note.audioPath == null) return 'Waiting to sync';
       return switch (song.state) {
-        'no_match' => '$when · No match found',
-        'failed' => '$when · Identification failed',
-        _ => '$when · Identifying…',
+        'no_match' => 'No match found',
+        'failed' => 'Identification failed',
+        _ => 'Identifying…',
       };
     }
-    if (note.id == _transcribingNoteId) return '$when · Transcribing…';
-    if (note.status.startsWith('No speech detected'))
-      return '$when · No speech found';
-    if (note.status.startsWith('Transcription error'))
-      return '$when · Transcription failed';
+    if (note.id == _transcribingNoteId) return 'Transcribing…';
+    if (note.status.startsWith('No speech detected')) return 'No speech found';
+    if (note.status.startsWith('Transcription error')) {
+      return 'Transcription failed';
+    }
     if (note.status.startsWith('Sync failed') ||
         note.status.startsWith('Sync interrupted')) {
-      return '$when · Sync failed';
+      return 'Sync failed';
     }
-    if (note.status.startsWith('Waiting for Wi-Fi'))
-      return '$when · Waiting for Wi-Fi';
-    return '$when · ${noteStageLabel(note)}';
+    if (note.status.startsWith('Waiting for Wi-Fi')) return 'Waiting for Wi-Fi';
+    return noteStageLabel(note);
+  }
+
+  /// The whole line in one string (kept for places that show a note as plain text).
+  String _noteSubtitle(CircuitNote note) {
+    final status = _noteStatusText(note);
+    return [..._noteMeta(note), ?status].join(' · ');
   }
 
   VoidCallback? _openNote(CircuitNote note) {
@@ -529,9 +538,15 @@ extension _ScPages on _CircuitHomePageState {
           ? (note.song?.title ?? 'Song identification')
           : note.title ??
                 (note.audioPath == null ? 'Voice recording' : 'Voice note'),
-      subtitle: _noteSubtitle(note),
+      meta: _noteMeta(note),
+      status: _noteStatusText(note),
+      statusIcon: attention ? LucideIcons.circleAlert : null,
+      statusColor: attention
+          ? context.sc.danger
+          : (note.id == _syncingNoteId || note.id == _transcribingNoteId)
+          ? context.sc.accentInk
+          : null,
       badge: NoteSourceBadge(source: note.source),
-      subtitleColor: attention ? Sc.danger : null,
       onTap: _openNote(note),
       trailing: ScPlayButton(
         onPressed: note.audioPath == null
@@ -812,11 +827,6 @@ extension _ScPages on _CircuitHomePageState {
             ),
           ],
         ),
-      const SizedBox(height: 8),
-      const Text(
-        'Every thought has a place.',
-        style: TextStyle(color: Sc.muted, fontSize: 15),
-      ),
       const SizedBox(height: 16),
       TextField(
         controller: _noteSearchController,
