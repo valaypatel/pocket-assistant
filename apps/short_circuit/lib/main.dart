@@ -1085,6 +1085,11 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       true; // AI review (title, summary, tags, actions) after a transcript
   bool _useMoments =
       true; // tell the AI where Circuit's Moments (bookmarks) fall
+
+  /// How long each note plays, shown on its card. Worked out from the file sizes, once per note
+  /// and number of parts, and kept here so a card does not read files every time it is drawn.
+  final Map<String, int> _noteLengthMs = {};
+  final Set<String> _noteLengthLoading = {};
   bool _shareDiagnostics = true;
   bool _testMode = false; // lets adb drive the app, see test_control.dart
   bool _geminiConnected = false;

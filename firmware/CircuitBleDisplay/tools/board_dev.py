@@ -169,6 +169,8 @@ def main():
     if cmd == "lower-tap":
         what = " ".join(args[1:]) if len(args) > 1 else ""
         return send(("lower-tap " + what).strip(), "DEV lower key pressed", 15)
+    if cmd == "copy-last":
+        return send("copy-last", "DEV copy-last done", 60)
     if cmd == "cue":
         return send("cue", "DEV cue:", 10)
     if cmd == "moments-selftest":

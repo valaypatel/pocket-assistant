@@ -1755,6 +1755,61 @@ std::atomic<uint32_t> lower_key_longest_ms{0};
 // Development console (built only with -DCIRCUIT_DEV_CONSOLE=1, see tools/board_dev.py). Reads one-line
 // commands from the USB port: "copy N", "copy-sync N", "sync", "status". It exists to test sync without
 // recording by hand: "copy" makes N new unsynced notes from the newest synced single-part notes.
+// "copy-last": a real, playable copy of the newest recording (every part of it) as new, unsynced notes.
+// The note number is part of the encryption, so each part is opened and sealed again under its new
+// number; the Moments and the grouping into parts are carried over. Returns how many parts it copied.
+int dev_copy_last() {
+    const uint32_t newest = circuit_notes::newest_id();
+    if (newest == 0 || !note_key_ready) return 0;
+    const uint32_t first_old = circuit_notes::recording_of(newest);
+    auto *reader = new (std::nothrow) circuit_secure::Reader();
+    auto *writer = new (std::nothrow) circuit_secure::Writer();
+    uint8_t *chunk = static_cast<uint8_t *>(heap_caps_malloc(circuit_secure::kChunkBytes, MALLOC_CAP_SPIRAM));
+    int copied = 0;
+    uint32_t first_new = 0;
+    for (uint32_t old_id = first_old; reader && writer && chunk && old_id <= newest; ++old_id) {
+        circuit_notes::Note note;
+        if (!circuit_notes::describe(old_id, &note) || !note.encrypted) continue;
+        char from[48], to[48];
+        circuit_notes::path_for(old_id, "ENC", from, sizeof(from));
+        const uint32_t new_id = circuit_notes::allocate_id();
+        circuit_notes::path_for(new_id, "ENC", to, sizeof(to));
+        bool ok = reader->open(from) &&
+                  writer->open(to, note_key, new_id, kAudioSampleRate, kAudioChannels, kAudioBitsPerSample);
+        size_t bytes = 0;
+        while (ok) {
+            const size_t n = reader->read(chunk);
+            if (n == 0) break;
+            ok = writer->append(chunk, n);
+            bytes += n;
+        }
+        reader->close();
+        ok = ok && writer->finish() && bytes > 0;
+        if (!ok) {
+            writer->abort();
+            remove(to);
+            ESP_LOGW(kTag, "DEV copy-last: part %lu could not be copied", static_cast<unsigned long>(old_id));
+            break;
+        }
+        if (first_new == 0) first_new = new_id;
+        circuit_notes::Group group;
+        if (circuit_notes::read_group(old_id, &group)) {
+            circuit_notes::write_group(new_id, {first_new, group.part, group.final});
+        }
+        uint32_t offsets[circuit_moments::kMaxPerPart];
+        const size_t count = circuit_moments::load(old_id, note_key, offsets, circuit_moments::kMaxPerPart);
+        if (count > 0) circuit_moments::save(new_id, note_key, offsets, count);
+        ESP_LOGW(kTag, "DEV copy-last: note %lu -> %lu (%u bytes of audio, %u moments)", static_cast<unsigned long>(old_id),
+            static_cast<unsigned long>(new_id), static_cast<unsigned>(bytes), static_cast<unsigned>(count));
+        ++copied;
+    }
+    delete reader;
+    delete writer;
+    if (chunk != nullptr) heap_caps_free(chunk);
+    ESP_LOGW(kTag, "DEV copy-last done: %d part(s) copied, %u waiting", copied, static_cast<unsigned>(circuit_notes::count_unsynced()));
+    return copied;
+}
+
 int dev_copy_notes(int wanted) {
     uint32_t sources[8] = {};
     int found = 0;
@@ -1831,6 +1886,8 @@ void dev_console_task(void *) {
             if (sscanf(line + 9, "%d", &n) != 1) n = 3;
             dev_copy_notes(n);
             xTaskCreate(dev_sync_task, "dev_sync", 6144, nullptr, 4, nullptr);
+        } else if (strcmp(line, "copy-last") == 0) {
+            dev_copy_last();
         } else if (strncmp(line, "copy", 4) == 0) {
             if (sscanf(line + 4, "%d", &n) != 1) n = 3;
             dev_copy_notes(n);
