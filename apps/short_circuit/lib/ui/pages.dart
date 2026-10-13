@@ -1176,6 +1176,11 @@ extension _ScPages on _CircuitHomePageState {
           : 'Needs an AI service above. Add one to review notes automatically',
       trailing: Switch(value: _autoEnrich, onChanged: _setAutoEnrich),
     ),
+    ScRow(
+      title: 'Use Moments',
+      caption: 'Mark the bookmarks you tapped on Circuit in the transcript, and give them extra weight in the review',
+      trailing: Switch(value: _useMoments, onChanged: _setUseMoments),
+    ),
     const SizedBox(height: 24),
     const ScGroupLabel('Backup'),
     ScRow(

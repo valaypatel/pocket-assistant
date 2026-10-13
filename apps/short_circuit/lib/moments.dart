@@ -97,6 +97,21 @@ class Moments {
     return pcm <= 0 ? 0 : pcm * 1000 ~/ bytesPerSecond;
   }
 
+  /// The moments of one part, in ms from the start of that part. None when it has no Moments file,
+  /// or the file cannot be opened (no key, damaged, another note's).
+  static Future<List<int>> forPart(String path) async {
+    final id = boardFileId(path);
+    final file = momentsFileFor(path);
+    if (id == null || file == null || !await file.exists()) return const [];
+    try {
+      final bytes = await file.readAsBytes();
+      final key = await NoteKeys.get(NoteCrypto.keyIdOf(bytes));
+      return key == null ? const [] : await open(bytes, key, id);
+    } on NoteSecurityException {
+      return const [];
+    }
+  }
+
   /// A note's moments in ms from the start of the whole note, oldest first. [parts] are the note's
   /// files in playing order (one file for a short note). A part without a Moments file, or one that
   /// cannot be opened (no key, damaged), simply contributes none.
@@ -104,26 +119,47 @@ class Moments {
     final joined = <int>[];
     var base = 0;
     for (final path in parts) {
-      final id = boardFileId(path);
-      final file = momentsFileFor(path);
-      if (id != null && file != null && await file.exists()) {
-        try {
-          final bytes = await file.readAsBytes();
-          final key = await NoteKeys.get(NoteCrypto.keyIdOf(bytes));
-          if (key != null) {
-            for (final offset in await open(bytes, key, id)) {
-              joined.add(base + offset);
-            }
-          }
-        } on NoteSecurityException {
-          // Not this note's, or damaged: leave its moments out.
-        }
+      for (final offset in await forPart(path)) {
+        joined.add(base + offset);
       }
       base += await partDurationMs(path);
     }
     joined.sort();
     return joined;
   }
+
+  /// What the transcription is told about a part's Moments: when the bookmark button was pressed, so
+  /// the model can put a marker at that point. Empty when there are none.
+  static String transcriptionInstruction(List<int> momentsMs) {
+    if (momentsMs.isEmpty) return '';
+    final times = momentsMs.map(nowPlayingClock).join(', ');
+    return ' The person pressed a bookmark button while recording, at $times (minutes:seconds from '
+        'the start of this audio). Put the marker [[MOMENT]] in the transcript at the point where each of '
+        'those times falls, between the words being said then. Use each marker once, add nothing else '
+        'around it, and never write the times out.';
+  }
+
+  /// Replaces the model's [[MOMENT]] markers with numbered ones, [Moment 1], [Moment 2]..., counting
+  /// from [first] so the numbers run on across the parts of a long note.
+  static String numberMarkers(String text, {int first = 1}) {
+    var next = first;
+    return text
+        .replaceAllMapped(
+          RegExp(r'\s*\[\[MOMENT\]\]\s*'),
+          (_) => ' [Moment ${next++}] ',
+        )
+        .trim();
+  }
+
+  /// Added to the AI review's instructions when the transcript carries Moment markers.
+  static const reviewInstruction =
+      ' The speaker pressed a bookmark button while recording, shown in the transcript as markers like '
+      '[Moment 1]. Treat the sentences just before and after each marker as the most important in the '
+      'note: make sure the summary covers them, and consider them first for actions. Never put a marker '
+      'in the title, tags, summary or action titles.';
+
+  static bool hasMarkers(String transcript) =>
+      RegExp(r'\[Moment \d+\]').hasMatch(transcript);
 
   /// Which part, and where in it, a time from the start of the whole note falls.
   static Future<MomentSpot> locate(List<String> parts, int noteMs) async {

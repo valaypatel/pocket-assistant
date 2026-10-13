@@ -223,6 +223,7 @@ class GeminiClient {
     Uint8List wavBytes, {
     bool detectMusic = true,
     PartContext? part,
+    List<int> momentsMs = const [],
   }) async {
     final key = await apiKey();
     if (key == null || key.trim().isEmpty) {
@@ -248,7 +249,8 @@ class GeminiClient {
                         ' If two or more different people clearly speak, start each change of speaker on a new line labelled "Speaker 1:", "Speaker 2:" and so on, using the same label for the same voice throughout. If only one person speaks, add no label.'
                         ' If the recording sounds like a phone call (a conversation heard through a phone, with telephone-quality audio, ringing, or a call being answered or ended), begin your reply with [[CALL]] followed by the transcription.'
                         ' If it is only silence or background noise, reply with exactly [[NOISE]].'
-                        '${_partInstruction(part)}',
+                        '${_partInstruction(part)}'
+                        '${Moments.transcriptionInstruction(momentsMs)}',
                   },
                   {
                     'inline_data': {
@@ -642,11 +644,16 @@ class AiClient {
     );
   }
 
-  Future<AiEnrichment> enrich(String transcript) async {
+  Future<AiEnrichment> enrich(
+    String transcript, {
+    bool highlightMoments = true,
+  }) async {
     final response = await _completion([
       {
         'role': 'system',
-        'content': 'You analyse private voice-note transcripts. Return JSON only: {"title":"short heading in English","category":"primary category","categories":["primary category","optional secondary categories"],"tags":["short English searchable tags"],"summary":"one short English sentence","englishTranslation":"faithful English translation; if already English, repeat it","language":"language or mixed","actions":[{"type":"task|reminder|calendar_event","title":"action title in English","details":"brief detail in English","scheduledAt":"ISO-8601 local time or null"}]}. Categories may include note, idea, task, reminder, calendar_event, shopping, journal, project, meeting, reference. Translate Hindi/Gujarati faithfully but never alter the original transcript. The transcript may label voices as "Speaker 1:", "Speaker 2:"; keep those labels in englishTranslation, say who said or agreed to what in the summary and action details when it matters, and never use a speaker label as a title or tag. Suggest actions only when clearly supported; never invent dates. Use reminder or calendar_event only when the note states a date or time; otherwise the action type must be task.',
+        'content':
+            'You analyse private voice-note transcripts. Return JSON only: {"title":"short heading in English","category":"primary category","categories":["primary category","optional secondary categories"],"tags":["short English searchable tags"],"summary":"one short English sentence","englishTranslation":"faithful English translation; if already English, repeat it","language":"language or mixed","actions":[{"type":"task|reminder|calendar_event","title":"action title in English","details":"brief detail in English","scheduledAt":"ISO-8601 local time or null"}]}. Categories may include note, idea, task, reminder, calendar_event, shopping, journal, project, meeting, reference. Translate Hindi/Gujarati faithfully but never alter the original transcript. The transcript may label voices as "Speaker 1:", "Speaker 2:"; keep those labels in englishTranslation, say who said or agreed to what in the summary and action details when it matters, and never use a speaker label as a title or tag. Suggest actions only when clearly supported; never invent dates. Use reminder or calendar_event only when the note states a date or time; otherwise the action type must be task.'
+            '${highlightMoments && Moments.hasMarkers(transcript) ? Moments.reviewInstruction : ''}',
       },
       {
         'role': 'user',
@@ -985,6 +992,7 @@ const _tasksKey = 'circuit_tasks';
 const _boardDeletesKey = 'pending_board_deletes';
 const _autoTranscribeKey = 'auto_transcribe';
 const _autoEnrichKey = 'auto_enrich';
+const _useMomentsKey = 'use_moments';
 const _displayNameKey = 'display_name';
 
 class CircuitTask {
@@ -1075,6 +1083,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   bool _autoTranscribe = true;
   bool _autoEnrich =
       true; // AI review (title, summary, tags, actions) after a transcript
+  bool _useMoments =
+      true; // tell the AI where Circuit's Moments (bookmarks) fall
   bool _shareDiagnostics = true;
   bool _testMode = false; // lets adb drive the app, see test_control.dart
   bool _geminiConnected = false;
@@ -1415,7 +1425,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
                   status: _aiConnected
                       ? 'Transcribed. Analysing…'
                       : 'Transcribed. Add an AI service for smart review.',
-                  transcript: transcription.transcript,
+                  // [[MOMENT]] markers from the model become [Moment 1], [Moment 2]... across the whole note
+                  transcript: Moments.numberMarkers(transcription.transcript),
                   title: note.titleEdited ? note.title : transcription.title,
                   category: transcription.category,
                   isCall: transcription.isCall,
@@ -1453,9 +1464,11 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     final timer = Stopwatch()..start();
     try {
       final audio = await readNoteAudio(path);
+      final moments = _useMoments ? await Moments.forPart(path) : const <int>[];
       final transcription = await _gemini.transcribeWav(
         audio,
         detectMusic: !asSpeech,
+        momentsMs: moments,
       );
       Telemetry.event('transcription_done', {
         'ok': true,
@@ -1548,7 +1561,10 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       ),
     );
     try {
-      final enrichment = await _ai.enrich(transcript);
+      final enrichment = await _ai.enrich(
+        transcript,
+        highlightMoments: _useMoments,
+      );
       _enrichAttempts.remove(id);
       await _updateNote(id, (item) {
         // Running the review again must not undo decisions already made: keep
@@ -3197,6 +3213,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _tasks = tasks;
       _autoTranscribe = preferences.getBool(_autoTranscribeKey) ?? true;
       _autoEnrich = preferences.getBool(_autoEnrichKey) ?? true;
+      _useMoments = preferences.getBool(_useMomentsKey) ?? true;
       _shareDiagnostics = preferences.getBool(Telemetry.preferenceKey) ?? true;
       _displayName = preferences.getString(_displayNameKey) ?? _displayName;
     });
@@ -3291,6 +3308,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     setState(() => _autoEnrich = value);
     final preferences = await SharedPreferences.getInstance();
     await preferences.setBool(_autoEnrichKey, value);
+  }
+
+  Future<void> _setUseMoments(bool value) async {
+    setState(() => _useMoments = value);
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setBool(_useMomentsKey, value);
   }
 
   Future<void> _setAutoTranscribe(bool value) async {
