@@ -566,28 +566,26 @@ extension _ScPages on _CircuitHomePageState {
                 open?.call();
               },
       ),
-      ScStateIcon(
-        icon: LucideIcons.sparkles,
-        label: reviewing
-            ? 'AI reviewing'
-            : note.enrichmentStatus == 'ready'
-            ? 'AI reviewed. Tap to review again'
-            : note.enrichmentStatus == 'failed'
-            ? 'Retry AI review'
-            : hasTranscript
-            ? 'Run AI review'
-            : 'AI review needs a transcript first',
-        state: reviewing
-            ? ScStepState.busy
-            : note.enrichmentStatus == 'ready'
-            ? ScStepState.done
-            : note.enrichmentStatus == 'failed'
-            ? ScStepState.failed
-            : hasTranscript
-            ? ScStepState.todo
-            : ScStepState.disabled,
-        onPressed: hasTranscript ? () => _retryEnrichment(note.id) : null,
-      ),
+      // The review reads the transcript, so there is nothing to offer before one exists.
+      if (hasTranscript)
+        ScStateIcon(
+          icon: LucideIcons.sparkles,
+          label: reviewing
+              ? 'AI reviewing'
+              : note.enrichmentStatus == 'ready'
+              ? 'AI reviewed. Tap to review again'
+              : note.enrichmentStatus == 'failed'
+              ? 'Retry AI review'
+              : 'Run AI review',
+          state: reviewing
+              ? ScStepState.busy
+              : note.enrichmentStatus == 'ready'
+              ? ScStepState.done
+              : note.enrichmentStatus == 'failed'
+              ? ScStepState.failed
+              : ScStepState.todo,
+          onPressed: () => _retryEnrichment(note.id),
+        ),
     ];
   }
 
