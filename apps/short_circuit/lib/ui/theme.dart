@@ -14,11 +14,15 @@ class Sc {
   static const accentInk = Color(0xffa93c27);
   static const accentSoft = Color(0xfffff0e8);
   static const tileBg = Color(0xffffe8d7);
-  static const tileInk = Color(0xffd46a36);
+  static const tileInk = Color(
+    0xffa5522a,
+  ); // darkened from d46a36: 3.0:1 became 4.6:1 on tileBg
   static const chip = Color(0xffe8e9e6);
   static const dark = Color(0xff17191d);
   static const green = Color(0xff299b68);
-  static const orange = Color(0xffe58a37);
+  static const orange = Color(
+    0xffd27e32,
+  ); // darkened from e58a37: 2.6:1 became 3.05:1 on bg
   static const danger = Color(0xffb34732);
   static const dangerSoft = Color(0xfffff0eb);
   static const neutralButton = Color(0xffeee9e3);
@@ -28,41 +32,51 @@ class Sc {
   static const circuitMarkInk = Color(0xffe5f5bc);
 }
 
-ThemeData buildScTheme() {
+/// The light theme: every value is the one the app has always used.
+ThemeData buildScTheme() => _buildTheme(ScPalette.light, Brightness.light);
+
+/// The dark theme (defined, not yet switched on in the app: see ShortCircuitApp).
+ThemeData buildScDarkTheme() =>
+    _buildTheme(ScPalette.darkMode, Brightness.dark);
+
+ThemeData _buildTheme(ScPalette p, Brightness brightness) {
+  final dark = brightness == Brightness.dark;
+  // 14 is the radius inputs have always had; the token scale (ScRadius) takes over as screens are redone.
   const radius = BorderRadius.all(Radius.circular(14));
-  const border = OutlineInputBorder(
+  final border = OutlineInputBorder(
     borderRadius: radius,
-    borderSide: BorderSide(color: Color(0xffe4ddd5)),
+    borderSide: BorderSide(color: dark ? p.line : const Color(0xffe4ddd5)),
   );
   return ThemeData(
     useMaterial3: true,
     fontFamily: 'Roboto',
+    extensions: [ScColors(p)],
     colorScheme: ColorScheme.fromSeed(
-      seedColor: Sc.accent,
-      brightness: Brightness.light,
-      primary: Sc.accent,
-      surface: Sc.bg,
+      seedColor: p.accent,
+      brightness: brightness,
+      primary: p.accent,
+      surface: p.bg,
     ),
-    scaffoldBackgroundColor: Sc.bg,
-    textTheme: ThemeData.light().textTheme.apply(
+    scaffoldBackgroundColor: p.bg,
+    textTheme: (dark ? ThemeData.dark() : ThemeData.light()).textTheme.apply(
       fontFamily: 'Roboto',
-      bodyColor: Sc.ink,
-      displayColor: Sc.ink,
+      bodyColor: p.ink,
+      displayColor: p.ink,
     ),
-    inputDecorationTheme: const InputDecorationTheme(
+    inputDecorationTheme: InputDecorationTheme(
       filled: true,
-      fillColor: Colors.white,
+      fillColor: dark ? p.surface : Colors.white,
       border: border,
       enabledBorder: border,
       focusedBorder: OutlineInputBorder(
         borderRadius: radius,
-        borderSide: BorderSide(color: Sc.accent, width: 1.4),
+        borderSide: BorderSide(color: p.accent, width: 1.4),
       ),
-      contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
     ),
     snackBarTheme: SnackBarThemeData(
       behavior: SnackBarBehavior.floating,
-      backgroundColor: Sc.dark,
+      backgroundColor: p.dark,
       contentTextStyle: const TextStyle(
         color: Colors.white,
         fontWeight: FontWeight.w600,
@@ -71,14 +85,14 @@ ThemeData buildScTheme() {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(99)),
     ),
     dialogTheme: DialogThemeData(
-      backgroundColor: Colors.white,
+      backgroundColor: dark ? p.surface : Colors.white,
       surfaceTintColor: Colors.transparent,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
-        backgroundColor: Sc.accent,
-        foregroundColor: Sc.ink,
+        backgroundColor: p.accent,
+        foregroundColor: p.onAccent,
         minimumSize: const Size.fromHeight(48),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         textStyle: const TextStyle(
@@ -92,8 +106,8 @@ ThemeData buildScTheme() {
       thumbColor: WidgetStateProperty.all(Colors.white),
       trackColor: WidgetStateProperty.resolveWith(
         (states) => states.contains(WidgetState.selected)
-            ? Sc.accent
-            : const Color(0xffd4cec7),
+            ? p.accent
+            : (dark ? const Color(0xff4a443d) : const Color(0xffd4cec7)),
       ),
       trackOutlineColor: WidgetStateProperty.all(Colors.transparent),
     ),
