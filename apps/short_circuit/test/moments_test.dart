@@ -92,6 +92,18 @@ void main() {
       return parts;
     }
 
+    test(
+      'the length of a plain WAV from older firmware comes from its header',
+      () async {
+        final wav = Uint8List(44 + 64000);
+        wav.setRange(0, 4, 'RIFF'.codeUnits);
+        ByteData.sublistView(wav).setUint32(28, 32000, Endian.little);
+        final path = '${dir.path}/circuit-note-1000-5.wav';
+        File(path).writeAsBytesSync(wav);
+        expect(await Moments.partDurationMs(path), 2000);
+      },
+    );
+
     test('part length comes from the file size', () async {
       final parts = await twoParts();
       expect(await Moments.partDurationMs(parts.first), 1000);

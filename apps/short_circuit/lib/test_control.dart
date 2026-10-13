@@ -75,6 +75,24 @@ extension _TestControl on _CircuitHomePageState {
         case 'rec-stop':
           await _phoneRecorder.invokeMethod<void>('stop');
           await _testLog('rec-stop requested');
+        case 'transcribe':
+          // transcribe <board number>: transcribe that note now, then say what the transcript looks like
+          final board = int.tryParse(first ?? '');
+          final note = _notes.where((n) => _boardIdOf(n) == board).firstOrNull;
+          if (note == null) {
+            await _testLog('transcribe: no note with board number $board');
+            return;
+          }
+          await _transcribeNote(note.id);
+          final text =
+              _notes.where((n) => n.id == note.id).firstOrNull?.transcript ??
+              '';
+          final devanagari = RegExp(r'[\u0900-\u097F]').allMatches(text).length;
+          final latin = RegExp(r'[A-Za-z]').allMatches(text).length;
+          await _testLog(
+            'transcribe $board: ${text.length} characters, $devanagari Devanagari, $latin Latin; '
+            '${jsonEncode(text.length > 140 ? text.substring(0, 140) : text)}',
+          );
         case 'moments':
           // moments <board number>: the note's Moments, in ms from the start of the whole note
           final board = int.tryParse(first ?? '');
