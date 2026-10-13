@@ -827,6 +827,7 @@ class CircuitNote {
     this.transcriptEdited = false,
     this.reviewStale = false,
     this.reviewModel,
+    this.ownMoments = const [],
   });
 
   final String id;
@@ -885,6 +886,10 @@ class CircuitNote {
   /// The model that wrote the current AI review.
   final String? reviewModel;
 
+  /// Moments added in this app while it recorded (the phone's own recorder), in ms from the start of the
+  /// whole note. A Circuit recording's Moments are in files beside its parts instead (moments.dart).
+  final List<int> ownMoments;
+
   bool get isSong => kind == 'song';
 
   /// Where the recording was made: 'Phone' (this phone's own recorder) or 'Circuit'.
@@ -932,6 +937,10 @@ class CircuitNote {
     transcriptEdited: json['transcriptEdited'] == true,
     reviewStale: json['reviewStale'] == true,
     reviewModel: json['reviewModel'] as String?,
+    ownMoments: (json['moments'] as List<dynamic>? ?? const [])
+        .whereType<num>()
+        .map((value) => value.toInt())
+        .toList(),
   );
 
   CircuitNote copyWith({
@@ -958,6 +967,7 @@ class CircuitNote {
     bool? transcriptEdited,
     bool? reviewStale,
     String? reviewModel,
+    List<int>? ownMoments,
     bool clearSong = false,
   }) => CircuitNote(
     id: id,
@@ -985,6 +995,7 @@ class CircuitNote {
     transcriptEdited: transcriptEdited ?? this.transcriptEdited,
     reviewStale: reviewStale ?? this.reviewStale,
     reviewModel: reviewModel ?? this.reviewModel,
+    ownMoments: ownMoments ?? this.ownMoments,
   );
 
   Map<String, dynamic> toJson() => {
@@ -1017,6 +1028,7 @@ class CircuitNote {
     if (transcriptEdited) 'transcriptEdited': true,
     if (reviewStale) 'reviewStale': true,
     if (reviewModel != null) 'reviewModel': reviewModel!,
+    if (ownMoments.isNotEmpty) 'moments': ownMoments,
   };
 }
 
@@ -1555,7 +1567,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     final timer = Stopwatch()..start();
     try {
       final audio = await readNoteAudio(path);
-      final moments = _useMoments ? await Moments.forPart(path) : const <int>[];
+      final moments = _useMoments
+          ? await Moments.forNoteParts(note!, 0)
+          : const <int>[];
       final transcription = await _gemini.transcribeWav(
         audio,
         detectMusic: !asSpeech,

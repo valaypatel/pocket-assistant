@@ -1897,8 +1897,11 @@ extension _ScPages on _CircuitHomePageState {
         final controllable = state == 'recording' || state == 'paused';
         return CaptureDock(
           mode: DockMode.recording,
-          title: 'Recording on this phone',
+          title: _phoneMoments.isEmpty
+              ? 'Recording on this phone'
+              : 'Recording · ${_phoneMoments.length} ${_phoneMoments.length == 1 ? 'Moment' : 'Moments'}',
           paused: state == 'paused',
+          onMoment: state == 'recording' ? _addPhoneMoment : null,
           elapsed: () => Duration(
             milliseconds: ((_phoneRecording.value?['elapsedMs'] as num?) ?? 0)
                 .toInt(),

@@ -23,6 +23,7 @@ class CaptureDock extends StatefulWidget {
     this.onTogglePause,
     this.onStop,
     this.onOpen,
+    this.onMoment,
   });
 
   final DockMode mode;
@@ -44,6 +45,9 @@ class CaptureDock extends StatefulWidget {
 
   /// Tapping the bar itself opens the full controls.
   final VoidCallback? onOpen;
+
+  /// Bookmarks this instant of the recording. No button when null.
+  final VoidCallback? onMoment;
 
   @override
   State<CaptureDock> createState() => _CaptureDockState();
@@ -328,6 +332,13 @@ class _CaptureDockState extends State<CaptureDock>
                 ),
                 if (!widget.paused && roomy)
                   _LevelMeter(level: level, color: fg),
+                if (widget.onMoment != null)
+                  _BarButton(
+                    icon: LucideIcons.bookmarkPlus,
+                    tooltip: 'Add a Moment',
+                    onPressed: widget.onMoment,
+                    color: fg,
+                  ),
                 if (widget.onTogglePause != null)
                   _BarButton(
                     icon: widget.paused ? LucideIcons.play : LucideIcons.pause,

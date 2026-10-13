@@ -159,7 +159,7 @@ extension _LongNotes on _CircuitHomePageState {
             detectMusic: false,
             part: part,
             momentsMs: _useMoments
-                ? await Moments.forPart(files[part.number - 1])
+                ? await Moments.forNoteParts(note, part.number - 1)
                 : const [],
           );
           if (result.isCall) sawPhoneCall = true;

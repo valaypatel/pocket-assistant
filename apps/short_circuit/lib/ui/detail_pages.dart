@@ -495,7 +495,10 @@ class _TranscriptPageState extends State<TranscriptPage> {
       }
     }
     if (mounted && total != _lengthMs) setState(() => _lengthMs = total);
-    final found = await Moments.forNote(files);
+    final live = _live;
+    final found = live == null
+        ? await Moments.forNote(files)
+        : await Moments.allForNote(live);
     final same =
         found.length == _moments.length &&
         Iterable<int>.generate(found.length)
