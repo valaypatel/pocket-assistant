@@ -5,7 +5,6 @@
   board_dev.py flash            stop the logger, flash the development firmware, restart the logger
   board_dev.py copy [N]         copy the N newest synced notes (default 3) as new, unsynced notes
   board_dev.py sync             offer a Wi-Fi sync to the phone now and wait for it to end
-  board_dev.py sync-ble         the same, but over Bluetooth only (small single-part notes)
   board_dev.py copy-sync [N]    both: copy N notes, then sync them
   board_dev.py status           internal RAM, notes waiting, and whether it is recording / playing / syncing
   board_dev.py rec [SECONDS]    start recording (default: until rec-stop)
@@ -118,7 +117,7 @@ def send(command, wait_for, timeout):
     while time.time() < deadline:
         with open(LOG, errors="replace") as f:
             f.seek(start)
-            lines = [l.rstrip() for l in f.read().splitlines() if "DEV" in l or "CircuitHeap" in l or "SYNCSTAT" in l or "Sync requested" in l or "SDLOG|" in l or "Bluetooth transfer" in l]
+            lines = [l.rstrip() for l in f.read().splitlines() if "DEV" in l or "CircuitHeap" in l or "SYNCSTAT" in l or "Sync requested" in l or "SDLOG|" in l]
         for line in lines[seen:]:
             print(line)
             if wait_for and any(w in line for w in ([wait_for] if isinstance(wait_for, str) else wait_for)):
@@ -144,8 +143,6 @@ def main():
         return send(f"copy {n}", "DEV copy done", 60)
     if cmd == "sync":
         return send("sync", ("SYNCSTAT", "no new notes", "Nothing to sync", "0 file(s)"), 600)
-    if cmd == "sync-ble":
-        return send("sync-ble", ("Bluetooth transfer of note", "Sync failed", "Sync needs Wi-Fi", "Nothing to sync"), 900)
     if cmd == "copy-sync":
         return send(f"copy-sync {n}", ("SYNCSTAT", "0 file(s)"), 600)
     if cmd == "status":
