@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:short_circuit/main.dart';
 
 void main() {
+  appearanceTests();
   group('colour contrast', () {
     for (final entry in {
       'light': ScPalette.light,
@@ -81,6 +84,41 @@ void main() {
     testWidgets('the light theme page colour is unchanged', (tester) async {
       expect(buildScTheme().scaffoldBackgroundColor, Sc.bg);
       expect(buildScDarkTheme().scaffoldBackgroundColor, ScPalette.darkMode.bg);
+    });
+  });
+}
+
+// Appearance: light, dark or the phone's setting, chosen in Settings.
+void appearanceTests() {
+  group('appearance', () {
+    tearDown(() => appThemeMode.value = ThemeMode.system);
+
+    test('names map to modes, unknown means the phone', () {
+      expect(themeModeFromName('light'), ThemeMode.light);
+      expect(themeModeFromName('dark'), ThemeMode.dark);
+      expect(themeModeFromName('system'), ThemeMode.system);
+      expect(themeModeFromName(null), ThemeMode.system);
+      expect(themeModeFromName('purple'), ThemeMode.system);
+    });
+
+    testWidgets('choosing Dark in Settings switches the app and is kept', (
+      tester,
+    ) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      SharedPreferences.setMockInitialValues({});
+      await tester.pumpWidget(const ShortCircuitApp());
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(find.text('Settings').last);
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.text('Dark'));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(appThemeMode.value, ThemeMode.dark);
+      final saved = await SharedPreferences.getInstance();
+      expect(saved.getString('theme_mode'), 'dark');
+      await tester.tap(find.text('Light'));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(appThemeMode.value, ThemeMode.light);
+      await tester.pump(const Duration(seconds: 3));
     });
   });
 }

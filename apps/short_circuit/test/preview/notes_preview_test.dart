@@ -28,6 +28,17 @@ Widget _notesSample() => ListView(
       statusIcon: LucideIcons.circleAlert,
       statusColor: Sc.danger,
       trailing: ScPlayButton(onPressed: () {}),
+      footer: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          ScActionChip(
+            icon: LucideIcons.languages,
+            label: 'Transcribe',
+            onPressed: () {},
+          ),
+        ],
+      ),
     ),
     const SizedBox(height: 18),
     const ScGroupLabel('Today'),

@@ -536,21 +536,17 @@ extension _ScPages on _CircuitHomePageState {
           (note.enrichmentStatus == 'failed' ||
               note.enrichmentStatus == 'pending') &&
           (note.transcript ?? '').trim().isNotEmpty)
-        ScIconButton(
-          size: 40,
+        ScActionChip(
           icon: LucideIcons.sparkles,
-          tooltip: note.enrichmentStatus == 'failed'
+          label: note.enrichmentStatus == 'failed'
               ? 'Retry AI review'
               : 'Run AI review',
           onPressed: () => _retryEnrichment(note.id),
         ),
       if (actions && canTranscribe)
-        ScIconButton(
-          size: 40,
+        ScActionChip(
           icon: LucideIcons.languages,
-          tooltip: _transcribingNoteId == note.id
-              ? 'Transcribing'
-              : 'Transcribe',
+          label: _transcribingNoteId == note.id ? 'Transcribing' : 'Transcribe',
           busy: _transcribingNoteId == note.id,
           onPressed: _transcribingNoteId != null
               ? null
@@ -570,17 +566,15 @@ extension _ScPages on _CircuitHomePageState {
           note.song != null &&
           !note.song!.matched &&
           !note.song!.busy)
-        ScIconButton(
-          size: 40,
+        ScActionChip(
           icon: LucideIcons.refreshCw,
-          tooltip: 'Identify again',
+          label: 'Identify again',
           onPressed: () => _identifySongNote(note.id),
         ),
       if (actions && needsSync)
-        ScIconButton(
-          size: 40,
+        ScActionChip(
           icon: LucideIcons.refreshCw,
-          tooltip: 'Sync now',
+          label: 'Sync now',
           onPressed: () => _syncLatestRecording(note.id),
         ),
     ];
@@ -617,7 +611,7 @@ extension _ScPages on _CircuitHomePageState {
             )
           : footerButtons.isEmpty
           ? null
-          : Wrap(spacing: 8, children: footerButtons),
+          : Wrap(spacing: 8, runSpacing: 8, children: footerButtons),
     );
   }
 
@@ -997,6 +991,30 @@ extension _ScPages on _CircuitHomePageState {
       subtitle: _circuitAvailable ? 'Connected' : 'Not connected',
       trailing: const Icon(LucideIcons.chevronRight, size: 18),
       onTap: () => _selectTab(2),
+    ),
+    const SizedBox(height: ScSpace.xl),
+    const ScGroupLabel('Appearance'),
+    SegmentedButton<ThemeMode>(
+      showSelectedIcon: false,
+      segments: const [
+        ButtonSegment(
+          value: ThemeMode.system,
+          icon: Icon(LucideIcons.smartphone, size: 16),
+          label: Text('Phone'),
+        ),
+        ButtonSegment(
+          value: ThemeMode.light,
+          icon: Icon(LucideIcons.sun, size: 16),
+          label: Text('Light'),
+        ),
+        ButtonSegment(
+          value: ThemeMode.dark,
+          icon: Icon(LucideIcons.moon, size: 16),
+          label: Text('Dark'),
+        ),
+      ],
+      selected: {appThemeMode.value},
+      onSelectionChanged: (choice) => _setThemeMode(choice.first),
     ),
     const SizedBox(height: ScSpace.xl),
     const ScGroupLabel('AI and notes'),

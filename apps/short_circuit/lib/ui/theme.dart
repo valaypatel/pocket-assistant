@@ -693,9 +693,83 @@ class ScTile extends StatelessWidget {
               ),
               if (footer != null) ...[
                 const SizedBox(height: ScSpace.sm),
-                footer!,
+                // In line with the title and text, not under the icon.
+                Padding(
+                  padding: const EdgeInsets.only(left: 44 + ScSpace.md),
+                  child: footer!,
+                ),
               ],
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A small labelled action under a list row ("Transcribe", "Sync now"). The label says what it does, so
+/// nothing is a bare icon, and it sits in line with the row's text.
+class ScActionChip extends StatelessWidget {
+  const ScActionChip({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+    this.busy = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onPressed;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.sc;
+    final enabled = onPressed != null && !busy;
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        button: true,
+        enabled: enabled,
+        label: label,
+        excludeSemantics: true,
+        child: Material(
+          color: p.neutralButton,
+          shape: const StadiumBorder(),
+          child: InkWell(
+            customBorder: const StadiumBorder(),
+            onTap: enabled ? onPressed : null,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 40),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: ScSpace.md + 2),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (busy)
+                      SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: p.neutralInk,
+                        ),
+                      )
+                    else
+                      Icon(icon, size: 16, color: p.neutralInk),
+                    const SizedBox(width: ScSpace.sm),
+                    Text(
+                      label,
+                      style: ScType.caption.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: enabled ? p.neutralInk : p.muted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
         ),
       ),

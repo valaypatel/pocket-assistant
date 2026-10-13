@@ -1036,16 +1036,20 @@ class ShortCircuitApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Short-Circuit',
-      theme: buildScTheme(),
-      // Follows the phone's light/dark setting. Screens read their colours from context.sc (tokens.dart).
-      darkTheme: buildScDarkTheme(),
-      themeMode: ThemeMode.system,
-      navigatorObservers: [statusRouteObserver],
-      builder: (context, child) =>
-          StatusOverlay(child: child ?? const SizedBox.shrink()),
-      home: const CircuitHomePage(),
+    // Light, dark or the phone's setting (Settings > Appearance). Screens read their colours from
+    // context.sc (tokens.dart).
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: appThemeMode,
+      builder: (context, mode, _) => MaterialApp(
+        title: 'Short-Circuit',
+        theme: buildScTheme(),
+        darkTheme: buildScDarkTheme(),
+        themeMode: mode,
+        navigatorObservers: [statusRouteObserver],
+        builder: (context, child) =>
+            StatusOverlay(child: child ?? const SizedBox.shrink()),
+        home: const CircuitHomePage(),
+      ),
     );
   }
 }
@@ -3224,6 +3228,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _autoTranscribe = preferences.getBool(_autoTranscribeKey) ?? true;
       _autoEnrich = preferences.getBool(_autoEnrichKey) ?? true;
       _useMoments = preferences.getBool(_useMomentsKey) ?? true;
+      appThemeMode.value = themeModeFromName(
+        preferences.getString(_themeModeKey),
+      );
       // A new install has no saved notes yet; anyone who already uses the app never sees the welcome.
       _showOnboarding =
           Onboarding.enabled &&
@@ -3330,6 +3337,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     if (tab != null) _selectTab(tab);
     final preferences = await SharedPreferences.getInstance();
     await preferences.setBool(Onboarding.doneKey, true);
+  }
+
+  Future<void> _setThemeMode(ThemeMode mode) async {
+    appThemeMode.value = mode;
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(_themeModeKey, mode.name);
   }
 
   Future<void> _setUseMoments(bool value) async {
