@@ -536,4 +536,40 @@ void main() {
       expect(await tester.runAsync(() => _load('circuit_notes')), isEmpty);
     });
   });
+
+  group('Moments', () {
+    test('travel with their recording and come back beside it', () async {
+      final note = File('${dir.path}/circuit-note-1791834086-204.cnote')
+        ..writeAsBytesSync([1, 2, 3, 4]);
+      final moments = File('${dir.path}/circuit-moments-204.cmom')
+        ..writeAsBytesSync([9, 9, 9]);
+      await _store('circuit_notes', [_note('n1', audio: note.path)]);
+
+      final data = await BackupStore.collect();
+      expect(
+        data.audio.map((a) => a.name),
+        containsAll([
+          'circuit-note-1791834086-204.cnote',
+          'circuit-moments-204.cmom',
+        ]),
+      );
+
+      // Another phone: an empty folder.
+      final other = Directory('${dir.path}/other')..createSync();
+      SharedPreferences.setMockInitialValues({});
+      await BackupStore.restore(data, filesDir: other);
+      final back = File('${other.path}/circuit-moments-204.cmom');
+      expect(back.existsSync(), isTrue);
+      expect(back.readAsBytesSync(), [9, 9, 9]);
+      expect(moments.existsSync(), isTrue);
+    });
+
+    test('a recording without Moments backs up as before', () async {
+      final note = File('${dir.path}/circuit-note-5-9.cnote')
+        ..writeAsBytesSync([1]);
+      await _store('circuit_notes', [_note('n1', audio: note.path)]);
+      final data = await BackupStore.collect();
+      expect(data.audio.map((a) => a.name), ['circuit-note-5-9.cnote']);
+    });
+  });
 }

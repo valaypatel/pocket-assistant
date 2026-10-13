@@ -354,6 +354,17 @@ class BackupStore {
     final notes = <Map<String, dynamic>>[];
     final audio = <BackupAudio>[];
     final names = <String>{};
+    // The Moments Circuit sealed beside a recording (a few hundred bytes, sealed with the note key) travel
+    // with it; without them a restored note would keep its audio but lose its bookmarks.
+    Future<void> addMoments(String recordingPath) async {
+      final moments = momentsFileFor(recordingPath);
+      if (moments == null || !await moments.exists()) return;
+      final name = _basename(moments.path);
+      if (names.add(name)) {
+        audio.add(BackupAudio.file(name, moments, await moments.length()));
+      }
+    }
+
     for (final note in _maps(await _readSecret(preferences, _notesKey))) {
       final copy = Map<String, dynamic>.from(note);
       final path = copy.remove('audioPath') as String?;
@@ -369,6 +380,7 @@ class BackupStore {
           if (names.add(name)) {
             audio.add(BackupAudio.file(name, file, await file.length()));
           }
+          await addMoments(path);
         }
         // A long note is several files; each goes in, in order.
         final partNames = <String>[];
@@ -380,6 +392,7 @@ class BackupStore {
           if (names.add(name)) {
             audio.add(BackupAudio.file(name, part, await part.length()));
           }
+          await addMoments(partPath);
         }
         if (partNames.length > 1) copy['audioParts'] = partNames;
       }
@@ -450,6 +463,16 @@ class BackupStore {
     Future<Uint8List> bytesOf(BackupAudio a) async =>
         a.bytes ?? await a.file!.readAsBytes();
     await filesDir.create(recursive: true);
+    // The Moments file that goes with a restored recording, if the backup has it and the phone does not.
+    Future<void> restoreMoments(String recordingPath) async {
+      final moments = momentsFileFor(recordingPath);
+      if (moments == null) return;
+      final saved = audioByName[_basename(moments.path)];
+      if (saved != null && !await moments.exists()) {
+        await moments.writeAsBytes(await bytesOf(saved));
+      }
+    }
+
     for (final note in data.notes) {
       final id = note['id'] as String?;
       if (id == null) continue;
@@ -476,6 +499,7 @@ class BackupStore {
         if (!await target.exists())
           await target.writeAsBytes(await bytesOf(audio));
         copy['audioPath'] = target.path;
+        await restoreMoments(target.path);
         final restored = <String>[];
         for (final partName in partNames) {
           final partAudio = audioByName[_basename(partName)];
@@ -483,6 +507,7 @@ class BackupStore {
           final part = File('${filesDir.path}/${_basename(partName)}');
           if (!await part.exists())
             await part.writeAsBytes(await bytesOf(partAudio));
+          await restoreMoments(part.path);
           restored.add(part.path);
         }
         if (restored.length > 1) copy['audioParts'] = restored;
