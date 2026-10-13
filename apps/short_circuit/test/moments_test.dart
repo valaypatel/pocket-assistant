@@ -25,7 +25,6 @@ List<int> _hex(String text) => [
 ];
 
 void main() {
-  bleChunkTests();
   setUp(() {
     FlutterSecureStorage.setMockInitialValues({});
     SharedPreferences.setMockInitialValues({});
@@ -262,28 +261,4 @@ Future<Uint8List> _seal(
     index++;
   }
   return out.toBytes();
-}
-
-void bleChunkTests() {
-  group('Moments over the Bluetooth fallback', () {
-    test('a message names the note and lists the offsets', () {
-      final chunk = Moments.parseBleChunk('Moments\n172\n1200,5000,59000');
-      expect(chunk!.$1, 172);
-      expect(chunk.$2, [1200, 5000, 59000]);
-    });
-
-    test('anything that does not read cleanly is ignored', () {
-      for (final bad in [
-        'Sync complete: ready on phone',
-        'Moments\n172',
-        'Moments\nabc\n1,2',
-        'Moments\n0\n1,2',
-        'Moments\n172\n1,x,3',
-        'Moments\n172\n-5',
-        'Moments\n172\n',
-      ]) {
-        expect(Moments.parseBleChunk(bad), isNull, reason: bad);
-      }
-    });
-  });
 }

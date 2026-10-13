@@ -178,24 +178,6 @@ class Moments {
         'around it, and never write the times out.';
   }
 
-  /// One message of Moments from Circuit's Bluetooth fallback: "Moments\n<note number>\n<ms,ms,...>"
-  /// (the offsets are ms from the start of that part). Null for anything else, or a message that does
-  /// not read cleanly.
-  static (int, List<int>)? parseBleChunk(String status) {
-    if (!status.startsWith('Moments\n')) return null;
-    final lines = status.split('\n');
-    if (lines.length < 3) return null;
-    final id = int.tryParse(lines[1].trim());
-    if (id == null || id <= 0) return null;
-    final values = <int>[];
-    for (final piece in lines[2].split(',')) {
-      final ms = int.tryParse(piece.trim());
-      if (ms == null || ms < 0) return null;
-      values.add(ms);
-    }
-    return values.isEmpty || values.length > _momentsMax ? null : (id, values);
-  }
-
   /// Replaces the model's [[MOMENT]] markers with numbered ones, [Moment 1], [Moment 2]..., counting
   /// from [first] so the numbers run on across the parts of a long note.
   static String numberMarkers(String text, {int first = 1}) {
