@@ -1125,6 +1125,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
 
   final Set<String> _identifyingSongs = {};
   bool _showOnboarding = false; // first run: the welcome screens
+  bool _circuitDetailsOpen = false;
+  bool _searchOpen = false;
   bool _developerOpen =
       false; // the Developer rows in Settings are folded away until asked for
   DateTime? _recordingStartedAt;
@@ -2253,6 +2255,40 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         _syncError =
             '$waiting note${waiting == 1 ? ' is' : 's are'} waiting on Circuit and ${waiting == 1 ? 'has' : 'have'} not synced.';
       });
+    }
+  }
+
+  /// Pull down on Notes or Circuit: ask Circuit whether anything is waiting (and sync it), or try to
+  /// reach it when it is not connected. Says what happened, so the pull never feels like nothing.
+  Future<void> _pullRefresh() async {
+    if (!_circuitAvailable) {
+      if (_savedCircuitId != null && !_connecting && !_needsPairingRepair) {
+        unawaited(
+          _connect(
+            BluetoothDevice.fromId(_savedCircuitId!),
+            savedReconnect: true,
+          ),
+        );
+        _toast('Looking for Circuit…');
+      } else {
+        _toast('Circuit is not connected');
+      }
+      await Future<void>.delayed(const Duration(seconds: 1));
+      return;
+    }
+    if (_syncActive) return;
+    try {
+      await _writeCircuit('@audio-sync');
+    } catch (error) {
+      _toast('Could not reach Circuit');
+      return;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 2500));
+    if (!mounted) return;
+    if (_syncActive || _syncingNoteId != null) {
+      _toast('Syncing new notes…');
+    } else if ((_boardWaiting ?? 0) == 0) {
+      _toast('Up to date. Nothing new on Circuit.');
     }
   }
 
