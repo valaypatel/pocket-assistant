@@ -1,14 +1,5 @@
 part of '../main.dart';
 
-const _weekdays = [
-  'Monday',
-  'Tuesday',
-  'Wednesday',
-  'Thursday',
-  'Friday',
-  'Saturday',
-  'Sunday',
-];
 const _months = [
   'January',
   'February',
@@ -119,15 +110,6 @@ extension _ScPages on _CircuitHomePageState {
           RegExp(r'^\d{1,3}(\.\d{1,3}){3}$').hasMatch(_wifiDetail.trim())
       ? _wifiDetail.trim()
       : null;
-
-  Widget _deviceChip() => CircuitChip(
-    chipKey: _deviceChipKey,
-    connected: _circuitAvailable,
-    link: _relayLink,
-    wifiState: _wifiState,
-    stayConnected: _relayActive,
-    onTap: () => _goTo(_AppPage.circuit),
-  );
 
   String _ago(DateTime time) {
     final seconds = DateTime.now().difference(time).inSeconds;
@@ -635,141 +617,6 @@ extension _ScPages on _CircuitHomePageState {
     );
   }
 
-  // ---- home ----------------------------------------------------------------
-
-  List<Widget> _homePage() {
-    final now = DateTime.now();
-    final attention = _notes
-        .where((n) => !n.isArriving && _noteNeedsAttention(n))
-        .toList();
-    final open = _tasks.where((task) => !task.done).toList();
-    final recent = _notes.where((n) => !n.isArriving).take(3).toList();
-    return [
-      Row(
-        children: [
-          const ScBrandMark(size: 28),
-          const SizedBox(width: 9),
-          const Expanded(
-            child: Text(
-              'short circuit',
-              style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w600,
-                letterSpacing: -.6,
-              ),
-            ),
-          ),
-          _deviceChip(),
-        ],
-      ),
-      const SizedBox(height: 24),
-      ScEyebrow(
-        '${_weekdays[now.weekday - 1]} · ${now.day} ${_months[now.month - 1]}',
-      ),
-      const SizedBox(height: 6),
-      ScTitle(
-        _displayName.isEmpty ? 'A clearer head.' : 'Hello, $_displayName.',
-      ),
-      const SizedBox(height: 8),
-      const Text(
-        'A place for everything on your mind.',
-        style: TextStyle(color: Sc.muted, fontSize: 15, height: 1.5),
-      ),
-      const SizedBox(height: 22),
-      _syncHealthCard(),
-      _syncBanner(),
-      ScPanel(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            ScEyebrow(
-              _notes.isEmpty
-                  ? 'A place to begin'
-                  : attention.isEmpty
-                  ? 'Your space'
-                  : 'Ready for you',
-            ),
-            const SizedBox(height: 10),
-            Text(
-              _notes.isEmpty
-                  ? 'Keep the thought.\nLose the clutter.'
-                  : attention.isEmpty
-                  ? 'A little less\non your mind.'
-                  : '${attention.length} note${attention.length == 1 ? '' : 's'}.\nA few next steps.',
-              style: const TextStyle(
-                fontSize: 28,
-                height: 1.12,
-                fontWeight: FontWeight.w600,
-                letterSpacing: -1,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              _notes.isEmpty
-                  ? 'Record a thought on your phone, or connect your Circuit.'
-                  : attention.isEmpty
-                  ? 'Your recordings are here whenever you need them.'
-                  : 'Check the notes that need your attention, then choose what comes next.',
-              style: const TextStyle(
-                fontSize: 14,
-                height: 1.5,
-                color: Sc.neutralInk,
-              ),
-            ),
-            const SizedBox(height: 16),
-            FilledButton.icon(
-              style: FilledButton.styleFrom(
-                backgroundColor: Sc.dark,
-                foregroundColor: Colors.white,
-              ),
-              onPressed: _notes.isEmpty
-                  ? _showCaptureOptions
-                  : () => _selectTab(1),
-              icon: Icon(
-                _notes.isEmpty ? LucideIcons.mic : LucideIcons.arrowRight,
-                size: 18,
-              ),
-              label: Text(
-                _notes.isEmpty
-                    ? 'Capture your first thought'
-                    : attention.isEmpty
-                    ? 'Open your notes'
-                    : 'Review notes',
-              ),
-            ),
-          ],
-        ),
-      ),
-      const SizedBox(height: 24),
-      ScSectionRow(
-        'Your next step',
-        action: 'All tasks',
-        onAction: () => _selectTab(2),
-      ),
-      if (open.isEmpty)
-        const Text(
-          'Nothing to do right now.',
-          style: TextStyle(color: Sc.muted, fontSize: 14),
-        )
-      else
-        _taskRow(open.first),
-      const SizedBox(height: 24),
-      ScSectionRow(
-        'Recent captures',
-        action: 'All notes',
-        onAction: () => _selectTab(1),
-      ),
-      if (recent.isEmpty)
-        const ScTile(
-          icon: LucideIcons.mic,
-          title: 'Your first note starts with you',
-          subtitle: 'Use Capture a thought below. You can start with just your phone.',
-        )
-      else
-        for (final note in recent) _noteTile(note),
-    ];
-  }
-
   /// One capture entry point, with an explicit microphone/device choice.
   Future<void> _showCaptureOptions() async {
     await showModalBottomSheet<void>(
@@ -958,14 +805,16 @@ extension _ScPages on _CircuitHomePageState {
       if (visibleNotes.isEmpty)
         ScTile(
           icon: LucideIcons.mic,
-          title: query.isEmpty && _noteSource != noteSourceAll
-              ? 'No $_noteSource notes'
-              : 'No matching notes',
-          subtitle: query.isEmpty && _noteSource != noteSourceAll
-              ? 'Choose All to see every note.'
+          title: query.isNotEmpty
+              ? 'Nothing matches “${_noteSearchController.text.trim()}”'
               : _notes.isEmpty
-              ? 'Capture a thought on your phone or Circuit to begin.'
-              : 'Try another word or search tag.',
+              ? 'No notes yet'
+              : 'No $_noteSource notes',
+          subtitle: query.isNotEmpty
+              ? 'Try another word or a tag.'
+              : _notes.isEmpty
+              ? 'Tap “Capture a thought”, or press the button on Circuit.'
+              : 'Choose All to see every note.',
         )
       else
         for (final (index, note) in libraryNotes.indexed) ...[
@@ -2105,7 +1954,6 @@ extension _ScPages on _CircuitHomePageState {
           keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
           children: switch (_page) {
-            _AppPage.home => _homePage(),
             _AppPage.notes => _notesPage(),
             _AppPage.tasks => _tasksPage(),
             _AppPage.settings => _settingsPage(),
@@ -2120,14 +1968,13 @@ extension _ScPages on _CircuitHomePageState {
     // Recording, sync and playback show on every screen from one overlay (status_overlay.dart).
     final body = content;
     final tab = switch (_page) {
-      _AppPage.home => 0,
-      _AppPage.notes || _AppPage.group => 1,
-      _AppPage.tasks => 2,
+      _AppPage.notes || _AppPage.group => 0,
+      _AppPage.tasks => 1,
+      _AppPage.circuit || _AppPage.wifi || _AppPage.hiddenWifi => 2,
       _AppPage.settings => 3,
-      _ => -1,
     };
     return PopScope(
-      canPop: _page == _AppPage.home,
+      canPop: _page == _AppPage.notes,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) _goBack();
       },
@@ -2138,7 +1985,7 @@ extension _ScPages on _CircuitHomePageState {
           children: [
             // Playback gets its own row here, above Capture a thought, so nothing is covered.
             ?_inlineSnack(),
-            if (tab >= 0 && tab != 3 && !_recordingAudio)
+            if (tab <= 1 && !_recordingAudio)
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
                 child: _captureEntry(),

@@ -67,12 +67,9 @@ void main() {
     await tester.pumpWidget(const ShortCircuitApp());
     await tester.pump(const Duration(seconds: 1));
 
-    expect(find.text('A clearer head.'), findsOneWidget);
-    expect(find.text('A PLACE TO BEGIN'), findsOneWidget);
-    // The Circuit indicator is the device icon, not the word.
-    expect(find.byType(ScDeviceMark), findsWidgets);
-    expect(find.text('Circuit'), findsNothing);
-    for (final label in ['Home', 'Notes', 'Tasks', 'Settings']) {
+    // Notes is the first screen, and with nothing recorded yet it says what to do.
+    expect(find.text('No notes yet'), findsOneWidget);
+    for (final label in ['Notes', 'Tasks', 'Circuit', 'Settings']) {
       expect(find.text(label), findsWidgets);
     }
 
@@ -80,7 +77,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Where’s the thought?'), findsOneWidget);
     expect(find.text('This phone'), findsOneWidget);
-    expect(find.text('Circuit'), findsOneWidget);
+    expect(
+      find.text('Circuit'),
+      findsWidgets,
+    ); // the capture choice and the tab
     Navigator.of(tester.element(find.text('This phone'))).pop();
     await tester.pumpAndSettle();
 

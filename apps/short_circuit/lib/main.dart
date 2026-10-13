@@ -987,7 +987,7 @@ WifiStatus? parseWifiStatus(String message) {
   );
 }
 
-enum _AppPage { home, notes, tasks, settings, circuit, wifi, hiddenWifi, group }
+enum _AppPage { notes, tasks, settings, circuit, wifi, hiddenWifi, group }
 
 const _tasksKey = 'circuit_tasks';
 const _boardDeletesKey = 'pending_board_deletes';
@@ -1082,7 +1082,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   bool _connecting = false;
   bool _provisioningWifi = false;
   bool _scanningWifi = false;
-  _AppPage _page = _AppPage.home;
+  _AppPage _page = _AppPage.notes;
   final List<_AppPage> _pageHistory = [];
   List<CircuitTask> _tasks = [];
   bool _autoTranscribe = true;
@@ -1158,8 +1158,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   bool _circuitPlaybackSupportsStop = false;
   Timer? _playbackRequestTimer;
   bool _recordingAudio = false;
-  final _deviceChipKey =
-      GlobalKey(); // where the recording pill grows from and folds back to
   bool _relayActive = false; // the background service is running
   RelayLink _relayLink = RelayLink.off; // what its link to Circuit is doing
   String _noteSource =
@@ -3174,7 +3172,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
 
   void _goBack() {
     setState(() {
-      _page = _pageHistory.isEmpty ? _AppPage.home : _pageHistory.removeLast();
+      _page = _pageHistory.isEmpty ? _AppPage.notes : _pageHistory.removeLast();
     });
   }
 
@@ -3184,12 +3182,13 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _selectedNoteIds.clear();
       _pageHistory.clear();
       _page = const [
-        _AppPage.home,
         _AppPage.notes,
         _AppPage.tasks,
+        _AppPage.circuit,
         _AppPage.settings,
       ][index];
     });
+    if (_page == _AppPage.circuit && _circuitAvailable) _requestWifiStatus();
   }
 
   /// Shows what a restore brought back.

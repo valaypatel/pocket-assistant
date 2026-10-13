@@ -200,10 +200,10 @@ void main() {
     await _shot(tester, 'notes');
     await tester.enterText(find.byType(TextField), 'unfindable phrase');
     await tester.pump();
-    expect(find.text('No matching notes'), findsOneWidget);
+    expect(find.text('Nothing matches “unfindable phrase”'), findsOneWidget);
     await tester.tap(find.byTooltip('Clear search'));
     await tester.pump();
-    expect(find.text('No matching notes'), findsNothing);
+    expect(find.textContaining('Nothing matches'), findsNothing);
     expect(
       tester.widget<TextField>(find.byType(TextField)).controller!.text,
       isEmpty,

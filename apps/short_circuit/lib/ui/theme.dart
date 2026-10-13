@@ -1030,69 +1030,77 @@ class ScNavBar extends StatelessWidget {
   final ValueChanged<int> onSelect;
 
   static const _items = [
-    (LucideIcons.house, 'Home'),
     (LucideIcons.fileText, 'Notes'),
     (LucideIcons.squareCheck, 'Tasks'),
+    (LucideIcons.cpu, 'Circuit'),
     (LucideIcons.settings, 'Settings'),
   ];
 
   @override
-  Widget build(BuildContext context) => DecoratedBox(
-    decoration: const BoxDecoration(
-      color: Sc.bg,
-      border: Border(top: BorderSide(color: Sc.line)),
-    ),
-    child: SafeArea(
-      top: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-        child: Row(
-          children: [
-            for (var i = 0; i < _items.length; i++)
-              Expanded(
-                child: Semantics(
-                  selected: i == index,
-                  button: true,
-                  child: TextButton(
-                    onPressed: () => onSelect(i),
-                    style: TextButton.styleFrom(
-                      foregroundColor: i == index ? Sc.accentInk : Sc.muted,
-                      backgroundColor: i == index ? Sc.accentSoft : Sc.bg,
-                      minimumSize: const Size(48, 58),
-                      padding: const EdgeInsets.symmetric(
-                        vertical: 8,
-                        horizontal: 4,
+  Widget build(BuildContext context) {
+    final p = context.sc;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: p.bg,
+        border: Border(top: BorderSide(color: p.line)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            ScSpace.md,
+            ScSpace.sm,
+            ScSpace.md,
+            ScSpace.sm,
+          ),
+          child: Row(
+            children: [
+              for (var i = 0; i < _items.length; i++)
+                Expanded(
+                  child: Semantics(
+                    selected: i == index,
+                    button: true,
+                    child: TextButton(
+                      onPressed: () => onSelect(i),
+                      style: TextButton.styleFrom(
+                        foregroundColor: i == index ? p.accentInk : p.muted,
+                        backgroundColor: i == index ? p.accentSoft : p.bg,
+                        minimumSize: const Size(48, 60),
+                        padding: const EdgeInsets.symmetric(
+                          vertical: ScSpace.sm,
+                          horizontal: ScSpace.xs,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: ScRadius.inputBorder,
+                        ),
                       ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(_items[i].$1, size: 21),
-                        const SizedBox(height: 5),
-                        FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Text(
-                            _items[i].$2,
-                            maxLines: 1,
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(_items[i].$1, size: 22),
+                          const SizedBox(height: ScSpace.xs),
+                          FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              _items[i].$2,
+                              maxLines: 1,
+                              style: ScType.caption.copyWith(
+                                fontWeight: FontWeight.w600,
+                                fontFamily: 'Roboto',
+                              ),
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// Small read-only label for categories (filled) and tags (outlined).
