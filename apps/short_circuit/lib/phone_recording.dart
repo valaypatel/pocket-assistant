@@ -624,7 +624,7 @@ class PhoneRecorderSheet extends StatelessWidget {
           margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
           padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
           decoration: BoxDecoration(
-            color: Sc.bg,
+            color: context.sc.bg,
             borderRadius: BorderRadius.circular(16),
           ),
           child: SafeArea(
@@ -661,7 +661,9 @@ class PhoneRecorderSheet extends StatelessWidget {
                         ? 'Paused because another app is using the microphone.'
                         : 'Saved as you go. There is no time limit.',
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: interrupted ? Sc.orange : Sc.muted),
+                    style: TextStyle(
+                      color: interrupted ? context.sc.orange : context.sc.muted,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -670,8 +672,8 @@ class PhoneRecorderSheet extends StatelessWidget {
                   child: LinearProgressIndicator(
                     value: paused ? 0 : max(level, .04),
                     minHeight: 6,
-                    color: Sc.accent,
-                    backgroundColor: Sc.line,
+                    color: context.sc.accent,
+                    backgroundColor: context.sc.line,
                   ),
                 ),
                 const SizedBox(height: 20),
@@ -709,7 +711,7 @@ class PhoneRecorderSheet extends StatelessWidget {
                 FilledButton.icon(
                   style: FilledButton.styleFrom(
                     minimumSize: const Size(0, 52),
-                    backgroundColor: Sc.accent,
+                    backgroundColor: context.sc.accent,
                   ),
                   onPressed: state == 'starting' ? null : onStop,
                   icon: const Icon(LucideIcons.check, size: 20),

@@ -59,7 +59,7 @@ Future<NoteDeleteChoice?> _chooseNoteDelete(
           child: const Text('Phone only'),
         ),
       TextButton(
-        style: TextButton.styleFrom(foregroundColor: Sc.danger),
+        style: TextButton.styleFrom(foregroundColor: context.sc.danger),
         onPressed: () =>
             Navigator.pop(dialogContext, NoteDeleteChoice.everywhere),
         child: Text(fromCircuit ? 'Everywhere' : 'Delete'),
@@ -128,23 +128,27 @@ extension _ScPages on _CircuitHomePageState {
       child: Container(
         padding: const EdgeInsets.all(15),
         decoration: BoxDecoration(
-          color: Sc.dangerSoft,
+          color: context.sc.dangerSoft,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: const Color(0xfff3c6bb)),
+          border: Border.all(color: context.sc.danger.withValues(alpha: .35)),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Row(
+            Row(
               children: [
-                Icon(LucideIcons.refreshCwOff, color: Sc.danger, size: 22),
+                Icon(
+                  LucideIcons.refreshCwOff,
+                  color: context.sc.danger,
+                  size: 22,
+                ),
                 SizedBox(width: 10),
                 Text(
                   'Sync needs attention',
                   style: TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
-                    color: Sc.danger,
+                    color: context.sc.danger,
                   ),
                 ),
               ],
@@ -152,10 +156,10 @@ extension _ScPages on _CircuitHomePageState {
             const SizedBox(height: 8),
             Text(
               error,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 12.5,
                 height: 1.4,
-                color: Color(0xff6b3a2f),
+                color: context.sc.ink,
               ),
             ),
             const SizedBox(height: 12),
@@ -188,7 +192,7 @@ extension _ScPages on _CircuitHomePageState {
       child: Container(
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: Sc.hero,
+          color: context.sc.hero,
           borderRadius: BorderRadius.circular(14),
         ),
         child: Column(
@@ -196,12 +200,12 @@ extension _ScPages on _CircuitHomePageState {
           children: [
             Row(
               children: [
-                const SizedBox(
+                SizedBox(
                   width: 16,
                   height: 16,
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
-                    color: Sc.accent,
+                    color: context.sc.accent,
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -223,8 +227,8 @@ extension _ScPages on _CircuitHomePageState {
               child: LinearProgressIndicator(
                 value: _syncProgress == null ? null : _syncProgress! / 100,
                 minHeight: 6,
-                color: Sc.accent,
-                backgroundColor: Colors.white,
+                color: context.sc.accent,
+                backgroundColor: context.sc.bg,
               ),
             ),
           ],
@@ -607,8 +611,8 @@ extension _ScPages on _CircuitHomePageState {
               child: LinearProgressIndicator(
                 value: (_syncProgress ?? 0) / 100,
                 minHeight: 5,
-                color: Sc.accent,
-                backgroundColor: Sc.line,
+                color: context.sc.accent,
+                backgroundColor: context.sc.line,
               ),
             )
           : footerButtons.isEmpty
@@ -624,7 +628,7 @@ extension _ScPages on _CircuitHomePageState {
       useSafeArea: true,
       isScrollControlled: true,
       showDragHandle: true,
-      backgroundColor: Sc.bg,
+      backgroundColor: context.sc.bg,
       builder: (sheetContext) => SingleChildScrollView(
         padding: EdgeInsets.fromLTRB(
           24,
@@ -640,9 +644,9 @@ extension _ScPages on _CircuitHomePageState {
             const SizedBox(height: 8),
             const ScTitle('Where’s the thought?'),
             const SizedBox(height: 8),
-            const Text(
+            Text(
               'Choose where to record.',
-              style: TextStyle(color: Sc.muted, fontSize: 15),
+              style: TextStyle(color: context.sc.muted, fontSize: 15),
             ),
             const SizedBox(height: 20),
             ScTile(
@@ -785,10 +789,10 @@ extension _ScPages on _CircuitHomePageState {
                 alignment: Alignment.centerRight,
                 padding: const EdgeInsets.symmetric(horizontal: 22),
                 decoration: BoxDecoration(
-                  color: Sc.dangerSoft,
+                  color: context.sc.dangerSoft,
                   borderRadius: BorderRadius.circular(14),
                 ),
-                child: const Icon(LucideIcons.trash2, color: Sc.danger),
+                child: Icon(LucideIcons.trash2, color: context.sc.danger),
               ),
               confirmDismiss: (_) => _confirmDeleteListNote(note),
               onDismissed: (_) => _deleteNote(
@@ -836,10 +840,10 @@ extension _ScPages on _CircuitHomePageState {
                 alignment: Alignment.centerRight,
                 padding: const EdgeInsets.symmetric(horizontal: 22),
                 decoration: BoxDecoration(
-                  color: Sc.dangerSoft,
+                  color: context.sc.dangerSoft,
                   borderRadius: BorderRadius.circular(14),
                 ),
-                child: const Icon(LucideIcons.trash2, color: Sc.danger),
+                child: Icon(LucideIcons.trash2, color: context.sc.danger),
               ),
               confirmDismiss: (_) => _confirmDeleteListNote(note),
               onDismissed: (_) => _deleteNote(
@@ -887,21 +891,21 @@ extension _ScPages on _CircuitHomePageState {
     background: Container(
       alignment: Alignment.centerRight,
       padding: const EdgeInsets.only(right: 8),
-      child: const Icon(LucideIcons.trash2, color: Sc.danger),
+      child: Icon(LucideIcons.trash2, color: context.sc.danger),
     ),
     onDismissed: (_) => _deleteTask(task.id),
     child: InkWell(
       onTap: () => _toggleTask(task.id),
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 12),
-        decoration: const BoxDecoration(
-          border: Border(bottom: BorderSide(color: Sc.line)),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: context.sc.line)),
         ),
         child: Row(
           children: [
             Checkbox(
               value: task.done,
-              activeColor: Sc.accent,
+              activeColor: context.sc.accent,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(5),
               ),
@@ -918,14 +922,14 @@ extension _ScPages on _CircuitHomePageState {
                       fontSize: 14,
                       fontWeight: FontWeight.w600,
                       decoration: task.done ? TextDecoration.lineThrough : null,
-                      color: task.done ? Sc.faint : Sc.ink,
+                      color: task.done ? context.sc.muted : context.sc.ink,
                     ),
                   ),
                   if (task.detail != null && task.detail!.isNotEmpty) ...[
                     const SizedBox(height: 3),
                     Text(
                       task.detail!,
-                      style: const TextStyle(fontSize: 11, color: Sc.faint),
+                      style: TextStyle(fontSize: 11, color: context.sc.muted),
                     ),
                   ],
                 ],
@@ -934,7 +938,7 @@ extension _ScPages on _CircuitHomePageState {
             IconButton(
               tooltip: 'Delete task',
               onPressed: () => _deleteTask(task.id),
-              icon: const Icon(LucideIcons.trash2, size: 18, color: Sc.muted),
+              icon: Icon(LucideIcons.trash2, size: 18, color: context.sc.muted),
             ),
           ],
         ),
@@ -958,18 +962,18 @@ extension _ScPages on _CircuitHomePageState {
         ],
       ),
       const SizedBox(height: 8),
-      const Text(
+      Text(
         'Turn a thought into a next step.',
-        style: TextStyle(color: Sc.muted, fontSize: 15, height: 1.5),
+        style: TextStyle(color: context.sc.muted, fontSize: 15, height: 1.5),
       ),
       const SizedBox(height: 24),
       const ScGroupLabel('To do'),
       if (open.isEmpty)
-        const Padding(
+        Padding(
           padding: EdgeInsets.symmetric(vertical: 10),
           child: Text(
-            'Nothing to do right now.',
-            style: TextStyle(color: Sc.faint, fontSize: 13),
+            'Nothing to do right now. Add a task with the + button, or approve a suggested action on a note.',
+            style: ScType.caption.copyWith(color: context.sc.muted),
           ),
         ),
       for (final task in open) _taskRow(task),
@@ -1014,16 +1018,16 @@ extension _ScPages on _CircuitHomePageState {
     const SizedBox(height: 4),
     const ScTitle('Settings'),
     const SizedBox(height: 8),
-    const Text(
+    Text(
       'Make Short-Circuit work your way.',
-      style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.45),
+      style: TextStyle(color: context.sc.muted, fontSize: 12, height: 1.45),
     ),
     const SizedBox(height: 22),
     const ScGroupLabel('Device'),
     Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: Sc.circuitCard,
+        color: context.sc.circuitCard,
         borderRadius: BorderRadius.circular(14),
       ),
       child: InkWell(
@@ -1048,19 +1052,12 @@ extension _ScPages on _CircuitHomePageState {
                     _circuitAvailable
                         ? 'Connected via Short-Circuit'
                         : 'Not connected',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Color(0xff6e7d72),
-                    ),
+                    style: TextStyle(fontSize: 11, color: context.sc.muted),
                   ),
                 ],
               ),
             ),
-            const Icon(
-              LucideIcons.chevronRight,
-              size: 18,
-              color: Color(0xff6e7d72),
-            ),
+            Icon(LucideIcons.chevronRight, size: 18, color: context.sc.muted),
           ],
         ),
       ),
@@ -1130,10 +1127,10 @@ extension _ScPages on _CircuitHomePageState {
     ScRow(
       title: 'Back up and restore',
       caption: 'One encrypted file, opened with a passphrase you choose',
-      trailing: const Icon(
+      trailing: Icon(
         LucideIcons.chevronRight,
         size: 18,
-        color: Sc.accent,
+        color: context.sc.accent,
       ),
       onTap: () => Navigator.of(context).push(
         MaterialPageRoute<void>(
@@ -1174,7 +1171,7 @@ extension _ScPages on _CircuitHomePageState {
       onTap: _promptName,
     ),
     const SizedBox(height: 32),
-    const Row(
+    Row(
       children: [
         ScBrandMark(size: 40),
         SizedBox(width: 12),
@@ -1188,7 +1185,11 @@ extension _ScPages on _CircuitHomePageState {
               ),
               Text(
                 'Voice notes from Circuit, on your phone.',
-                style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.4),
+                style: TextStyle(
+                  color: context.sc.muted,
+                  fontSize: 12,
+                  height: 1.4,
+                ),
               ),
             ],
           ),
@@ -1248,27 +1249,35 @@ extension _ScPages on _CircuitHomePageState {
     final available = _circuitAvailable;
     final waiting = _notes.where((n) => n.audioPath == null).length;
     return [
-      ScBackRow(label: 'Home', onBack: _goBack, eyebrow: 'Device settings'),
+      // Reached from the Circuit tab there is nowhere to go back to; from a page that sent you here, back goes there.
+      if (_pageHistory.isEmpty)
+        const ScGroupLabel('Device settings')
+      else
+        ScBackRow(
+          label: _pageHistory.last == _AppPage.settings ? 'Settings' : 'Back',
+          onBack: _goBack,
+          eyebrow: 'Device settings',
+        ),
       const ScTitle('Your Circuit.'),
       const SizedBox(height: 10),
       Text(
         available
             ? 'Connected and ready when you are.'
             : 'Connect your device to bring your thoughts here.',
-        style: const TextStyle(color: Sc.muted, fontSize: 15, height: 1.5),
+        style: TextStyle(color: context.sc.muted, fontSize: 15, height: 1.5),
       ),
       const Padding(
         padding: EdgeInsets.symmetric(vertical: 24),
         child: Center(child: ScDeviceMark(size: 112)),
       ),
       ScPanel(
-        color: Sc.circuitCard,
+        color: context.sc.circuitCard,
         child: Row(
           children: [
             Icon(
               available ? LucideIcons.checkCheck : LucideIcons.bluetooth,
               size: 20,
-              color: Sc.circuitMark,
+              color: context.sc.ink,
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -1280,8 +1289,8 @@ extension _ScPages on _CircuitHomePageState {
                     : _needsPairingRepair
                     ? 'Pairing needs repair'
                     : 'Not connected',
-                style: const TextStyle(
-                  color: Sc.circuitMark,
+                style: TextStyle(
+                  color: context.sc.ink,
                   fontSize: 14,
                   fontWeight: FontWeight.w600,
                 ),
@@ -1359,8 +1368,8 @@ extension _ScPages on _CircuitHomePageState {
             ? 'Online'
             : (_needsPairingRepair ? 'Repair needed' : 'Offline'),
         valueColor: available
-            ? Sc.green
-            : (_needsPairingRepair ? Sc.orange : Sc.faint),
+            ? context.sc.green
+            : (_needsPairingRepair ? context.sc.orange : context.sc.muted),
       ),
       ScRow(
         title: 'Notes waiting',
@@ -1368,7 +1377,7 @@ extension _ScPages on _CircuitHomePageState {
         value: (_boardWaiting ?? waiting) == 0
             ? 'All synced'
             : '${_boardWaiting ?? waiting} on Circuit',
-        valueColor: (_boardWaiting ?? 0) > 0 ? Sc.orange : null,
+        valueColor: (_boardWaiting ?? 0) > 0 ? context.sc.orange : null,
       ),
       ScRow(
         title: 'Last sync',
@@ -1381,8 +1390,8 @@ extension _ScPages on _CircuitHomePageState {
             ? 'None yet'
             : _ago(_lastSyncOk!),
         valueColor: _syncError != null
-            ? Sc.danger
-            : (_syncActive ? Sc.orange : null),
+            ? context.sc.danger
+            : (_syncActive ? context.sc.orange : null),
         onTap: _syncError != null ? _retrySync : null,
       ),
       if (_boardReset != null && !{1, 3, 11}.contains(_boardReset))
@@ -1393,7 +1402,7 @@ extension _ScPages on _CircuitHomePageState {
               : 'Reason Circuit last restarted',
           value: _resetReasonText(_boardReset!),
           valueColor: const {4, 5, 6, 7, 9, 15}.contains(_boardReset)
-              ? Sc.danger
+              ? context.sc.danger
               : null,
         ),
       const SizedBox(height: 24),
@@ -1403,9 +1412,9 @@ extension _ScPages on _CircuitHomePageState {
         caption: 'Saved network and setup',
         value: _wifiHeadline(),
         valueColor: _wifiState == 'connected'
-            ? Sc.green
+            ? context.sc.green
             : _wifiState == 'failed'
-            ? Sc.danger
+            ? context.sc.danger
             : null,
         onTap: available ? () => _goTo(_AppPage.wifi) : null,
       ),
@@ -1413,7 +1422,7 @@ extension _ScPages on _CircuitHomePageState {
         title: 'Stay connected',
         caption: 'Keeps Circuit linked in the background',
         value: _relayActive ? 'On' : 'Off',
-        valueColor: _relayActive ? Sc.green : Sc.faint,
+        valueColor: _relayActive ? context.sc.green : context.sc.muted,
       ),
       if (_savedCircuitId != null) ...[
         const SizedBox(height: 24),
@@ -1450,7 +1459,7 @@ extension _ScPages on _CircuitHomePageState {
               ? 'Waiting for the key from Circuit'
               : 'New notes are encrypted on Circuit and stay encrypted here',
           value: _noteKeyId == null ? 'Waiting' : 'On',
-          valueColor: _noteKeyId == null ? Sc.orange : Sc.green,
+          valueColor: _noteKeyId == null ? context.sc.orange : context.sc.green,
         ),
       ],
       const SizedBox(height: 22),
@@ -1462,7 +1471,7 @@ extension _ScPages on _CircuitHomePageState {
               iconSize: 11,
               label: 'Record',
               tooltip: 'Record a voice note on Circuit',
-              color: Sc.accent,
+              color: context.sc.accent,
               onTap:
                   !available ||
                       _audioBusy ||
@@ -1480,7 +1489,7 @@ extension _ScPages on _CircuitHomePageState {
               label: 'Identify song',
               tooltip:
                   'Listen for $_songClipSeconds seconds and identify the song',
-              color: Sc.dark,
+              color: context.sc.dark,
               onTap:
                   !available ||
                       _audioBusy ||
@@ -1578,14 +1587,14 @@ extension _ScPages on _CircuitHomePageState {
           liveRegion: true,
           child: Text(
             _circuitPlaybackFeedback!,
-            style: const TextStyle(fontSize: 14, color: Sc.ink, height: 1.5),
+            style: TextStyle(fontSize: 14, color: context.sc.ink, height: 1.5),
           ),
         ),
       ],
       const SizedBox(height: 8),
       Text(
         _status,
-        style: const TextStyle(fontSize: 11, color: Sc.faint, height: 1.4),
+        style: TextStyle(fontSize: 11, color: context.sc.muted, height: 1.4),
       ),
     ];
   }
@@ -1605,7 +1614,7 @@ extension _ScPages on _CircuitHomePageState {
     ) = switch (_wifiState) {
       'connected' => (
         LucideIcons.wifi,
-        Sc.green,
+        context.sc.green,
         'Connected to $_wifiSsid',
         _wifiDetail.isEmpty
             ? 'Circuit is online.'
@@ -1613,7 +1622,7 @@ extension _ScPages on _CircuitHomePageState {
       ),
       'connecting' => (
         LucideIcons.wifi,
-        Sc.accent,
+        context.sc.accent,
         'Connecting to $_wifiSsid…',
         slow
             ? 'Taking longer than usual. Circuit keeps retrying; check the password and that the router is in range.'
@@ -1621,7 +1630,7 @@ extension _ScPages on _CircuitHomePageState {
       ),
       'failed' => (
         LucideIcons.wifiOff,
-        Sc.danger,
+        context.sc.danger,
         _wifiSsid.isEmpty
             ? 'Wi‑Fi setup failed'
             : "Couldn't connect to $_wifiSsid",
@@ -1631,7 +1640,7 @@ extension _ScPages on _CircuitHomePageState {
       ),
       _ => (
         LucideIcons.wifiOff,
-        Sc.faint,
+        context.sc.muted,
         'Circuit is not on Wi‑Fi',
         'Set up Wi‑Fi so notes sync quickly. Without it only a button-hold sync over Bluetooth works, and it is slow.',
       ),
@@ -1639,7 +1648,7 @@ extension _ScPages on _CircuitHomePageState {
     return Container(
       padding: const EdgeInsets.all(15),
       decoration: BoxDecoration(
-        color: Sc.warmCard,
+        color: context.sc.warmCard,
         borderRadius: BorderRadius.circular(14),
       ),
       child: Row(
@@ -1670,9 +1679,9 @@ extension _ScPages on _CircuitHomePageState {
                 const SizedBox(height: 4),
                 Text(
                   subtitle,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 11.5,
-                    color: Sc.muted,
+                    color: context.sc.muted,
                     height: 1.4,
                   ),
                 ),
@@ -1709,9 +1718,9 @@ extension _ScPages on _CircuitHomePageState {
       ScBackRow(label: 'Circuit', onBack: _goBack, eyebrow: 'Wi‑Fi setup'),
       const ScTitle('Connect Circuit'),
       const SizedBox(height: 8),
-      const Text(
+      Text(
         'Choose a nearby network and enter its password. Circuit will prefer Wi‑Fi when it is available.',
-        style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.4),
+        style: TextStyle(color: context.sc.muted, fontSize: 12, height: 1.4),
       ),
       const SizedBox(height: 20),
       _wifiStatusCard(),
@@ -1749,16 +1758,16 @@ extension _ScPages on _CircuitHomePageState {
             _scanningWifi
                 ? 'Looking for networks…'
                 : 'No networks yet. Tap Scan again, or add a hidden network.',
-            style: const TextStyle(color: Sc.faint, fontSize: 12),
+            style: TextStyle(color: context.sc.muted, fontSize: 12),
           ),
         ),
       for (final ssid in _wifiNetworks) ...[
         Material(
-          color: Colors.white,
+          color: context.sc.surface,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(15),
             side: BorderSide(
-              color: ssid == selected ? Sc.accent : Sc.line,
+              color: ssid == selected ? context.sc.accent : context.sc.line,
               width: ssid == selected ? 1.6 : 1,
             ),
           ),
@@ -1772,28 +1781,24 @@ extension _ScPages on _CircuitHomePageState {
                   Expanded(
                     child: Text(
                       ssid,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
-                        color: Color(0xff332d28),
+                        color: context.sc.ink,
                       ),
                     ),
                   ),
                   if (_wifiState == 'connected' && ssid == _wifiSsid)
-                    const Text(
+                    Text(
                       'Connected',
                       style: TextStyle(
                         fontSize: 11,
-                        color: Sc.green,
+                        color: context.sc.green,
                         fontWeight: FontWeight.w600,
                       ),
                     )
                   else
-                    const Icon(
-                      LucideIcons.wifi,
-                      size: 18,
-                      color: Color(0xff6e5e50),
-                    ),
+                    Icon(LucideIcons.wifi, size: 18, color: context.sc.muted),
                 ],
               ),
             ),
@@ -1833,9 +1838,9 @@ extension _ScPages on _CircuitHomePageState {
     ScBackRow(label: 'Wi‑Fi', onBack: _goBack, eyebrow: 'Hidden network'),
     const ScTitle('Add hidden Wi‑Fi'),
     const SizedBox(height: 8),
-    const Text(
+    Text(
       'Enter the network name exactly as configured on your router.',
-      style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.4),
+      style: TextStyle(color: context.sc.muted, fontSize: 12, height: 1.4),
     ),
     const SizedBox(height: 22),
     const ScGroupLabel('Network name (SSID)'),
@@ -1901,7 +1906,7 @@ extension _ScPages on _CircuitHomePageState {
         isScrollControlled: true,
         useSafeArea: true,
         showDragHandle: true,
-        backgroundColor: Sc.bg,
+        backgroundColor: context.sc.bg,
         builder: (_) =>
             RecordingSheet(read: _recordingSnapshot, onStop: _stopRecording),
       );
@@ -1919,8 +1924,8 @@ extension _ScPages on _CircuitHomePageState {
       final elapsed = (recording?['elapsedMs'] as num?)?.toInt() ?? 0;
       return FilledButton.icon(
         style: FilledButton.styleFrom(
-          backgroundColor: active ? Sc.dark : Sc.accent,
-          foregroundColor: active ? Colors.white : Sc.ink,
+          backgroundColor: active ? context.sc.dark : context.sc.accent,
+          foregroundColor: active ? Colors.white : context.sc.ink,
           minimumSize: const Size.fromHeight(52),
         ),
         onPressed: active ? _startPhoneRecording : _showCaptureOptions,
@@ -2076,7 +2081,7 @@ class CircuitChip extends StatelessWidget {
           key: chipKey,
           padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
           decoration: BoxDecoration(
-            color: Sc.chip,
+            color: context.sc.chip,
             borderRadius: BorderRadius.circular(14),
           ),
           child: Row(

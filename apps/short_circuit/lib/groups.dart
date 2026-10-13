@@ -334,9 +334,9 @@ extension _ScGroupUi on _CircuitHomePageState {
     height: 26,
     decoration: BoxDecoration(
       shape: BoxShape.circle,
-      color: on ? Sc.accent : Colors.transparent,
+      color: on ? context.sc.accent : Colors.transparent,
       border: Border.all(
-        color: on ? Sc.accent : const Color(0xffc9c0b7),
+        color: on ? context.sc.accent : context.sc.line,
         width: 1.6,
       ),
     ),
@@ -499,7 +499,7 @@ extension _ScGroupUi on _CircuitHomePageState {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ScGroupLabel('Groups (${all.length - 1})'),
+        ScGroupLabel(all.length > 1 ? 'Groups (${all.length - 1})' : 'Groups'),
         Wrap(
           spacing: ScSpace.sm,
           runSpacing: ScSpace.sm,
@@ -537,7 +537,7 @@ extension _ScGroupUi on _CircuitHomePageState {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      backgroundColor: Sc.bg,
+      backgroundColor: context.sc.bg,
       builder: (sheetContext) => _GroupSheet(
         count: picked.length,
         suggestedName: 'Notes · ${d.day} ${_monthNames[d.month - 1]}',
@@ -569,7 +569,7 @@ extension _ScGroupUi on _CircuitHomePageState {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      backgroundColor: Sc.bg,
+      backgroundColor: context.sc.bg,
       builder: (sheetContext) => StatefulBuilder(
         builder: (context, setSheet) => SizedBox(
           height: MediaQuery.sizeOf(context).height * .7,
@@ -607,10 +607,10 @@ extension _ScGroupUi on _CircuitHomePageState {
               ),
               Expanded(
                 child: candidates.isEmpty
-                    ? const Center(
+                    ? Center(
                         child: Text(
                           'Every note is already in this group.',
-                          style: TextStyle(color: Sc.muted),
+                          style: TextStyle(color: context.sc.muted),
                         ),
                       )
                     : ListView(
@@ -764,7 +764,7 @@ extension _ScGroupUi on _CircuitHomePageState {
       const SizedBox(height: 6),
       Text(
         '${ctx.total} note${ctx.total == 1 ? '' : 's'} · ${ctx.transcribed} transcribed',
-        style: const TextStyle(color: Sc.muted, fontSize: 12),
+        style: TextStyle(color: context.sc.muted, fontSize: 12),
       ),
       const SizedBox(height: 16),
       FilledButton.icon(
@@ -780,13 +780,16 @@ extension _ScGroupUi on _CircuitHomePageState {
       ),
       if (!canChat) ...[
         const SizedBox(height: 8),
-        const Text(
+        Text(
           'None of these notes are transcribed yet. Transcribe a note first, then you can chat with it here.',
-          style: TextStyle(color: Sc.orange, fontSize: 12, height: 1.4),
+          style: TextStyle(color: context.sc.orange, fontSize: 12, height: 1.4),
         ),
       ] else if (ctx.notTranscribed > 0 || ctx.leftOut > 0) ...[
         const SizedBox(height: 8),
-        Text(ctx.banner, style: const TextStyle(color: Sc.muted, fontSize: 12)),
+        Text(
+          ctx.banner,
+          style: TextStyle(color: context.sc.muted, fontSize: 12),
+        ),
       ],
       if (!isAll) ...[
         const SizedBox(height: 12),
@@ -816,13 +819,13 @@ extension _ScGroupUi on _CircuitHomePageState {
                 alignment: Alignment.centerRight,
                 padding: const EdgeInsets.symmetric(horizontal: 22),
                 decoration: BoxDecoration(
-                  color: Sc.accentSoft,
+                  color: context.sc.accentSoft,
                   borderRadius: BorderRadius.circular(14),
                 ),
-                child: const Text(
+                child: Text(
                   'Remove from group',
                   style: TextStyle(
-                    color: Sc.accentInk,
+                    color: context.sc.accentInk,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -834,10 +837,10 @@ extension _ScGroupUi on _CircuitHomePageState {
                   IconButton(
                     tooltip: 'Remove from group',
                     onPressed: () => _removeNoteFromGroup(group.id, note.id),
-                    icon: const Icon(
+                    icon: Icon(
                       LucideIcons.minus,
                       size: 18,
-                      color: Sc.muted,
+                      color: context.sc.muted,
                     ),
                   ),
                 ],

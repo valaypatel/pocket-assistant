@@ -24,13 +24,17 @@ class NoteSourceBadge extends StatelessWidget {
       width: size,
       height: size,
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: context.sc.bg,
         shape: BoxShape.circle,
-        border: Border.all(color: Sc.line),
+        border: Border.all(color: context.sc.line),
       ),
       child: Center(
         child: source == 'Phone'
-            ? Icon(LucideIcons.smartphone, size: size * .62, color: Sc.ink)
+            ? Icon(
+                LucideIcons.smartphone,
+                size: size * .62,
+                color: context.sc.ink,
+              )
             : ScDeviceMark(size: size * .74),
       ),
     ),
@@ -83,14 +87,14 @@ class _SourcePill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final foreground = selected ? Colors.white : Sc.ink;
+    final foreground = selected ? context.sc.bg : context.sc.ink;
     return Semantics(
       button: true,
       selected: selected,
       label: '$label, $count ${count == 1 ? 'note' : 'notes'}',
       excludeSemantics: true,
       child: Material(
-        color: selected ? Sc.ink : Sc.surface,
+        color: selected ? context.sc.ink : context.sc.surface,
         borderRadius: BorderRadius.circular(14),
         child: InkWell(
           borderRadius: BorderRadius.circular(14),

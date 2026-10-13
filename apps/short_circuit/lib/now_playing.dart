@@ -158,9 +158,9 @@ class _NowPlayingBarState extends State<NowPlayingBar> {
     );
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 8, 8, 4),
-      decoration: const BoxDecoration(
-        color: Sc.dark,
-        border: Border(top: BorderSide(color: Sc.line)),
+      decoration: BoxDecoration(
+        color: context.sc.dark,
+        border: Border(top: BorderSide(color: context.sc.line)),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -218,9 +218,9 @@ class _NowPlayingBarState extends State<NowPlayingBar> {
               trackHeight: 3,
               thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
               overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
-              activeTrackColor: Sc.accent,
-              thumbColor: Sc.accent,
-              inactiveTrackColor: Sc.line,
+              activeTrackColor: context.sc.accent,
+              thumbColor: context.sc.accent,
+              inactiveTrackColor: context.sc.line,
             ),
             child: Slider(
               value: position,

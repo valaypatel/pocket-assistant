@@ -78,9 +78,13 @@ class _AiServiceSettingsPageState extends State<AiServiceSettingsPage> {
                 ),
                 const ScTitle('AI service'),
                 const SizedBox(height: 8),
-                const Text(
+                Text(
                   'Your AI service turns transcripts into headings, summaries, and suggested actions. It stays in the app; Circuit never receives your key.',
-                  style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.4),
+                  style: TextStyle(
+                    color: context.sc.muted,
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
                 ),
                 const SizedBox(height: 22),
                 const ScGroupLabel('Base URL'),
@@ -237,10 +241,10 @@ class _GeminiSettingsPageState extends State<GeminiSettingsPage> {
                   ),
                   const ScTitle('AI settings'),
                   const SizedBox(height: 8),
-                  const Text(
+                  Text(
                     'Gemini runs from the app. Circuit never receives or stores your API key.',
                     style: TextStyle(
-                      color: Sc.muted,
+                      color: context.sc.muted,
                       fontSize: 12,
                       height: 1.4,
                     ),
@@ -273,9 +277,9 @@ class _GeminiSettingsPageState extends State<GeminiSettingsPage> {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  const Text(
+                  Text(
                     'The default model handles text and audio. Change it only if you need to.',
-                    style: TextStyle(color: Sc.faint, fontSize: 11),
+                    style: TextStyle(color: context.sc.muted, fontSize: 11),
                   ),
                   const SizedBox(height: 24),
                   Row(
@@ -784,8 +788,8 @@ class _TranscriptPageState extends State<TranscriptPage> {
                           child: LinearProgressIndicator(
                             value: percent / 100,
                             minHeight: 5,
-                            color: Sc.accent,
-                            backgroundColor: Sc.line,
+                            color: context.sc.accent,
+                            backgroundColor: context.sc.line,
                           ),
                         ),
                       ],
@@ -793,8 +797,8 @@ class _TranscriptPageState extends State<TranscriptPage> {
                         const SizedBox(height: 8),
                         Text(
                           sync.error!,
-                          style: const TextStyle(
-                            color: Sc.danger,
+                          style: TextStyle(
+                            color: context.sc.danger,
                             fontSize: 12,
                             height: 1.4,
                           ),
@@ -805,9 +809,13 @@ class _TranscriptPageState extends State<TranscriptPage> {
                 },
               ),
               const SizedBox(height: 6),
-              const Text(
+              Text(
                 'Only this note is sent. Hold Circuit\'s button for 2 seconds to send everything.',
-                style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.4),
+                style: TextStyle(
+                  color: context.sc.muted,
+                  fontSize: 12,
+                  height: 1.4,
+                ),
               ),
               const SizedBox(height: 20),
             ],
@@ -836,14 +844,14 @@ class _TranscriptPageState extends State<TranscriptPage> {
                                     (_readingTab == 'Summary' &&
                                         summary?.isNotEmpty != true &&
                                         tab == 'Transcript'))
-                                ? Sc.accentInk
-                                : Sc.muted,
+                                ? context.sc.accentInk
+                                : context.sc.muted,
                             backgroundColor:
                                 (_readingTab == tab ||
                                     (_readingTab == 'Summary' &&
                                         summary?.isNotEmpty != true &&
                                         tab == 'Transcript'))
-                                ? Sc.accentSoft
+                                ? context.sc.accentSoft
                                 : Colors.transparent,
                             minimumSize: const Size(48, 48),
                           ),
@@ -952,10 +960,10 @@ class _TranscriptPageState extends State<TranscriptPage> {
                       caption: suggestion.details.isEmpty
                           ? suggestion.type.replaceAll('_', ' ')
                           : suggestion.details,
-                      trailing: const Icon(
+                      trailing: Icon(
                         LucideIcons.chevronRight,
                         size: 18,
-                        color: Sc.accent,
+                        color: context.sc.accent,
                       ),
                       onTap: () => _approveSuggestion(suggestion),
                     ),
@@ -999,10 +1007,10 @@ class _TranscriptPageState extends State<TranscriptPage> {
               ScRow(
                 title: 'Add to tasks',
                 caption: _title,
-                trailing: const Icon(
+                trailing: Icon(
                   LucideIcons.listPlus,
                   size: 20,
-                  color: Color(0xff6d5e51),
+                  color: context.sc.muted,
                 ),
                 onTap: () async {
                   await widget.onAddTask(_title, null);
@@ -1014,10 +1022,10 @@ class _TranscriptPageState extends State<TranscriptPage> {
                 caption: _extractingReminder
                     ? 'Checking the note…'
                     : 'Find a date and time in this note',
-                trailing: const Icon(
+                trailing: Icon(
                   LucideIcons.calendarPlus,
                   size: 20,
-                  color: Color(0xff6d5e51),
+                  color: context.sc.muted,
                 ),
                 onTap: _extractingReminder ? null : _createReminder,
               ),

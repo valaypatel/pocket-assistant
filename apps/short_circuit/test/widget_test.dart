@@ -86,7 +86,7 @@ void main() {
 
     await tester.tap(find.text('Tasks'));
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('Nothing to do right now.'), findsOneWidget);
+    expect(find.textContaining('Nothing to do right now.'), findsOneWidget);
 
     await tester.tap(find.text('Settings'));
     await tester.pump(const Duration(milliseconds: 300));

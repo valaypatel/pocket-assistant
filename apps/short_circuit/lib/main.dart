@@ -1039,10 +1039,9 @@ class ShortCircuitApp extends StatelessWidget {
     return MaterialApp(
       title: 'Short-Circuit',
       theme: buildScTheme(),
-      // Dark mode is defined (tokens.dart) but not switched on yet: it goes on, following the phone's
-      // setting, once the screens read their colours from context.sc (redesign step 3).
+      // Follows the phone's light/dark setting. Screens read their colours from context.sc (tokens.dart).
       darkTheme: buildScDarkTheme(),
-      themeMode: ThemeMode.light,
+      themeMode: ThemeMode.system,
       navigatorObservers: [statusRouteObserver],
       builder: (context, child) =>
           StatusOverlay(child: child ?? const SizedBox.shrink()),

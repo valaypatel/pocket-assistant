@@ -181,7 +181,7 @@ class StatusPillBar extends StatelessWidget {
       hint: semanticHint,
       onTap: onTap,
       child: Material(
-        color: Sc.dark,
+        color: context.sc.dark,
         borderRadius: BorderRadius.circular(28),
         clipBehavior: Clip.antiAlias,
         elevation: 4,
@@ -197,7 +197,7 @@ class StatusPillBar extends StatelessWidget {
                     Icon(
                       icon,
                       size: 20,
-                      color: warning ? Sc.orange : Colors.white,
+                      color: warning ? context.sc.orange : Colors.white,
                     ),
                     const SizedBox(width: 12),
                     Expanded(
@@ -234,7 +234,7 @@ class StatusPillBar extends StatelessWidget {
                     if (actionLabel != null)
                       TextButton(
                         style: TextButton.styleFrom(
-                          foregroundColor: Sc.accent,
+                          foregroundColor: context.sc.accent,
                           minimumSize: const Size(48, 48),
                         ),
                         onPressed: onAction,
@@ -247,7 +247,7 @@ class StatusPillBar extends StatelessWidget {
                 LinearProgressIndicator(
                   value: progress!.clamp(0, 100) / 100,
                   minHeight: 3,
-                  color: Sc.accent,
+                  color: context.sc.accent,
                   backgroundColor: const Color(0xff2d3036),
                 ),
             ],
@@ -280,7 +280,7 @@ class StatusSnackBar extends StatelessWidget {
       liveRegion: true,
       label: text,
       child: Material(
-        color: Sc.dark,
+        color: context.sc.dark,
         elevation: 6,
         borderRadius: BorderRadius.circular(16),
         clipBehavior: Clip.antiAlias,
@@ -303,7 +303,7 @@ class StatusSnackBar extends StatelessWidget {
               if (actionLabel != null)
                 TextButton(
                   style: TextButton.styleFrom(
-                    foregroundColor: Sc.accent,
+                    foregroundColor: context.sc.accent,
                     minimumSize: const Size(48, 48),
                   ),
                   onPressed: onAction,
