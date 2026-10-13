@@ -244,7 +244,7 @@ class GeminiClient {
                 'parts': [
                   {
                     'text':
-                        'Transcribe this voice note exactly. Preserve Gujarati script, English, and mixed Gujarati-English. Return the complete transcription only. Do not summarise, classify, translate, or add a title.'
+                        'Transcribe this voice note exactly, in the language or languages actually spoken. Write Hindi in Devanagari script, Gujarati in Gujarati script, English in English, and mixed speech as it is spoken, switching script with the language. Never translate it, and never write Hindi or Gujarati in Roman letters: for example, Hindi speech that sounds like "mujhe yeh kaam kal karna hai" must be written "मुझे यह काम कल करना है", while English words spoken inside Hindi speech stay in English letters. Return the complete transcription only. Do not summarise, classify, translate, or add a title.'
                         '${detectMusic ? ' Exception: if the recording is mainly music or a song playing, with no one speaking to record a note, reply with exactly [[MUSIC]] and nothing else.' : ''}'
                         ' If two or more different people clearly speak, start each change of speaker on a new line labelled "Speaker 1:", "Speaker 2:" and so on, using the same label for the same voice throughout. If only one person speaks, add no label.'
                         ' If the recording sounds like a phone call (a conversation heard through a phone, with telephone-quality audio, ringing, or a call being answered or ended), begin your reply with [[CALL]] followed by the transcription.'
