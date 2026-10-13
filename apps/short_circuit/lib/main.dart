@@ -35,6 +35,7 @@ part 'secure_notes.dart';
 part 'ui/backup_page.dart';
 part 'ui/chat_page.dart';
 part 'ui/detail_pages.dart';
+part 'ui/onboarding.dart';
 part 'ui/pages.dart';
 part 'ui/recording_view.dart';
 part 'ui/song_page.dart';
@@ -994,7 +995,6 @@ const _boardDeletesKey = 'pending_board_deletes';
 const _autoTranscribeKey = 'auto_transcribe';
 const _autoEnrichKey = 'auto_enrich';
 const _useMomentsKey = 'use_moments';
-const _displayNameKey = 'display_name';
 
 class CircuitTask {
   const CircuitTask({
@@ -1120,7 +1120,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _songArmedAt = armed ? DateTime.now() : null;
 
   final Set<String> _identifyingSongs = {};
-  String _displayName = '';
+  bool _showOnboarding = false; // first run: the welcome screens
+  bool _developerOpen =
+      false; // the Developer rows in Settings are folded away until asked for
   DateTime? _recordingStartedAt;
   Timer? _clockTicker;
   // Automatic retry of AI review: how often each note was tried, and when.
@@ -3222,8 +3224,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _autoTranscribe = preferences.getBool(_autoTranscribeKey) ?? true;
       _autoEnrich = preferences.getBool(_autoEnrichKey) ?? true;
       _useMoments = preferences.getBool(_useMomentsKey) ?? true;
+      // A new install has no saved notes yet; anyone who already uses the app never sees the welcome.
+      _showOnboarding =
+          Onboarding.enabled &&
+          !(preferences.getBool(Onboarding.doneKey) ?? false) &&
+          !preferences.containsKey(_notesKey);
       _shareDiagnostics = preferences.getBool(Telemetry.preferenceKey) ?? true;
-      _displayName = preferences.getString(_displayNameKey) ?? _displayName;
     });
   }
 
@@ -3318,6 +3324,14 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     await preferences.setBool(_autoEnrichKey, value);
   }
 
+  /// Ends the welcome screens for good, and optionally lands on a tab (2 = Circuit, 3 = Settings).
+  Future<void> _finishOnboarding({int? tab}) async {
+    setState(() => _showOnboarding = false);
+    if (tab != null) _selectTab(tab);
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setBool(Onboarding.doneKey, true);
+  }
+
   Future<void> _setUseMoments(bool value) async {
     setState(() => _useMoments = value);
     final preferences = await SharedPreferences.getInstance();
@@ -3328,12 +3342,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     setState(() => _autoTranscribe = value);
     final preferences = await SharedPreferences.getInstance();
     await preferences.setBool(_autoTranscribeKey, value);
-  }
-
-  Future<void> _saveDisplayName(String name) async {
-    setState(() => _displayName = name);
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(_displayNameKey, name);
   }
 
   void _setStatus(String status) {

@@ -987,83 +987,19 @@ extension _ScPages on _CircuitHomePageState {
 
   // ---- settings tab --------------------------------------------------------
 
-  Future<void> _promptName() async {
-    final controller = TextEditingController(text: _displayName);
-    final name = await showDialog<String>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Your name'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          textCapitalization: TextCapitalization.words,
-          decoration: const InputDecoration(
-            hintText: 'Shown in the Home greeting',
-          ),
-        ),
-        actions: scDialogActions(
-          dialogContext,
-          confirmIcon: LucideIcons.check,
-          confirmTooltip: 'Save name',
-          onConfirm: () => Navigator.pop(dialogContext, controller.text),
-        ),
-      ),
-    );
-    controller.dispose();
-    if (name != null) await _saveDisplayName(name.trim());
-  }
-
   List<Widget> _settingsPage() => [
-    const ScEyebrow('Your space'),
-    const SizedBox(height: 4),
-    const ScTitle('Settings'),
-    const SizedBox(height: 8),
-    Text(
-      'Make Short-Circuit work your way.',
-      style: TextStyle(color: context.sc.muted, fontSize: 12, height: 1.45),
+    const SizedBox(height: ScSpace.sm),
+    Semantics(header: true, child: Text('Settings', style: ScType.display)),
+    const SizedBox(height: ScSpace.xl),
+    ScTile(
+      icon: LucideIcons.cpu,
+      title: 'Circuit',
+      subtitle: _circuitAvailable ? 'Connected' : 'Not connected',
+      trailing: const Icon(LucideIcons.chevronRight, size: 18),
+      onTap: () => _selectTab(2),
     ),
-    const SizedBox(height: 22),
-    const ScGroupLabel('Device'),
-    Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: context.sc.circuitCard,
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: InkWell(
-        onTap: () => _goTo(_AppPage.circuit),
-        child: Row(
-          children: [
-            const ScDeviceMark(size: 43),
-            const SizedBox(width: 13),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Circuit',
-                    style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: -.4,
-                    ),
-                  ),
-                  Text(
-                    _circuitAvailable
-                        ? 'Connected via Short-Circuit'
-                        : 'Not connected',
-                    style: TextStyle(fontSize: 11, color: context.sc.muted),
-                  ),
-                ],
-              ),
-            ),
-            Icon(LucideIcons.chevronRight, size: 18, color: context.sc.muted),
-          ],
-        ),
-      ),
-    ),
-    const SizedBox(height: 24),
-    const ScGroupLabel('Your providers'),
+    const SizedBox(height: ScSpace.xl),
+    const ScGroupLabel('AI and notes'),
     ScTile(
       icon: LucideIcons.languages,
       title: 'Google Gemini',
@@ -1103,8 +1039,6 @@ extension _ScPages on _CircuitHomePageState {
       trailing: const Icon(LucideIcons.chevronRight, size: 18),
       onTap: _openMusicSettings,
     ),
-    const SizedBox(height: 24),
-    const ScGroupLabel('What AI can do'),
     ScRow(
       title: 'Transcribe new notes',
       caption: 'Start automatically after a note syncs',
@@ -1122,7 +1056,7 @@ extension _ScPages on _CircuitHomePageState {
       caption: 'Mark the bookmarks you tapped on Circuit in the transcript, and give them extra weight in the review',
       trailing: Switch(value: _useMoments, onChanged: _setUseMoments),
     ),
-    const SizedBox(height: 24),
+    const SizedBox(height: ScSpace.xl),
     const ScGroupLabel('Backup'),
     ScRow(
       title: 'Back up and restore',
@@ -1139,8 +1073,8 @@ extension _ScPages on _CircuitHomePageState {
       ),
     ),
     if (Telemetry.available) ...[
-      const SizedBox(height: 24),
-      const ScGroupLabel('Diagnostics'),
+      const SizedBox(height: ScSpace.xl),
+      const ScGroupLabel('Privacy'),
       ScRow(
         title: 'Share crash reports and usage',
         caption: 'Counts and errors only. Never your notes or what they say',
@@ -1149,54 +1083,51 @@ extension _ScPages on _CircuitHomePageState {
           onChanged: _setShareDiagnostics,
         ),
       ),
-      ScRow(
-        title: 'Send a test report',
-        caption: 'Check that reports reach Firebase',
-        onTap: _sendTestReport,
-      ),
     ],
-    const SizedBox(height: 24),
-    const ScGroupLabel('Testing'),
+    const SizedBox(height: ScSpace.xl),
     ScRow(
-      title: 'Test mode',
-      caption: 'Lets a computer start syncs, playback and recordings over USB or Wi-Fi debugging',
-      trailing: Switch(value: _testMode, onChanged: _setTestMode),
+      title: 'Developer',
+      caption: 'Test mode and diagnostics, for testing the app',
+      trailing: Icon(
+        _developerOpen ? LucideIcons.chevronUp : LucideIcons.chevronDown,
+        size: 18,
+        color: context.sc.muted,
+      ),
+      onTap: () => _update(() => _developerOpen = !_developerOpen),
     ),
-    const SizedBox(height: 24),
-    const ScGroupLabel('You'),
-    ScRow(
-      title: 'Your name',
-      caption: 'Shown in the Home greeting',
-      value: _displayName.isEmpty ? 'Not set' : _displayName,
-      onTap: _promptName,
-    ),
-    const SizedBox(height: 32),
+    if (_developerOpen) ...[
+      ScRow(
+        title: 'Test mode',
+        caption: 'Lets a computer start syncs, playback and recordings over USB or Wi-Fi debugging',
+        trailing: Switch(value: _testMode, onChanged: _setTestMode),
+      ),
+      if (Telemetry.available)
+        ScRow(
+          title: 'Send a test report',
+          caption: 'Check that reports reach Firebase',
+          onTap: _sendTestReport,
+        ),
+    ],
+    const SizedBox(height: ScSpace.xxl),
     Row(
       children: [
-        ScBrandMark(size: 40),
-        SizedBox(width: 12),
+        const ScBrandMark(size: 40),
+        const SizedBox(width: ScSpace.md),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'Short-Circuit',
-                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-              ),
+              Text('Short-Circuit', style: ScType.label),
               Text(
                 'Voice notes from Circuit, on your phone.',
-                style: TextStyle(
-                  color: context.sc.muted,
-                  fontSize: 12,
-                  height: 1.4,
-                ),
+                style: ScType.caption.copyWith(color: context.sc.muted),
               ),
             ],
           ),
         ),
       ],
     ),
-    const SizedBox(height: 12),
+    const SizedBox(height: ScSpace.md),
   ];
 
   // ---- Circuit device page -------------------------------------------------
@@ -1978,6 +1909,13 @@ extension _ScPages on _CircuitHomePageState {
       _AppPage.circuit || _AppPage.wifi || _AppPage.hiddenWifi => 2,
       _AppPage.settings => 3,
     };
+    if (_showOnboarding) {
+      return OnboardingPage(
+        onFinish: _finishOnboarding,
+        onOpenCircuit: () => _finishOnboarding(tab: 2),
+        onOpenAi: () => _finishOnboarding(tab: 3),
+      );
+    }
     return PopScope(
       canPop: _page == _AppPage.notes,
       onPopInvokedWithResult: (didPop, _) {

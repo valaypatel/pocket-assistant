@@ -902,7 +902,7 @@ class ScRow extends StatelessWidget {
   Widget build(BuildContext context) => InkWell(
     onTap: onTap,
     child: Container(
-      padding: const EdgeInsets.symmetric(vertical: 18),
+      padding: const EdgeInsets.symmetric(vertical: ScSpace.lg),
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: context.sc.line)),
       ),
@@ -914,13 +914,16 @@ class ScRow extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: TextStyle(fontSize: 14, color: context.sc.ink),
+                  style: ScType.body.copyWith(
+                    fontWeight: FontWeight.w500,
+                    color: context.sc.ink,
+                  ),
                 ),
                 if (caption != null) ...[
-                  const SizedBox(height: 3),
+                  const SizedBox(height: ScSpace.xs / 2),
                   Text(
                     caption!,
-                    style: TextStyle(fontSize: 12, color: context.sc.muted),
+                    style: ScType.caption.copyWith(color: context.sc.muted),
                   ),
                 ],
               ],
@@ -932,8 +935,7 @@ class ScRow extends StatelessWidget {
               child: Text(
                 value!,
                 textAlign: TextAlign.end,
-                style: TextStyle(
-                  fontSize: 12,
+                style: ScType.caption.copyWith(
                   fontWeight: FontWeight.w600,
                   color: valueColor ?? context.sc.muted,
                 ),
