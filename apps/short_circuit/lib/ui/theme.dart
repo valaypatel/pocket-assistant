@@ -102,6 +102,14 @@ ThemeData _buildTheme(ScPalette p, Brightness brightness) {
         ),
       ),
     ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(
+        foregroundColor:
+            p.accentInk, // the bright accent is under 4.5:1 as text
+        textStyle: ScType.label.copyWith(fontFamily: 'Roboto'),
+        minimumSize: const Size(48, 48),
+      ),
+    ),
     switchTheme: SwitchThemeData(
       thumbColor: WidgetStateProperty.all(Colors.white),
       trackColor: WidgetStateProperty.resolveWith(
@@ -122,8 +130,8 @@ const _scTitle = TextStyle(
 );
 
 /// The Circuit device icon (assets/brand/circuit-device.svg): the board with a waveform on its
-/// screen and a recording dot. Drawn from the app's own device colours (Sc.circuitMark,
-/// Sc.circuitMarkInk, Sc.accent), and used wherever the device is named. Decorative.
+/// screen and a recording dot. Drawn from the app's own device colours (context.sc.circuitMark,
+/// context.sc.circuitMarkInk, context.sc.accent), and used wherever the device is named. Decorative.
 class ScDeviceMark extends StatelessWidget {
   const ScDeviceMark({super.key, this.size = 43});
   final double size;
@@ -251,8 +259,8 @@ class ScEyebrow extends StatelessWidget {
     text.toUpperCase(),
     maxLines: 1,
     overflow: TextOverflow.ellipsis,
-    style: const TextStyle(
-      color: Sc.muted,
+    style: TextStyle(
+      color: context.sc.muted,
       fontSize: 12,
       fontWeight: FontWeight.w600,
       letterSpacing: 1,
@@ -295,7 +303,7 @@ class ScSectionRow extends StatelessWidget {
             child: TextButton(
               onPressed: onAction,
               style: TextButton.styleFrom(
-                foregroundColor: Sc.accentInk,
+                foregroundColor: context.sc.accentInk,
                 minimumSize: const Size(48, 48),
               ),
               child: Text(action!, textAlign: TextAlign.end),
@@ -316,8 +324,8 @@ class ScGroupLabel extends StatelessWidget {
     padding: const EdgeInsets.only(bottom: 8),
     child: Text(
       text.toUpperCase(),
-      style: const TextStyle(
-        color: Color(0xff77716c),
+      style: TextStyle(
+        color: context.sc.muted,
         fontSize: 11,
         fontWeight: FontWeight.w600,
         letterSpacing: .9,
@@ -349,7 +357,7 @@ class ScBackRow extends StatelessWidget {
           icon: const Icon(LucideIcons.arrowLeft, size: 18),
           label: Text(label),
           style: TextButton.styleFrom(
-            foregroundColor: Sc.neutralInk,
+            foregroundColor: context.sc.neutralInk,
             padding: const EdgeInsets.only(right: 12),
             minimumSize: const Size(48, 48),
           ),
@@ -400,10 +408,10 @@ class ScIconButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final enabled = onPressed != null && !busy;
     final (bg, fg) = switch (tone) {
-      ScTone.primary => (Sc.accent, Sc.ink),
-      ScTone.danger => (Sc.dangerSoft, Sc.danger),
-      ScTone.dark => (Sc.dark, Colors.white),
-      ScTone.neutral => (Sc.neutralButton, Sc.neutralInk),
+      ScTone.primary => (context.sc.accent, context.sc.ink),
+      ScTone.danger => (context.sc.dangerSoft, context.sc.danger),
+      ScTone.dark => (context.sc.ink, context.sc.bg),
+      ScTone.neutral => (context.sc.neutralButton, context.sc.neutralInk),
     };
     final targetSize = size < 48 ? 48.0 : size;
     final button = Tooltip(
@@ -414,7 +422,7 @@ class ScIconButton extends StatelessWidget {
         label: tooltip,
         excludeSemantics: true,
         child: Material(
-          color: enabled ? bg : Sc.neutralButton,
+          color: enabled ? bg : context.sc.neutralButton,
           borderRadius: BorderRadius.circular(size * .3),
           child: InkWell(
             borderRadius: BorderRadius.circular(size * .3),
@@ -429,7 +437,7 @@ class ScIconButton extends StatelessWidget {
                         height: 18,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          color: enabled ? fg : Sc.muted,
+                          color: enabled ? fg : context.sc.muted,
                         ),
                       )
                     : expand
@@ -441,7 +449,7 @@ class ScIconButton extends StatelessWidget {
                             Icon(
                               icon,
                               size: 18,
-                              color: enabled ? fg : Sc.muted,
+                              color: enabled ? fg : context.sc.muted,
                             ),
                             const SizedBox(width: 10),
                             Flexible(
@@ -451,14 +459,18 @@ class ScIconButton extends StatelessWidget {
                                 style: TextStyle(
                                   fontSize: 14,
                                   fontWeight: FontWeight.w600,
-                                  color: enabled ? fg : Sc.muted,
+                                  color: enabled ? fg : context.sc.muted,
                                 ),
                               ),
                             ),
                           ],
                         ),
                       )
-                    : Icon(icon, size: 20, color: enabled ? fg : Sc.muted),
+                    : Icon(
+                        icon,
+                        size: 20,
+                        color: enabled ? fg : context.sc.muted,
+                      ),
               ),
             ),
           ),
@@ -474,10 +486,10 @@ class ScIconButton extends StatelessWidget {
         ExcludeSemantics(
           child: Text(
             caption!,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w600,
-              color: Sc.faint,
+              color: context.sc.muted,
             ),
           ),
         ),
@@ -503,8 +515,13 @@ List<Widget> scDialogActions(
     message: confirmTooltip,
     child: FilledButton.icon(
       style: FilledButton.styleFrom(
-        backgroundColor: danger ? Sc.danger : Sc.dark,
-        foregroundColor: Colors.white,
+        backgroundColor: danger ? context.sc.danger : context.sc.ink,
+        foregroundColor: danger
+            ? (ThemeData.estimateBrightnessForColor(context.sc.danger) ==
+                      Brightness.dark
+                  ? Colors.white
+                  : context.sc.bg)
+            : context.sc.bg,
         minimumSize: const Size(48, 48),
       ),
       onPressed: onConfirm,
@@ -550,7 +567,12 @@ class ScTile extends StatelessWidget {
     super.key,
     required this.icon,
     required this.title,
-    required this.subtitle,
+    this.subtitle = '',
+    this.meta = const [],
+    this.status,
+    this.statusIcon,
+    this.statusColor,
+    this.statusTrailing = const [],
     this.trailing,
     this.onTap,
     this.footer,
@@ -559,7 +581,20 @@ class ScTile extends StatelessWidget {
   });
   final IconData icon;
   final String title;
+
+  /// One line of detail, for tiles that are not notes. A note passes [meta] and [status] instead.
   final String subtitle;
+
+  /// Short facts shown under the title, joined with " · " (when it was made, how long, where from).
+  final List<String> meta;
+
+  /// Where the item stands ("Transcription ready", "Sync failed"), on its own line under [meta].
+  final String? status;
+  final IconData? statusIcon;
+  final Color? statusColor;
+
+  /// Small icons at the end of the status line (for a note: transcribed, AI reviewed).
+  final List<Widget> statusTrailing;
 
   /// A small marker for the corner of the icon, such as where a note was recorded.
   final Widget? badge;
@@ -569,71 +604,382 @@ class ScTile extends StatelessWidget {
   final Color? subtitleColor;
 
   @override
-  Widget build(BuildContext context) => Material(
-    color: Sc.bg,
-    shape: const Border(bottom: BorderSide(color: Sc.line)),
-    child: InkWell(
-      borderRadius: BorderRadius.circular(18),
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 2),
+  Widget build(BuildContext context) {
+    final p = context.sc;
+    final detail = meta.isNotEmpty ? meta.join(' · ') : subtitle;
+    final detailColor = subtitleColor ?? p.muted;
+    return Material(
+      color: p.bg,
+      shape: Border(bottom: BorderSide(color: p.line)),
+      child: InkWell(
+        borderRadius: ScRadius.cardBorder,
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: ScSpace.lg),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: p.surface,
+                          borderRadius: ScRadius.inputBorder,
+                        ),
+                        child: Icon(icon, size: 22, color: p.accentInk),
+                      ),
+                      if (badge != null)
+                        Positioned(right: -6, bottom: -6, child: badge!),
+                    ],
+                  ),
+                  const SizedBox(width: ScSpace.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: ScType.body.copyWith(
+                            fontWeight: FontWeight.w600,
+                            height: 22 / 16,
+                          ),
+                        ),
+                        if (detail.isNotEmpty) ...[
+                          const SizedBox(height: ScSpace.xs / 2),
+                          Text(
+                            detail,
+                            style: ScType.caption.copyWith(
+                              color: detailColor,
+                              height: 1.4,
+                            ),
+                          ),
+                        ],
+                        if ((status != null && status!.isNotEmpty) ||
+                            statusTrailing.isNotEmpty) ...[
+                          const SizedBox(height: ScSpace.xs),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: status == null || status!.isEmpty
+                                    ? const SizedBox.shrink()
+                                    : Row(
+                                        children: [
+                                          if (statusIcon != null) ...[
+                                            Icon(
+                                              statusIcon,
+                                              size: 14,
+                                              color: statusColor ?? p.muted,
+                                            ),
+                                            const SizedBox(width: ScSpace.xs),
+                                          ],
+                                          Flexible(
+                                            child: Text(
+                                              status!,
+                                              style: ScType.caption.copyWith(
+                                                color: statusColor ?? p.muted,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                              ),
+                              ...statusTrailing,
+                            ],
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  if (trailing != null) ...[
+                    const SizedBox(width: ScSpace.sm),
+                    trailing!,
+                  ],
+                ],
+              ),
+              if (footer != null) ...[
+                const SizedBox(height: ScSpace.sm),
+                // In line with the title and text, not under the icon.
+                Padding(
+                  padding: const EdgeInsets.only(left: 44 + ScSpace.md),
+                  child: footer!,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A small labelled action under a list row ("Transcribe", "Sync now"). The label says what it does, so
+/// nothing is a bare icon, and it sits in line with the row's text.
+class ScActionChip extends StatelessWidget {
+  const ScActionChip({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+    this.busy = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onPressed;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.sc;
+    final enabled = onPressed != null && !busy;
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        button: true,
+        enabled: enabled,
+        label: label,
+        excludeSemantics: true,
+        child: Material(
+          color: p.neutralButton,
+          shape: const StadiumBorder(),
+          child: InkWell(
+            customBorder: const StadiumBorder(),
+            onTap: enabled ? onPressed : null,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 40),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: ScSpace.md + 2),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (busy)
+                      SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: p.neutralInk,
+                        ),
+                      )
+                    else
+                      Icon(icon, size: 16, color: p.neutralInk),
+                    const SizedBox(width: ScSpace.sm),
+                    Text(
+                      label,
+                      style: ScType.caption.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: enabled ? p.neutralInk : p.muted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum ScStepState { done, todo, busy, failed, disabled }
+
+/// A small round icon that is both a status and a button: filled when the step is done, outlined when it
+/// can be run, a spinner while it runs, red when it failed. The label says which, and what a tap does,
+/// so it is never colour alone. 44 dp to tap, 32 dp to look at.
+class ScStateIcon extends StatelessWidget {
+  const ScStateIcon({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.state,
+    this.onPressed,
+  });
+
+  final IconData icon;
+  final String label;
+  final ScStepState state;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.sc;
+    final (fill, foreground, outline) = switch (state) {
+      ScStepState.done => (p.accentSoft, p.accentInk, Colors.transparent),
+      ScStepState.failed => (p.dangerSoft, p.danger, Colors.transparent),
+      ScStepState.busy => (Colors.transparent, p.accentInk, p.line),
+      ScStepState.todo => (Colors.transparent, p.neutralInk, p.line),
+      ScStepState.disabled => (Colors.transparent, p.muted, p.line),
+    };
+    final tappable =
+        onPressed != null &&
+        state != ScStepState.busy &&
+        state != ScStepState.disabled;
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        button: tappable,
+        enabled: tappable,
+        label: label,
+        excludeSemantics: true,
+        child: InkResponse(
+          onTap: tappable ? onPressed : null,
+          radius: 22,
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: Center(
+              child: Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: fill,
+                  border: Border.all(color: outline),
+                ),
+                child: state == ScStepState.busy
+                    ? Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: foreground,
+                        ),
+                      )
+                    : Icon(icon, size: 16, color: foreground),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum ScStripTone { neutral, progress, danger, good }
+
+/// One line of status at the top of a list: what is true right now and, when it helps, what to do.
+/// Colours come from the theme, so it follows dark mode. A problem or a running sync is announced to
+/// screen readers when it appears.
+class ScStatusStrip extends StatelessWidget {
+  const ScStatusStrip({
+    super.key,
+    required this.tone,
+    required this.title,
+    this.detail,
+    this.leading,
+    this.progress,
+    this.showProgress = false,
+    this.actions = const [],
+  });
+
+  final ScStripTone tone;
+  final String title;
+  final String? detail;
+  final IconData? leading;
+
+  /// 0 to 1 for a determinate bar; with [showProgress] and no value the bar is indeterminate.
+  final double? progress;
+  final bool showProgress;
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.sc;
+    final (background, accent) = switch (tone) {
+      ScStripTone.neutral => (p.surface, p.muted),
+      ScStripTone.progress => (p.hero, p.accent),
+      ScStripTone.danger => (p.dangerSoft, p.danger),
+      ScStripTone.good => (p.circuitCard, p.green),
+    };
+    final titleColor = tone == ScStripTone.danger ? p.danger : p.ink;
+    final stacked = MediaQuery.textScalerOf(context).scale(14) > 19;
+    return Semantics(
+      container: true,
+      liveRegion: tone == ScStripTone.danger || tone == ScStripTone.progress,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: ScSpace.md + 2,
+          vertical: ScSpace.md,
+        ),
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: ScRadius.inputBorder,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: Sc.surface,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Icon(icon, size: 19, color: Sc.accentInk),
+                if (tone == ScStripTone.progress)
+                  SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: accent,
                     ),
-                    if (badge != null)
-                      Positioned(right: -6, bottom: -6, child: badge!),
-                  ],
-                ),
-                const SizedBox(width: 12),
+                  )
+                else if (leading != null)
+                  ExcludeSemantics(
+                    child: Icon(leading, size: 20, color: accent),
+                  ),
+                const SizedBox(width: ScSpace.md),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
                         title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: -.2,
-                        ),
+                        style: ScType.label.copyWith(color: titleColor),
                       ),
-                      const SizedBox(height: 3),
-                      Text(
-                        subtitle,
-                        style: TextStyle(
-                          color: subtitleColor ?? Sc.muted,
-                          fontSize: 12,
-                          height: 1.45,
+                      if (detail != null && detail!.isNotEmpty)
+                        Text(
+                          detail!,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          style: ScType.caption.copyWith(color: p.ink),
                         ),
-                      ),
                     ],
                   ),
                 ),
-                if (trailing != null) ...[const SizedBox(width: 8), trailing!],
+                // Beside the text normally; under it when text is large and there is no room.
+                if (actions.isNotEmpty && !stacked) ...[
+                  const SizedBox(width: ScSpace.sm),
+                  ...actions,
+                ],
               ],
             ),
-            if (footer != null) ...[const SizedBox(height: 8), footer!],
+            if (actions.isNotEmpty && stacked)
+              Align(
+                alignment: Alignment.centerRight,
+                child: Wrap(spacing: ScSpace.sm, children: actions),
+              ),
+            if (showProgress) ...[
+              const SizedBox(height: ScSpace.md),
+              ClipRRect(
+                borderRadius: ScRadius.pillBorder,
+                child: LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 6,
+                  color: accent,
+                  backgroundColor: p.bg,
+                ),
+              ),
+            ],
           ],
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// Round dark play button.
@@ -644,7 +990,7 @@ class ScPlayButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Material(
-    color: onPressed == null ? const Color(0xffcfcac4) : Sc.dark,
+    color: onPressed == null ? context.sc.chip : context.sc.ink,
     shape: const CircleBorder(),
     child: InkWell(
       customBorder: const CircleBorder(),
@@ -655,7 +1001,7 @@ class ScPlayButton extends StatelessWidget {
         child: Icon(
           active ? LucideIcons.pause : LucideIcons.play,
           size: 18,
-          color: Colors.white,
+          color: onPressed == null ? context.sc.muted : context.sc.bg,
         ),
       ),
     ),
@@ -672,7 +1018,7 @@ class ScStat extends StatelessWidget {
     constraints: const BoxConstraints(minHeight: 77),
     padding: const EdgeInsets.all(12),
     decoration: BoxDecoration(
-      color: Sc.surface,
+      color: context.sc.surface,
       borderRadius: BorderRadius.circular(20),
     ),
     child: Column(
@@ -680,8 +1026,8 @@ class ScStat extends StatelessWidget {
       children: [
         Text(
           label,
-          style: const TextStyle(
-            color: Sc.muted,
+          style: TextStyle(
+            color: context.sc.muted,
             fontSize: 12,
             fontWeight: FontWeight.w600,
           ),
@@ -722,9 +1068,9 @@ class ScRow extends StatelessWidget {
   Widget build(BuildContext context) => InkWell(
     onTap: onTap,
     child: Container(
-      padding: const EdgeInsets.symmetric(vertical: 18),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Color(0xffe7e1da))),
+      padding: const EdgeInsets.symmetric(vertical: ScSpace.lg),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: context.sc.line)),
       ),
       child: Row(
         children: [
@@ -734,13 +1080,16 @@ class ScRow extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: const TextStyle(fontSize: 14, color: Sc.ink),
+                  style: ScType.body.copyWith(
+                    fontWeight: FontWeight.w500,
+                    color: context.sc.ink,
+                  ),
                 ),
                 if (caption != null) ...[
-                  const SizedBox(height: 3),
+                  const SizedBox(height: ScSpace.xs / 2),
                   Text(
                     caption!,
-                    style: const TextStyle(fontSize: 12, color: Sc.muted),
+                    style: ScType.caption.copyWith(color: context.sc.muted),
                   ),
                 ],
               ],
@@ -752,16 +1101,15 @@ class ScRow extends StatelessWidget {
               child: Text(
                 value!,
                 textAlign: TextAlign.end,
-                style: TextStyle(
-                  fontSize: 12,
+                style: ScType.caption.copyWith(
                   fontWeight: FontWeight.w600,
-                  color: valueColor ?? const Color(0xff6d5e51),
+                  color: valueColor ?? context.sc.muted,
                 ),
               ),
             ),
           ?trailing,
           if (onTap != null && trailing == null && value == null)
-            const Icon(LucideIcons.chevronRight, size: 18, color: Sc.muted),
+            Icon(LucideIcons.chevronRight, size: 18, color: context.sc.muted),
         ],
       ),
     ),
@@ -775,54 +1123,76 @@ class ScButton extends StatelessWidget {
     required this.label,
     required this.onPressed,
     this.danger = false,
+    this.primary = false,
     this.icon,
     this.busy = false,
   });
   final String label;
   final VoidCallback? onPressed;
   final bool danger;
+
+  /// The one main action on a screen: the accent colour.
+  final bool primary;
   final IconData? icon;
   final bool busy;
 
   @override
-  Widget build(BuildContext context) => SizedBox(
-    width: double.infinity,
-    child: Material(
-      color: danger ? Sc.dangerSoft : Sc.neutralButton,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: busy ? null : onPressed,
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (busy)
-                const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              else if (icon != null)
-                Icon(icon, size: 17, color: danger ? Sc.danger : Sc.neutralInk),
-              if (busy || icon != null) const SizedBox(width: 8),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: onPressed == null && !busy
-                      ? const Color(0xffa89f97)
-                      : (danger ? Sc.danger : Sc.neutralInk),
-                ),
+  Widget build(BuildContext context) {
+    final p = context.sc;
+    final disabled = onPressed == null && !busy;
+    final background = primary
+        ? (disabled ? p.neutralButton : p.accent)
+        : (danger ? p.dangerSoft : p.neutralButton);
+    final foreground = disabled
+        ? p.muted
+        : primary
+        ? p.onAccent
+        : (danger ? p.danger : p.neutralInk);
+    return SizedBox(
+      width: double.infinity,
+      child: Material(
+        color: background,
+        borderRadius: ScRadius.inputBorder,
+        child: InkWell(
+          borderRadius: ScRadius.inputBorder,
+          onTap: busy ? null : onPressed,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: ScSpace.lg,
+                vertical: ScSpace.md,
               ),
-            ],
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (busy)
+                    SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: foreground,
+                      ),
+                    )
+                  else if (icon != null)
+                    Icon(icon, size: 18, color: foreground),
+                  if (busy || icon != null) const SizedBox(width: ScSpace.sm),
+                  Flexible(
+                    child: Text(
+                      label,
+                      textAlign: TextAlign.center,
+                      style: ScType.label.copyWith(color: foreground),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// Persistent destinations stay in one place while notes and devices update.
@@ -832,69 +1202,77 @@ class ScNavBar extends StatelessWidget {
   final ValueChanged<int> onSelect;
 
   static const _items = [
-    (LucideIcons.house, 'Home'),
     (LucideIcons.fileText, 'Notes'),
     (LucideIcons.squareCheck, 'Tasks'),
+    (LucideIcons.cpu, 'Circuit'),
     (LucideIcons.settings, 'Settings'),
   ];
 
   @override
-  Widget build(BuildContext context) => DecoratedBox(
-    decoration: const BoxDecoration(
-      color: Sc.bg,
-      border: Border(top: BorderSide(color: Sc.line)),
-    ),
-    child: SafeArea(
-      top: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-        child: Row(
-          children: [
-            for (var i = 0; i < _items.length; i++)
-              Expanded(
-                child: Semantics(
-                  selected: i == index,
-                  button: true,
-                  child: TextButton(
-                    onPressed: () => onSelect(i),
-                    style: TextButton.styleFrom(
-                      foregroundColor: i == index ? Sc.accentInk : Sc.muted,
-                      backgroundColor: i == index ? Sc.accentSoft : Sc.bg,
-                      minimumSize: const Size(48, 58),
-                      padding: const EdgeInsets.symmetric(
-                        vertical: 8,
-                        horizontal: 4,
+  Widget build(BuildContext context) {
+    final p = context.sc;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: p.bg,
+        border: Border(top: BorderSide(color: p.line)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            ScSpace.md,
+            ScSpace.sm,
+            ScSpace.md,
+            ScSpace.sm,
+          ),
+          child: Row(
+            children: [
+              for (var i = 0; i < _items.length; i++)
+                Expanded(
+                  child: Semantics(
+                    selected: i == index,
+                    button: true,
+                    child: TextButton(
+                      onPressed: () => onSelect(i),
+                      style: TextButton.styleFrom(
+                        foregroundColor: i == index ? p.accentInk : p.muted,
+                        backgroundColor: i == index ? p.accentSoft : p.bg,
+                        minimumSize: const Size(48, 60),
+                        padding: const EdgeInsets.symmetric(
+                          vertical: ScSpace.sm,
+                          horizontal: ScSpace.xs,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: ScRadius.inputBorder,
+                        ),
                       ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(_items[i].$1, size: 21),
-                        const SizedBox(height: 5),
-                        FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Text(
-                            _items[i].$2,
-                            maxLines: 1,
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(_items[i].$1, size: 22),
+                          const SizedBox(height: ScSpace.xs),
+                          FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              _items[i].$2,
+                              maxLines: 1,
+                              style: ScType.caption.copyWith(
+                                fontWeight: FontWeight.w600,
+                                fontFamily: 'Roboto',
+                              ),
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// Small read-only label for categories (filled) and tags (outlined).
@@ -907,16 +1285,16 @@ class ScChip extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
     decoration: BoxDecoration(
-      color: tag ? Colors.transparent : Sc.accentSoft,
+      color: tag ? Colors.transparent : context.sc.accentSoft,
       borderRadius: BorderRadius.circular(99),
-      border: tag ? Border.all(color: Sc.line) : null,
+      border: tag ? Border.all(color: context.sc.line) : null,
     ),
     child: Text(
       tag ? '#$text' : text,
       style: TextStyle(
         fontSize: 11.5,
         fontWeight: FontWeight.w600,
-        color: tag ? Sc.neutralInk : Sc.accentInk,
+        color: tag ? context.sc.neutralInk : context.sc.accentInk,
       ),
     ),
   );

@@ -135,7 +135,6 @@ class CircuitRelayService : Service() {
     private val connectedStatus = "Connected to Circuit"
     private var attemptStartedMs = 0L
     private var connectedAtMs = 0L
-    private var syncStartedMs = 0L
     private var shouldReconnect = false
     private var circuitAddress: String? = null
     private var gatt: BluetoothGatt? = null
@@ -147,11 +146,6 @@ class CircuitRelayService : Service() {
             reconnectHandler.postDelayed(this, 30_000)
         }
     }
-    private var syncOutput: FileOutputStream? = null
-    private var syncFile: File? = null
-    private var syncExpectedBytes = 0L
-    private var syncReceivedBytes = 0L
-    private var syncCompleteStatus: String? = null
     private val reconnectRunnable = Runnable { circuitAddress?.let(::connect) }
     // Turning Bluetooth off kills the connection without a callback, and nothing then
     // brought it back when Bluetooth returned. Follow the adapter instead.
@@ -239,7 +233,6 @@ class CircuitRelayService : Service() {
         if (activeService === this) activeService = null
         relayStatus = "Stopped"
         gatt?.close()
-        abandonAudioSync()
         syncGeneration++
         syncExecutor.shutdownNow()
         executor.shutdownNow()
@@ -397,26 +390,6 @@ class CircuitRelayService : Service() {
     }
 
     private fun handleCharacteristic(value: ByteArray) {
-        if (value.size >= 2 && value[0] == 0xA5.toByte() && value[1] == 0x5A.toByte()) {
-            syncOutput?.let { output ->
-                val remaining = syncExpectedBytes - syncReceivedBytes
-                val packetBytes = value.size - 2
-                // Android can surface a duplicate final indication. Never
-                // write beyond the WAV length announced by Circuit.
-                val bytesToWrite = minOf(packetBytes, remaining.toInt())
-                if (bytesToWrite <= 0) return
-                output.write(value, 2, bytesToWrite)
-                syncReceivedBytes += bytesToWrite
-                // The final status notification can arrive behind the last
-                // indication. The byte count is authoritative, so complete
-                // locally as soon as the entire expected file is present.
-                if (syncExpectedBytes > 0 && syncReceivedBytes == syncExpectedBytes) {
-                    syncCompleteStatus = syncCompleteStatus ?: "Sync complete: ready on phone"
-                }
-                maybeFinishAudioSync()
-            }
-            return
-        }
         handleRelayRequest(value.toString(Charsets.UTF_8))
     }
 
@@ -450,29 +423,7 @@ class CircuitRelayService : Service() {
             return
         }
         if (request.startsWith("@audio-status\n")) {
-            val status = request.substringAfter("@audio-status\n")
-            when {
-                status.startsWith("Sync started\n") -> beginAudioSync(status.substringAfter('\n').substringBefore(' ').toLongOrNull() ?: 0)
-                status.startsWith("Sync complete") -> {
-                    syncCompleteStatus = status
-                    maybeFinishAudioSync()
-                    reconnectHandler.postDelayed({
-                        if (syncCompleteStatus != null) {
-                            if (syncReceivedBytes == syncExpectedBytes) {
-                                maybeFinishAudioSync()
-                            } else {
-                                val received = syncReceivedBytes
-                                val expected = syncExpectedBytes
-                                abandonAudioSync()
-                                publishAudioStatus("Sync failed: incomplete transfer ($received/$expected bytes)")
-                            }
-                        }
-                    }, 1500)
-                    return
-                }
-                status.startsWith("Sync failed") -> abandonAudioSync()
-            }
-            publishAudioStatus(status)
+            publishAudioStatus(request.substringAfter("@audio-status\n"))
             return
         }
         if (request != "@relay\nCHECK") return
@@ -495,53 +446,6 @@ class CircuitRelayService : Service() {
             characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             gatt?.writeCharacteristic(characteristic) ?: false
         }
-    }
-
-    private fun beginAudioSync(expectedBytes: Long) {
-        abandonAudioSync()
-        syncExpectedBytes = expectedBytes
-        syncReceivedBytes = 0
-        syncCompleteStatus = null
-        syncStartedMs = SystemClock.elapsedRealtime()
-        syncFile = File(filesDir, "circuit-note-${System.currentTimeMillis()}.wav")
-        syncOutput = FileOutputStream(syncFile)
-    }
-
-    private fun maybeFinishAudioSync() {
-        val status = syncCompleteStatus ?: return
-        if (syncReceivedBytes != syncExpectedBytes) return
-        val output = syncOutput ?: return
-        output.flush()
-        output.close()
-        syncOutput = null
-        var file = syncFile
-        if (file != null && syncExpectedBytes > 0 && syncReceivedBytes == syncExpectedBytes) {
-            val named = File(file.parentFile, file.nameWithoutExtension + "." + noteExtension(file))
-            if (named != file && file.renameTo(named)) file = named
-            Log.i("CircuitSync", "Saved a note over Bluetooth as ${file.name}")
-            Diagnostics.event(
-                this, "sync_stats", 0L,
-                "via" to "ble",
-                "size_mb" to Diagnostics.megabytes(syncExpectedBytes),
-                "seconds" to (SystemClock.elapsedRealtime() - syncStartedMs) / 1000,
-            )
-            latestSyncedFile = file.absolutePath
-            publishAudioStatus("$status|${file.absolutePath}")
-        } else {
-            file?.delete()
-            publishAudioStatus("Sync failed: incomplete transfer")
-        }
-        syncCompleteStatus = null
-    }
-
-    private fun abandonAudioSync() {
-        syncOutput?.close()
-        syncOutput = null
-        syncFile?.delete()
-        syncFile = null
-        syncExpectedBytes = 0
-        syncReceivedBytes = 0
-        syncCompleteStatus = null
     }
 
     /** Time, date and note counts for the display, in the format the app screen also uses. */

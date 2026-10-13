@@ -9,6 +9,16 @@ part of '../main.dart';
 // is defined here and in buildScDarkTheme() but is switched on in the app (themeMode) only once the
 // screens read `context.sc`, so no screen is ever shown with light colours on a dark page.
 
+/// Light, dark, or whatever the phone is set to. Chosen in Settings > Appearance and kept on the phone.
+final ValueNotifier<ThemeMode> appThemeMode = ValueNotifier(ThemeMode.system);
+const _themeModeKey = 'theme_mode';
+
+ThemeMode themeModeFromName(String? name) => switch (name) {
+  'light' => ThemeMode.light,
+  'dark' => ThemeMode.dark,
+  _ => ThemeMode.system,
+};
+
 /// Spacing on a 4-point scale.
 class ScSpace {
   const ScSpace._();

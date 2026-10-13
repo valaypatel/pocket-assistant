@@ -138,7 +138,7 @@ void main() {
     );
     await tester.pump(const Duration(seconds: 1));
     expect(tester.takeException(), isNull);
-    await tester.tap(find.text('Capture a thought'));
+    await tester.longPress(find.byTooltip(RegExp('^Record a voice note')));
     await tester.pumpAndSettle();
     expect(find.text('This phone'), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -198,16 +198,17 @@ void main() {
     await tester.tap(find.text('Notes').last);
     await tester.pumpAndSettle();
     await _shot(tester, 'notes');
+    await tester.tap(find.byTooltip('Search notes'));
+    await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'unfindable phrase');
     await tester.pump();
-    expect(find.text('No matching notes'), findsOneWidget);
-    await tester.tap(find.byTooltip('Clear search'));
+    expect(find.text('Nothing matches “unfindable phrase”'), findsOneWidget);
+    await tester.tap(find.byTooltip('Close search'));
     await tester.pump();
-    expect(find.text('No matching notes'), findsNothing);
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text,
-      isEmpty,
-    );
+    expect(find.textContaining('Nothing matches'), findsNothing);
+    // Closed, search takes no room on the page.
+    expect(find.byType(TextField), findsNothing);
+    expect(find.text('Launch planning'), findsOneWidget);
     await tester.tap(find.text('Tasks').last);
     await tester.pumpAndSettle();
     await _shot(tester, 'tasks');

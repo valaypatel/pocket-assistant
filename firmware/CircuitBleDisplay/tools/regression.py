@@ -5,7 +5,8 @@ on the same Wi-Fi with Test mode on (Settings > Testing), adb to the phone (ANDR
 one) and the board logger running (~/.circuit-logs). Takes about 25 minutes. Keep the phone awake.
 
 It records, plays, syncs, loses power mid-recording and checks the board and the app after each step,
-then removes the notes it made. Prints PASS/FAIL per check and a summary; exit code 1 if any failed.
+then removes the notes it made. Prints PASS/FAIL per check and a summary; exit code 1 if any failed. After every check it saves a
+screenshot of the phone to apps/short_circuit/build/regression-shots/<time>/ (adb must reach the phone).
 """
 import json, os, re, subprocess, sys, time
 
@@ -60,9 +61,29 @@ def app_state():
     return json.loads(t[i:]) if i >= 0 else None
 
 
+SHOTS = os.path.join(ROOT, "apps", "short_circuit", "build", "regression-shots", time.strftime("%Y%m%d-%H%M%S"))
+shot_count = 0
+
+
+def shot(label):
+    """A screenshot of the phone as it is now, named after the check it follows. Never stops the run."""
+    global shot_count
+    try:
+        os.makedirs(SHOTS, exist_ok=True)
+        shot_count += 1
+        name = re.sub(r"[^A-Za-z0-9]+", "-", label).strip("-")[:60]
+        data = subprocess.run(["adb", "exec-out", "screencap", "-p"], capture_output=True, timeout=20).stdout
+        if data[:4] == b"\x89PNG":
+            with open(os.path.join(SHOTS, "%02d-%s.png" % (shot_count, name)), "wb") as f:
+                f.write(data)
+    except Exception:
+        pass
+
+
 def note(name, ok, detail=""):
     results.append((name, ok, detail))
     print(("PASS " if ok else "FAIL ") + name + (" -- " + detail if detail else ""), flush=True)
+    shot(("PASS " if ok else "FAIL ") + name)
 
 
 def wait_for(text, p, timeout):

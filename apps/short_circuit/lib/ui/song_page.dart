@@ -108,9 +108,9 @@ class _SongPageState extends State<SongPage> {
   Widget _artwork(SongResult song) {
     final url = song.artworkUrl;
     final placeholder = Container(
-      color: Sc.surface,
+      color: context.sc.surface,
       alignment: Alignment.center,
-      child: const Icon(LucideIcons.music, size: 44, color: Sc.faint),
+      child: Icon(LucideIcons.music, size: 44, color: context.sc.muted),
     );
     return ClipRRect(
       borderRadius: BorderRadius.circular(22),
@@ -133,7 +133,7 @@ class _SongPageState extends State<SongPage> {
   Widget _status(IconData icon, String title, String message, {Color? tone}) =>
       Column(
         children: [
-          Icon(icon, size: 34, color: tone ?? Sc.faint),
+          Icon(icon, size: 34, color: tone ?? context.sc.muted),
           const SizedBox(height: 12),
           Text(
             title,
@@ -144,7 +144,11 @@ class _SongPageState extends State<SongPage> {
           Text(
             message,
             textAlign: TextAlign.center,
-            style: const TextStyle(color: Sc.muted, fontSize: 13, height: 1.4),
+            style: TextStyle(
+              color: context.sc.muted,
+              fontSize: 13,
+              height: 1.4,
+            ),
           ),
         ],
       );
@@ -184,7 +188,7 @@ class _SongPageState extends State<SongPage> {
             Text(
               song.artist!,
               textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 15, color: Sc.muted),
+              style: TextStyle(fontSize: 15, color: context.sc.muted),
             ),
           ],
           if (song.album != null) ...[
@@ -192,7 +196,7 @@ class _SongPageState extends State<SongPage> {
             Text(
               song.album!,
               textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 13, color: Sc.faint),
+              style: TextStyle(fontSize: 13, color: context.sc.muted),
             ),
           ],
         ],
@@ -229,13 +233,13 @@ class _SongPageState extends State<SongPage> {
         LucideIcons.circleAlert,
         'Could not identify this clip',
         song.error ?? 'Something went wrong. The recording is kept.',
-        tone: Sc.danger,
+        tone: context.sc.danger,
       );
     }
 
     final provider = song.providerUrl;
     return Scaffold(
-      backgroundColor: Sc.bg,
+      backgroundColor: context.sc.bg,
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
@@ -256,7 +260,7 @@ class _SongPageState extends State<SongPage> {
                 '${_dayLabel(note?.createdAt ?? DateTime.now())} · '
                 '${_two(local.hour)}:${_two(local.minute)} · '
                 '$_songClipSeconds second clip',
-                style: const TextStyle(fontSize: 11, color: Sc.faint),
+                style: TextStyle(fontSize: 11, color: context.sc.muted),
               ),
             ),
             const SizedBox(height: 24),
@@ -411,10 +415,14 @@ class _MusicSettingsPageState extends State<MusicSettingsPage> {
                 ),
                 const ScTitle('Music recognition'),
                 const SizedBox(height: 8),
-                const Text(
+                Text(
                   'Identify song sends a 12 second clip from this phone to your own service. '
                   'The service does not keep the audio. The key stays on this phone.',
-                  style: TextStyle(color: Sc.muted, fontSize: 12, height: 1.4),
+                  style: TextStyle(
+                    color: context.sc.muted,
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
                 ),
                 const SizedBox(height: 22),
                 const ScGroupLabel('Service address'),

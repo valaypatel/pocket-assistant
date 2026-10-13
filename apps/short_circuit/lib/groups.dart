@@ -334,9 +334,9 @@ extension _ScGroupUi on _CircuitHomePageState {
     height: 26,
     decoration: BoxDecoration(
       shape: BoxShape.circle,
-      color: on ? Sc.accent : Colors.transparent,
+      color: on ? context.sc.accent : Colors.transparent,
       border: Border.all(
-        color: on ? Sc.accent : const Color(0xffc9c0b7),
+        color: on ? context.sc.accent : context.sc.line,
         width: 1.6,
       ),
     ),
@@ -432,53 +432,48 @@ extension _ScGroupUi on _CircuitHomePageState {
   Widget _groupsRow() {
     final spoken = _notes.where((n) => !n.isSong && !n.isArriving).toList();
     if (_selecting || spoken.isEmpty) return const SizedBox.shrink();
-    Widget card(String id, String name, int count, double width) => Semantics(
+    final p = context.sc;
+    Widget chip(String id, String name, int count) => Semantics(
       button: true,
       label: '$name, $count note${count == 1 ? '' : 's'}',
       excludeSemantics: true,
-      child: SizedBox(
-        width: width,
-        height: 90 + MediaQuery.textScalerOf(context).scale(20),
-        child: Material(
-          color: Sc.surface,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-            side: const BorderSide(color: Sc.line),
-          ),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(14),
-            onTap: () => _openGroup(id),
+      child: Material(
+        color: p.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: ScRadius.pillBorder,
+          side: BorderSide(color: p.line),
+        ),
+        child: InkWell(
+          borderRadius: ScRadius.pillBorder,
+          onTap: () => _openGroup(id),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 40),
             child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              padding: const EdgeInsets.symmetric(horizontal: ScSpace.md + 2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
                     id == allNotesGroupId
                         ? LucideIcons.layers
                         : LucideIcons.messagesSquare,
-                    size: 18,
-                    color: Sc.accent,
+                    size: 16,
+                    color: p.accentInk,
                   ),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      Text(
-                        // Songs are not in a group, so the count is of spoken notes.
-                        '$count ${id == allNotesGroupId ? 'voice ' : ''}note${count == 1 ? '' : 's'}',
-                        style: const TextStyle(color: Sc.faint, fontSize: 11),
-                      ),
-                    ],
+                  const SizedBox(width: ScSpace.sm),
+                  Flexible(
+                    child: Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: ScType.label,
+                    ),
+                  ),
+                  const SizedBox(width: ScSpace.sm),
+                  // Songs are not in a group, so the count is of spoken notes.
+                  Text(
+                    '$count',
+                    style: ScType.caption.copyWith(color: p.muted),
                   ),
                 ],
               ),
@@ -488,8 +483,8 @@ extension _ScGroupUi on _CircuitHomePageState {
       ),
     );
 
-    // Two columns that wrap, so every group is on screen. A sideways list hid the later ones
-    // off the edge with nothing to say they were there.
+    // Chips that wrap, so every group is on screen. A sideways list hid the later ones off the edge
+    // with nothing to say they were there.
     const maxShown = 6;
     final all = <(String, String, int)>[
       (allNotesGroupId, 'All notes', spoken.length),
@@ -504,21 +499,13 @@ extension _ScGroupUi on _CircuitHomePageState {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ScGroupLabel('Groups (${all.length - 1})'),
-        LayoutBuilder(
-          builder: (context, box) {
-            final width = all.length == 1
-                ? box.maxWidth
-                : (box.maxWidth - 10) / 2;
-            return Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                for (final (id, name, count) in shown)
-                  card(id, name, count, width),
-              ],
-            );
-          },
+        ScGroupLabel(all.length > 1 ? 'Groups (${all.length - 1})' : 'Groups'),
+        Wrap(
+          spacing: ScSpace.sm,
+          runSpacing: ScSpace.sm,
+          children: [
+            for (final (id, name, count) in shown) chip(id, name, count),
+          ],
         ),
         if (all.length > maxShown)
           TextButton(
@@ -529,7 +516,7 @@ extension _ScGroupUi on _CircuitHomePageState {
                   : 'Show all ${all.length - 1} groups',
             ),
           ),
-        const SizedBox(height: 16),
+        const SizedBox(height: ScSpace.lg),
       ],
     );
   }
@@ -550,7 +537,7 @@ extension _ScGroupUi on _CircuitHomePageState {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      backgroundColor: Sc.bg,
+      backgroundColor: context.sc.bg,
       builder: (sheetContext) => _GroupSheet(
         count: picked.length,
         suggestedName: 'Notes · ${d.day} ${_monthNames[d.month - 1]}',
@@ -582,7 +569,7 @@ extension _ScGroupUi on _CircuitHomePageState {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      backgroundColor: Sc.bg,
+      backgroundColor: context.sc.bg,
       builder: (sheetContext) => StatefulBuilder(
         builder: (context, setSheet) => SizedBox(
           height: MediaQuery.sizeOf(context).height * .7,
@@ -620,10 +607,10 @@ extension _ScGroupUi on _CircuitHomePageState {
               ),
               Expanded(
                 child: candidates.isEmpty
-                    ? const Center(
+                    ? Center(
                         child: Text(
                           'Every note is already in this group.',
-                          style: TextStyle(color: Sc.muted),
+                          style: TextStyle(color: context.sc.muted),
                         ),
                       )
                     : ListView(
@@ -777,7 +764,7 @@ extension _ScGroupUi on _CircuitHomePageState {
       const SizedBox(height: 6),
       Text(
         '${ctx.total} note${ctx.total == 1 ? '' : 's'} · ${ctx.transcribed} transcribed',
-        style: const TextStyle(color: Sc.muted, fontSize: 12),
+        style: TextStyle(color: context.sc.muted, fontSize: 12),
       ),
       const SizedBox(height: 16),
       FilledButton.icon(
@@ -793,13 +780,16 @@ extension _ScGroupUi on _CircuitHomePageState {
       ),
       if (!canChat) ...[
         const SizedBox(height: 8),
-        const Text(
+        Text(
           'None of these notes are transcribed yet. Transcribe a note first, then you can chat with it here.',
-          style: TextStyle(color: Sc.orange, fontSize: 12, height: 1.4),
+          style: TextStyle(color: context.sc.orange, fontSize: 12, height: 1.4),
         ),
       ] else if (ctx.notTranscribed > 0 || ctx.leftOut > 0) ...[
         const SizedBox(height: 8),
-        Text(ctx.banner, style: const TextStyle(color: Sc.muted, fontSize: 12)),
+        Text(
+          ctx.banner,
+          style: TextStyle(color: context.sc.muted, fontSize: 12),
+        ),
       ],
       if (!isAll) ...[
         const SizedBox(height: 12),
@@ -829,13 +819,13 @@ extension _ScGroupUi on _CircuitHomePageState {
                 alignment: Alignment.centerRight,
                 padding: const EdgeInsets.symmetric(horizontal: 22),
                 decoration: BoxDecoration(
-                  color: Sc.accentSoft,
+                  color: context.sc.accentSoft,
                   borderRadius: BorderRadius.circular(14),
                 ),
-                child: const Text(
+                child: Text(
                   'Remove from group',
                   style: TextStyle(
-                    color: Sc.accentInk,
+                    color: context.sc.accentInk,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -847,10 +837,10 @@ extension _ScGroupUi on _CircuitHomePageState {
                   IconButton(
                     tooltip: 'Remove from group',
                     onPressed: () => _removeNoteFromGroup(group.id, note.id),
-                    icon: const Icon(
+                    icon: Icon(
                       LucideIcons.minus,
                       size: 18,
-                      color: Sc.muted,
+                      color: context.sc.muted,
                     ),
                   ),
                 ],

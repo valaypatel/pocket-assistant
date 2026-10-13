@@ -212,10 +212,42 @@ mixin _PhoneRecordingState {
   StreamSubscription<dynamic>? _phoneRecorderSubscription;
   bool _phoneSheetOpen = false;
   final Set<String> _phoneSaving = {};
+
+  /// Moments added to the running phone recording, in ms of recorded audio.
+  final List<int> _phoneMoments = [];
+
+  /// When the service last reported, so the clock can be carried on between reports.
+  DateTime? _phoneReportedAt;
 }
 
 extension _PhoneRecording on _CircuitHomePageState {
   bool get _phoneRecordingActive => _phoneRecording.value != null;
+
+  /// Recorded audio so far: the last report, plus the time since it while actually recording (paused
+  /// time is not in the audio, so it is not counted).
+  int _phoneElapsedMs() {
+    final value = _phoneRecording.value;
+    if (value == null) return 0;
+    final reported = (value['elapsedMs'] as num?)?.toInt() ?? 0;
+    final since = _phoneReportedAt;
+    if (value['state'] != 'recording' || since == null) return reported;
+    return reported + DateTime.now().difference(since).inMilliseconds;
+  }
+
+  /// The Moment button on the recording bar: bookmark this instant.
+  void _addPhoneMoment() {
+    final state = _phoneRecording.value?['state'];
+    if (state != 'recording') return;
+    if (_phoneMoments.length >= _momentsMax) return;
+    _phoneMoments.add(_phoneElapsedMs());
+    HapticFeedback.mediumImpact();
+    _update(() {});
+    SemanticsService.sendAnnouncement(
+      View.of(context),
+      'Moment ${_phoneMoments.length} added',
+      Directionality.of(context),
+    );
+  }
 
   /// Notes saved before they listed their parts point at the first minute only; the rest of
   /// the recording is on the phone but unused. Link it back, once, without touching any note
@@ -362,12 +394,19 @@ extension _PhoneRecording on _CircuitHomePageState {
       );
       return;
     }
+    // A recording cannot wait and playback can: playback gives way.
+    if (_nowPlaying.value != null) await _stopNowPlaying();
+    if (_circuitPlayback == CircuitPlaybackPhase.playing &&
+        _circuitPlaybackSupportsStop) {
+      unawaited(_stopCircuitPlayback());
+    }
     try {
       final preferences = await SharedPreferences.getInstance();
       final ids = await PhoneRecordingIds.key(preferences);
       final number = await PhoneRecordingIds.nextNote(preferences);
       final directory = await _phoneRecorder.invokeMethod<String>('directory');
       final path = '$directory/phone-note-$number.cnote';
+      _phoneMoments.clear();
       _phoneRecording.value = {
         'state': 'starting',
         'elapsedMs': 0,
@@ -381,7 +420,6 @@ extension _PhoneRecording on _CircuitHomePageState {
         'noteId': number,
       });
       Telemetry.event('phone_record_started');
-      _openPhoneRecorder();
       // The service reports back within a moment; if it never does, do not stay stuck.
       unawaited(
         Future<void>.delayed(const Duration(seconds: 5), () {
@@ -406,6 +444,7 @@ extension _PhoneRecording on _CircuitHomePageState {
       case 'recording':
       case 'paused':
         // Keeps the note's path from when it started.
+        _phoneReportedAt = DateTime.now();
         _phoneRecording.value = {...?_phoneRecording.value, ...data};
       case 'failed':
         _phoneRecording.value = null;
@@ -423,12 +462,16 @@ extension _PhoneRecording on _CircuitHomePageState {
           );
         }
       case 'discarded':
+        _phoneMoments.clear();
         _phoneRecording.value = null;
         _closePhoneRecorderSheet();
       case 'stopped':
+        final moments = List<int>.of(_phoneMoments);
+        _phoneMoments.clear();
         _phoneRecording.value = null;
         _closePhoneRecorderSheet();
         await _saveFinishedPhoneRecording(
+          momentsMs: moments,
           parts: (data['parts'] as List<dynamic>? ?? const [])
               .map((part) => part.toString())
               .toList(),
@@ -441,6 +484,7 @@ extension _PhoneRecording on _CircuitHomePageState {
 
   /// Turns a finished recording into a note, then starts transcription if it is on.
   Future<void> _saveFinishedPhoneRecording({
+    List<int> momentsMs = const [],
     required List<String> parts,
     required int durationMs,
     required int startedAt,
@@ -449,6 +493,7 @@ extension _PhoneRecording on _CircuitHomePageState {
     if (parts.isEmpty || !_phoneSaving.add(parts.first)) return;
     try {
       await _saveFinishedPhoneRecordingNow(
+        momentsMs: momentsMs,
         parts: parts,
         durationMs: durationMs,
         startedAt: startedAt,
@@ -460,6 +505,7 @@ extension _PhoneRecording on _CircuitHomePageState {
   }
 
   Future<void> _saveFinishedPhoneRecordingNow({
+    List<int> momentsMs = const [],
     required List<String> parts,
     required int durationMs,
     required int startedAt,
@@ -502,13 +548,19 @@ extension _PhoneRecording on _CircuitHomePageState {
       await _clearPendingPhone(parts.first);
       return;
     }
-    final note = noteForPhoneRecording(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
-      parts: present,
-      startedAt: startedAt > 0
-          ? DateTime.fromMillisecondsSinceEpoch(startedAt)
-          : DateTime.now(),
-    );
+    final note =
+        noteForPhoneRecording(
+          id: DateTime.now().microsecondsSinceEpoch.toString(),
+          parts: present,
+          startedAt: startedAt > 0
+              ? DateTime.fromMillisecondsSinceEpoch(startedAt)
+              : DateTime.now(),
+        ).copyWith(
+          ownMoments: [
+            for (final ms in momentsMs)
+              if (ms >= 0 && ms <= lengthMs) ms,
+          ],
+        );
     final notes = [note, ..._notes];
     final preferences = await SharedPreferences.getInstance();
     await _writeSecret(
@@ -624,7 +676,7 @@ class PhoneRecorderSheet extends StatelessWidget {
           margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
           padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
           decoration: BoxDecoration(
-            color: Sc.bg,
+            color: context.sc.bg,
             borderRadius: BorderRadius.circular(16),
           ),
           child: SafeArea(
@@ -661,7 +713,9 @@ class PhoneRecorderSheet extends StatelessWidget {
                         ? 'Paused because another app is using the microphone.'
                         : 'Saved as you go. There is no time limit.',
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: interrupted ? Sc.orange : Sc.muted),
+                    style: TextStyle(
+                      color: interrupted ? context.sc.orange : context.sc.muted,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -670,8 +724,8 @@ class PhoneRecorderSheet extends StatelessWidget {
                   child: LinearProgressIndicator(
                     value: paused ? 0 : max(level, .04),
                     minHeight: 6,
-                    color: Sc.accent,
-                    backgroundColor: Sc.line,
+                    color: context.sc.accent,
+                    backgroundColor: context.sc.line,
                   ),
                 ),
                 const SizedBox(height: 20),
@@ -709,7 +763,7 @@ class PhoneRecorderSheet extends StatelessWidget {
                 FilledButton.icon(
                   style: FilledButton.styleFrom(
                     minimumSize: const Size(0, 52),
-                    backgroundColor: Sc.accent,
+                    backgroundColor: context.sc.accent,
                   ),
                   onPressed: state == 'starting' ? null : onStop,
                   icon: const Icon(LucideIcons.check, size: 20),

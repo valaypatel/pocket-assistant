@@ -42,16 +42,16 @@ class RecordingView extends StatelessWidget {
               child: Container(
                 width: 112,
                 height: 112,
-                decoration: const BoxDecoration(
-                  color: Sc.circuitCard,
+                decoration: BoxDecoration(
+                  color: context.sc.circuitCard,
                   shape: BoxShape.circle,
                 ),
                 child: Center(
                   child: song
-                      ? const Icon(
+                      ? Icon(
                           LucideIcons.music,
                           size: 40,
-                          color: Sc.circuitMark,
+                          color: context.sc.circuitMark,
                         )
                       : const ScDeviceMark(size: 64),
                 ),
@@ -61,7 +61,7 @@ class RecordingView extends StatelessWidget {
             Text(
               song ? 'Listening for a song' : 'Recording on Circuit',
               textAlign: TextAlign.center,
-              style: const TextStyle(color: Sc.muted, fontSize: 16),
+              style: TextStyle(color: context.sc.muted, fontSize: 16),
             ),
             const SizedBox(height: 12),
             Text(
@@ -80,13 +80,13 @@ class RecordingView extends StatelessWidget {
                 value: (elapsed.inMilliseconds / (_songClipSeconds * 1000))
                     .clamp(0.0, 1.0),
                 minHeight: 5,
-                color: Sc.accent,
-                backgroundColor: Sc.line,
+                color: context.sc.accent,
+                backgroundColor: context.sc.line,
               ),
             ],
             const SizedBox(height: 24),
             ScPanel(
-              color: Sc.surface,
+              color: context.sc.surface,
               child: Text(
                 song
                     ? remaining.isNegative
@@ -94,8 +94,8 @@ class RecordingView extends StatelessWidget {
                           : 'Hold Circuit close to the music. It stops by itself.'
                     : 'Your recording is saved on Circuit, then synced to this phone. You can keep browsing while it records.',
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Sc.neutralInk,
+                style: TextStyle(
+                  color: context.sc.neutralInk,
                   fontSize: 14,
                   height: 1.5,
                 ),
@@ -183,7 +183,7 @@ class RecordingIsland extends StatelessWidget {
       // Not excludeSemantics: the Stop button inside must stay its own control for TalkBack. The
       // title and timer are skipped below so they are not read twice.
       child: Material(
-        color: decorated ? Sc.dark : Colors.transparent,
+        color: decorated ? context.sc.dark : Colors.transparent,
         borderRadius: BorderRadius.circular(decorated ? 28 : 0),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -212,9 +212,9 @@ class RecordingIsland extends StatelessWidget {
                                   child: Container(
                                     width: 8,
                                     height: 8,
-                                    decoration: const BoxDecoration(
+                                    decoration: BoxDecoration(
                                       shape: BoxShape.circle,
-                                      color: Sc.accent,
+                                      color: context.sc.accent,
                                     ),
                                   ),
                                 ),
@@ -269,7 +269,7 @@ class RecordingIsland extends StatelessWidget {
                     value: (elapsed.inMilliseconds / (_songClipSeconds * 1000))
                         .clamp(0.0, 1.0),
                     minHeight: 3,
-                    color: Sc.accent,
+                    color: context.sc.accent,
                     backgroundColor: const Color(0x33ffffff),
                   ),
                 ),

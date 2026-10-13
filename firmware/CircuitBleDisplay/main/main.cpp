@@ -79,9 +79,6 @@ constexpr uint32_t kMaxRecordingSeconds = 8 * 3600;  // a safety stop; the card 
 constexpr uint32_t kPartSeconds = 60;                // one part of a longer recording
 constexpr uint64_t kMinFreeCardBytes = 8ull * 1024 * 1024;  // less than this and a recording stops
 uint64_t sd_free_bytes();
-// Use the established relay characteristic for binary audio packets too. This
-// avoids requiring Android to discard a bonded device's cached GATT table.
-constexpr size_t kAudioPacketBytes = 158;
 // The upper side button is the BOOT button (GPIO0). The lower GPIO18 button
 // is power-related, so it deliberately remains outside the audio controls.
 constexpr gpio_num_t kRecordButtonPin = GPIO_NUM_0;
@@ -131,7 +128,6 @@ bool audio_ready = false;
 // One thing at a time uses the microphone, speaker and the note being sent. It is claimed with
 // claim_audio() so two requests arriving together (the key and the app) cannot both win.
 std::atomic<bool> audio_busy{false};
-TaskHandle_t audio_sync_task_handle = nullptr;
 volatile bool recording_active = false;
 volatile bool recording_stop_requested = false;
 volatile bool recording_paused = false;
@@ -192,7 +188,6 @@ bool free_audio_from_playback() {
     for (int waited_ms = 0; audio_busy && waited_ms < 3000; waited_ms += 20) vTaskDelay(pdMS_TO_TICKS(20));
     return !audio_busy;
 }
-esp_err_t send_audio_data(const uint8_t *data, size_t length);
 
 struct TextMessage {
     char value[kMaxTextBytes + 1];
@@ -783,7 +778,6 @@ void init_sd_card() {
 
 void finish_audio_task() {
     // The task deletes itself below, so a handle left behind would point at nothing.
-    audio_sync_task_handle = nullptr;
     recording_paused = false;
     recording_active = false;
     playback_active = false;
@@ -1266,7 +1260,7 @@ void start_recording(char *command) {
     }
     // Recording and syncing are never done together: the card, the radio and the memory are
     // shared, and a recording must not lose a word to a sync.
-    if (circuit_sync::is_open() || audio_sync_task_handle != nullptr || !free_audio_from_playback()) {
+    if (circuit_sync::is_open() || !free_audio_from_playback()) {
         show_busy_notice();
         return;
     }
@@ -1312,97 +1306,6 @@ void toggle_pause_recording() {
     recording_paused = !recording_paused;
     ESP_LOGI(kTag, "Recording %s", recording_paused ? "paused" : "resumed");
     report_audio_status(recording_paused ? "Recording paused" : "Recording resumed");
-}
-
-// Slow BLE fallback, used only for a force sync with no Wi-Fi sync available.
-// Sends the oldest unsynced note and marks it synced once every packet has been
-// acknowledged by the phone's BLE stack.
-void audio_sync_task(void *) {
-    circuit_notes::Note oldest[1];
-    const size_t waiting = circuit_notes::list_unsynced(oldest, 1);
-    char latest[48] = {};
-    if (waiting > 0) circuit_notes::note_path(oldest[0], latest, sizeof(latest));
-    FILE *file = waiting > 0 ? fopen(latest, "rb") : nullptr;
-    if (file == nullptr || connection_id == UINT16_MAX || relay_handle == 0) {
-        if (file != nullptr) fclose(file);
-        update_storage_status("Sync failed\nConnect Short-Circuit");
-        report_audio_status("Sync failed: phone is not connected");
-        finish_audio_task();
-        audio_sync_task_handle = nullptr;
-        return;
-    }
-    fseek(file, 0, SEEK_END);
-    const long length = ftell(file);
-    rewind(file);
-    if (length <= 0) {
-        fclose(file);
-        update_storage_status("Sync failed\nNo recording found");
-        report_audio_status("Sync failed: no recording found");
-        finish_audio_task();
-        audio_sync_task_handle = nullptr;
-        return;
-    }
-
-    show_device_screen(DeviceScreen::Syncing);
-    char started[kMaxTextBytes + 1];
-    snprintf(started, sizeof(started), "Sync started\n%ld bytes", length);
-    update_storage_status("Syncing audio\n0%");
-    report_audio_status(started);
-
-    uint8_t buffer[kAudioPacketBytes];
-    long sent = 0;
-    int last_progress_bucket = -1;
-    bool failed = false;
-    while (!failed) {
-        const size_t bytes = fread(buffer, 1, sizeof(buffer), file);
-        if (bytes == 0) break;
-        if (send_audio_data(buffer, bytes) != ESP_OK) {
-            failed = true;
-            break;
-        }
-        sent += static_cast<long>(bytes);
-        const int percent = static_cast<int>((sent * 100) / length);
-        if (percent / 10 != last_progress_bucket) {
-            char progress[64];
-            snprintf(progress, sizeof(progress), "Syncing audio\n%d%%", percent);
-            update_storage_status(progress);
-            if (Lvgl_lock(-1)) {
-                char percent_text[8];
-                snprintf(percent_text, sizeof(percent_text), "%d%%", percent);
-                lv_label_set_text(sync_progress_label, percent_text);
-                Lvgl_unlock();
-            }
-            snprintf(progress, sizeof(progress), "Sync in progress: %d%%", percent);
-            report_audio_status(progress);
-            last_progress_bucket = percent / 10;
-        }
-        // ATT confirmation means the packet reached the phone's BLE stack,
-        // not necessarily that Android has finished dispatching the callback
-        // to the app. Give that callback time to drain before sending the
-        // next packet.
-        vTaskDelay(pdMS_TO_TICKS(30));
-    }
-    fclose(file);
-    if (failed || sent != length) {
-        if (Lvgl_lock(-1)) {
-            lv_label_set_text(sync_progress_label, "ERR");
-            Lvgl_unlock();
-        }
-        return_to_idle_after(DeviceScreen::Syncing, 3000);
-        update_storage_status("Sync failed\nTry again in app");
-        report_audio_status("Sync failed: connection interrupted");
-    } else {
-        if (Lvgl_lock(-1)) {
-            lv_label_set_text(sync_progress_label, "100%");
-            Lvgl_unlock();
-        }
-        return_to_idle_after(DeviceScreen::Syncing, 3000);
-        circuit_notes::mark_synced(oldest[0].id);
-        update_storage_status("Sync complete\nReady on phone");
-        report_audio_status("Sync complete: ready on phone");
-    }
-    finish_audio_task();
-    audio_sync_task_handle = nullptr;
 }
 
 // ---- Wi-Fi state, status icons and app feedback ---------------------------
@@ -1616,7 +1519,7 @@ void restore_sync_label_task(void *) {
 // sync. Say so on the screen, with an icon, and to the phone: a press must always get an
 // answer, never silence.
 void show_busy_notice() {
-    const bool syncing = audio_sync_task_handle != nullptr || circuit_sync::is_open();
+    const bool syncing = circuit_sync::is_open();
     update_storage_status(syncing ? "Sync is running\nRecord when it ends" : "Audio is busy\nPlease wait");
     report_audio_status(syncing ? "Can't record: a sync is running, try again when it ends" : "Audio is busy");
     if (recording_active) return;  // the recording screen is already up
@@ -1692,8 +1595,8 @@ void sync_supervisor_task(void *) {
     }
 }
 
-// `forced` is the device button: it falls back to BLE when Wi-Fi sync is not
-// possible. The app can only ask for Wi-Fi sync.
+// Notes sync over Wi-Fi only. `forced` is the device button: with no Wi-Fi sync possible it shows the failure
+// on the device's own screen; the app is told in a status message.
 // `only_recording` (the app's "sync this note") limits the sync to that recording; 0 syncs everything.
 void start_audio_sync(bool forced, uint32_t only_recording = 0) {
     if (!free_audio_from_playback()) {  // playing a note gives way; a recording does not
@@ -1730,16 +1633,10 @@ void start_audio_sync(bool forced, uint32_t only_recording = 0) {
         }
         return;
     }
-    if (!forced) {
-        update_storage_status("Sync needs Wi-Fi\nCircuit and phone");
-        report_audio_status("Sync needs Wi-Fi: connect Circuit and your phone to the same network");
-        return;
-    }
-    if (!claim_audio()) {
-        report_audio_status("Audio is busy");
-        return;
-    }
-    xTaskCreate(audio_sync_task, "audio_sync", 6144, nullptr, 4, &audio_sync_task_handle);
+    // Notes move over Wi-Fi only: Bluetooth is for control and status, not for files.
+    update_storage_status("Sync needs Wi-Fi\nCircuit and phone");
+    report_audio_status("Sync needs Wi-Fi: connect Circuit and your phone to the same network");
+    if (forced) flash_sync_result("ERR");
 }
 
 void start_playback();
@@ -2593,24 +2490,11 @@ void send_write_response(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param
 
 void send_relay_request(const char *request) {
     if (server_if == ESP_GATT_IF_NONE || relay_handle == 0 || connection_id == UINT16_MAX) return;
-    ESP_ERROR_CHECK(esp_ble_gatts_send_indicate(
-        server_if, connection_id, relay_handle, strlen(request),
-        reinterpret_cast<uint8_t *>(const_cast<char *>(request)), false));
-}
-
-esp_err_t send_audio_data(const uint8_t *data, size_t length) {
-    if (server_if == ESP_GATT_IF_NONE || relay_handle == 0 || connection_id == UINT16_MAX || length > kAudioPacketBytes) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    uint8_t packet[kAudioPacketBytes + 2] = {0xA5, 0x5A};
-    memcpy(packet + 2, data, length);
-    // Audio needs flow control. A confirmed indication prevents the BLE stack
-    // from filling its transmit queue after the first packet.
-    ulTaskNotifyTake(pdTRUE, 0);
+    // A status message is best effort: if the Bluetooth stack refuses it, that must never take the board down.
     const esp_err_t status = esp_ble_gatts_send_indicate(
-        server_if, connection_id, relay_handle, length + 2, packet, true);
-    if (status != ESP_OK) return status;
-    return ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1500)) > 0 ? ESP_OK : ESP_ERR_TIMEOUT;
+        server_if, connection_id, relay_handle, strlen(request),
+        reinterpret_cast<uint8_t *>(const_cast<char *>(request)), false);
+    if (status != ESP_OK) ESP_LOGW(kTag, "Status message not sent: %s", esp_err_to_name(status));
 }
 
 void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
@@ -2706,11 +2590,6 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         show_relay_disconnected();
         ESP_LOGI(kTag, "Client disconnected (reason 0x%x); advertising again", param->disconnect.reason);
         ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&adv_params));
-        break;
-    case ESP_GATTS_CONF_EVT:
-        if (param->conf.handle == relay_handle && audio_sync_task_handle != nullptr) {
-            xTaskNotifyGive(audio_sync_task_handle);
-        }
         break;
     default:
         break;

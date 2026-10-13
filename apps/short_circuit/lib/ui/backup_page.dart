@@ -144,9 +144,13 @@ class _BackupPageState extends State<BackupPage> {
           ),
           const ScTitle('Your thoughts.\nSafely packed.'),
           const SizedBox(height: 12),
-          const Text(
+          Text(
             'Notes, tasks, groups and chats in one encrypted file. API keys are never included.',
-            style: TextStyle(color: Sc.muted, fontSize: 15, height: 1.5),
+            style: TextStyle(
+              color: context.sc.muted,
+              fontSize: 15,
+              height: 1.5,
+            ),
           ),
           const SizedBox(height: 24),
           SegmentedButton<bool>(
@@ -196,12 +200,12 @@ class _BackupPageState extends State<BackupPage> {
               ),
             ),
             const SizedBox(height: 16),
-            const ScPanel(
-              color: Sc.warmCard,
+            ScPanel(
+              color: context.sc.warmCard,
               child: Text(
                 'Keep the passphrase safe. Anyone with the file and passphrase can open your notes. A forgotten passphrase cannot be recovered.',
                 style: TextStyle(
-                  color: Sc.neutralInk,
+                  color: context.sc.neutralInk,
                   fontSize: 14,
                   height: 1.5,
                 ),
@@ -218,7 +222,7 @@ class _BackupPageState extends State<BackupPage> {
               onPressed: _busy ? null : _backUp,
             ),
           ] else ...[
-            const ScPanel(
+            ScPanel(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -237,7 +241,7 @@ class _BackupPageState extends State<BackupPage> {
                     style: TextStyle(
                       fontSize: 14,
                       height: 1.5,
-                      color: Sc.neutralInk,
+                      color: context.sc.neutralInk,
                     ),
                   ),
                 ],
@@ -250,9 +254,13 @@ class _BackupPageState extends State<BackupPage> {
               enabled: !_busy,
             ),
             const SizedBox(height: 12),
-            const Text(
+            Text(
               'Enter the passphrase you used to create the archive, then choose your backup file.',
-              style: TextStyle(fontSize: 14, height: 1.5, color: Sc.muted),
+              style: TextStyle(
+                fontSize: 14,
+                height: 1.5,
+                color: context.sc.muted,
+              ),
             ),
             const SizedBox(height: 20),
             ScIconButton(
@@ -271,8 +279,8 @@ class _BackupPageState extends State<BackupPage> {
               liveRegion: true,
               child: Text(
                 _feedback!,
-                style: const TextStyle(
-                  color: Sc.neutralInk,
+                style: TextStyle(
+                  color: context.sc.neutralInk,
                   fontSize: 14,
                   height: 1.5,
                 ),

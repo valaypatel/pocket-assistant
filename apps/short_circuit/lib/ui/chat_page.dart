@@ -181,7 +181,7 @@ class _NoteChatPageState extends State<NoteChatPage> {
             ),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
             decoration: BoxDecoration(
-              color: mine ? Sc.hero : Sc.bg,
+              color: mine ? context.sc.hero : context.sc.bg,
               borderRadius: BorderRadius.only(
                 topLeft: const Radius.circular(18),
                 topRight: const Radius.circular(18),
@@ -191,7 +191,11 @@ class _NoteChatPageState extends State<NoteChatPage> {
             ),
             child: SelectableText(
               message.text,
-              style: TextStyle(fontSize: 16, height: 1.6, color: Sc.ink),
+              style: TextStyle(
+                fontSize: 16,
+                height: 1.6,
+                color: context.sc.ink,
+              ),
             ),
           ),
           if (!mine)
@@ -203,7 +207,9 @@ class _NoteChatPageState extends State<NoteChatPage> {
                   onPressed: () => _addAsTask(message),
                   icon: const Icon(LucideIcons.listPlus, size: 18),
                   label: const Text('Save as a task'),
-                  style: TextButton.styleFrom(foregroundColor: Sc.accentInk),
+                  style: TextButton.styleFrom(
+                    foregroundColor: context.sc.accentInk,
+                  ),
                 ),
               ),
             ),
@@ -217,7 +223,7 @@ class _NoteChatPageState extends State<NoteChatPage> {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       const SizedBox(height: 24),
-      const Icon(LucideIcons.messageCircle, size: 28, color: Sc.faint),
+      Icon(LucideIcons.messageCircle, size: 28, color: context.sc.muted),
       const SizedBox(height: 12),
       Text(
         'Ask anything about this ${widget.subject}.',
@@ -228,10 +234,10 @@ class _NoteChatPageState extends State<NoteChatPage> {
         Padding(
           padding: const EdgeInsets.only(bottom: 8),
           child: Material(
-            color: Colors.white,
+            color: context.sc.surface,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(14),
-              side: const BorderSide(color: Sc.line),
+              side: BorderSide(color: context.sc.line),
             ),
             child: InkWell(
               borderRadius: BorderRadius.circular(14),
@@ -243,7 +249,7 @@ class _NoteChatPageState extends State<NoteChatPage> {
                 ),
                 child: Row(
                   children: [
-                    Icon(starter.$1, size: 18, color: Sc.tileInk),
+                    Icon(starter.$1, size: 18, color: context.sc.tileInk),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Text(
@@ -265,7 +271,7 @@ class _NoteChatPageState extends State<NoteChatPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    backgroundColor: Sc.bg,
+    backgroundColor: context.sc.bg,
     body: SafeArea(
       child: Column(
         children: [
@@ -308,7 +314,7 @@ class _NoteChatPageState extends State<NoteChatPage> {
                 alignment: Alignment.centerLeft,
                 child: Text(
                   widget.banner!,
-                  style: const TextStyle(color: Sc.muted, fontSize: 12),
+                  style: TextStyle(color: context.sc.muted, fontSize: 12),
                 ),
               ),
             ),
@@ -337,7 +343,7 @@ class _NoteChatPageState extends State<NoteChatPage> {
                         Container(
                           padding: const EdgeInsets.all(12),
                           decoration: BoxDecoration(
-                            color: Sc.dangerSoft,
+                            color: context.sc.dangerSoft,
                             borderRadius: BorderRadius.circular(14),
                           ),
                           child: Row(
@@ -345,10 +351,10 @@ class _NoteChatPageState extends State<NoteChatPage> {
                               Expanded(
                                 child: Text(
                                   _error!,
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                     fontSize: 12.5,
                                     height: 1.35,
-                                    color: Sc.danger,
+                                    color: context.sc.danger,
                                   ),
                                 ),
                               ),

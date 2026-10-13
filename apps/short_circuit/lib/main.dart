@@ -3,11 +3,14 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui' show lerpDouble;
 
 import 'package:cryptography/cryptography.dart';
 import 'package:cryptography_flutter/cryptography_flutter.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/semantics.dart' show SemanticsService;
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -33,8 +36,10 @@ part 'now_playing.dart';
 part 'phone_recording.dart';
 part 'secure_notes.dart';
 part 'ui/backup_page.dart';
+part 'ui/capture_dock.dart';
 part 'ui/chat_page.dart';
 part 'ui/detail_pages.dart';
+part 'ui/onboarding.dart';
 part 'ui/pages.dart';
 part 'ui/recording_view.dart';
 part 'ui/song_page.dart';
@@ -769,6 +774,32 @@ class ReminderDraft {
   final String details;
 }
 
+/// One transcription of a note: which model wrote it, when, and exactly what it said. Kept apart from the
+/// working transcript (which the person can edit) so the original is never lost and runs by different
+/// models can be compared.
+class TranscriptRun {
+  const TranscriptRun({
+    required this.model,
+    required this.text,
+    required this.at,
+  });
+  final String model;
+  final String text;
+  final DateTime at;
+
+  factory TranscriptRun.fromJson(Map<String, dynamic> json) => TranscriptRun(
+    model: json['model']?.toString() ?? '',
+    text: json['text']?.toString() ?? '',
+    at: DateTime.tryParse(json['at']?.toString() ?? '') ?? DateTime.now(),
+  );
+
+  Map<String, dynamic> toJson() => {
+    'model': model,
+    'text': text,
+    'at': at.toIso8601String(),
+  };
+}
+
 class CircuitNote {
   const CircuitNote({
     required this.id,
@@ -792,6 +823,11 @@ class CircuitNote {
     this.audioParts = const [],
     this.partTexts = const [],
     this.isCall = false,
+    this.transcriptRuns = const [],
+    this.transcriptEdited = false,
+    this.reviewStale = false,
+    this.reviewModel,
+    this.ownMoments = const [],
   });
 
   final String id;
@@ -837,6 +873,23 @@ class CircuitNote {
   /// Transcription judged this recording to be a phone call.
   final bool isCall;
 
+  /// Every transcription made of this note, oldest first. [transcript] is the working copy: it starts as
+  /// the latest run and is what AI review reads; the person may edit it without touching the runs.
+  final List<TranscriptRun> transcriptRuns;
+
+  /// The working transcript differs from the latest run because the person edited it.
+  final bool transcriptEdited;
+
+  /// The transcript changed after the last AI review, so the summary may be out of date.
+  final bool reviewStale;
+
+  /// The model that wrote the current AI review.
+  final String? reviewModel;
+
+  /// Moments added in this app while it recorded (the phone's own recorder), in ms from the start of the
+  /// whole note. A Circuit recording's Moments are in files beside its parts instead (moments.dart).
+  final List<int> ownMoments;
+
   bool get isSong => kind == 'song';
 
   /// Where the recording was made: 'Phone' (this phone's own recorder) or 'Circuit'.
@@ -877,6 +930,17 @@ class CircuitNote {
         .map((value) => value?.toString())
         .toList(),
     isCall: json['isCall'] == true,
+    transcriptRuns: (json['transcriptRuns'] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(TranscriptRun.fromJson)
+        .toList(),
+    transcriptEdited: json['transcriptEdited'] == true,
+    reviewStale: json['reviewStale'] == true,
+    reviewModel: json['reviewModel'] as String?,
+    ownMoments: (json['moments'] as List<dynamic>? ?? const [])
+        .whereType<num>()
+        .map((value) => value.toInt())
+        .toList(),
   );
 
   CircuitNote copyWith({
@@ -899,6 +963,11 @@ class CircuitNote {
     List<String>? audioParts,
     List<String?>? partTexts,
     bool? isCall,
+    List<TranscriptRun>? transcriptRuns,
+    bool? transcriptEdited,
+    bool? reviewStale,
+    String? reviewModel,
+    List<int>? ownMoments,
     bool clearSong = false,
   }) => CircuitNote(
     id: id,
@@ -922,6 +991,11 @@ class CircuitNote {
     audioParts: audioParts ?? this.audioParts,
     partTexts: partTexts ?? this.partTexts,
     isCall: isCall ?? this.isCall,
+    transcriptRuns: transcriptRuns ?? this.transcriptRuns,
+    transcriptEdited: transcriptEdited ?? this.transcriptEdited,
+    reviewStale: reviewStale ?? this.reviewStale,
+    reviewModel: reviewModel ?? this.reviewModel,
+    ownMoments: ownMoments ?? this.ownMoments,
   );
 
   Map<String, dynamic> toJson() => {
@@ -949,6 +1023,12 @@ class CircuitNote {
     if (audioParts.isNotEmpty) 'audioParts': audioParts,
     if (partTexts.isNotEmpty) 'partTexts': partTexts,
     if (isCall) 'isCall': true,
+    if (transcriptRuns.isNotEmpty)
+      'transcriptRuns': transcriptRuns.map((r) => r.toJson()).toList(),
+    if (transcriptEdited) 'transcriptEdited': true,
+    if (reviewStale) 'reviewStale': true,
+    if (reviewModel != null) 'reviewModel': reviewModel!,
+    if (ownMoments.isNotEmpty) 'moments': ownMoments,
   };
 }
 
@@ -987,14 +1067,13 @@ WifiStatus? parseWifiStatus(String message) {
   );
 }
 
-enum _AppPage { home, notes, tasks, settings, circuit, wifi, hiddenWifi, group }
+enum _AppPage { notes, tasks, settings, circuit, wifi, hiddenWifi, group }
 
 const _tasksKey = 'circuit_tasks';
 const _boardDeletesKey = 'pending_board_deletes';
 const _autoTranscribeKey = 'auto_transcribe';
 const _autoEnrichKey = 'auto_enrich';
 const _useMomentsKey = 'use_moments';
-const _displayNameKey = 'display_name';
 
 class CircuitTask {
   const CircuitTask({
@@ -1036,17 +1115,20 @@ class ShortCircuitApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Short-Circuit',
-      theme: buildScTheme(),
-      // Dark mode is defined (tokens.dart) but not switched on yet: it goes on, following the phone's
-      // setting, once the screens read their colours from context.sc (redesign step 3).
-      darkTheme: buildScDarkTheme(),
-      themeMode: ThemeMode.light,
-      navigatorObservers: [statusRouteObserver],
-      builder: (context, child) =>
-          StatusOverlay(child: child ?? const SizedBox.shrink()),
-      home: const CircuitHomePage(),
+    // Light, dark or the phone's setting (Settings > Appearance). Screens read their colours from
+    // context.sc (tokens.dart).
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: appThemeMode,
+      builder: (context, mode, _) => MaterialApp(
+        title: 'Short-Circuit',
+        theme: buildScTheme(),
+        darkTheme: buildScDarkTheme(),
+        themeMode: mode,
+        navigatorObservers: [statusRouteObserver],
+        builder: (context, child) =>
+            StatusOverlay(child: child ?? const SizedBox.shrink()),
+        home: const CircuitHomePage(),
+      ),
     );
   }
 }
@@ -1082,7 +1164,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   bool _connecting = false;
   bool _provisioningWifi = false;
   bool _scanningWifi = false;
-  _AppPage _page = _AppPage.home;
+  _AppPage _page = _AppPage.notes;
   final List<_AppPage> _pageHistory = [];
   List<CircuitTask> _tasks = [];
   bool _autoTranscribe = true;
@@ -1121,7 +1203,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _songArmedAt = armed ? DateTime.now() : null;
 
   final Set<String> _identifyingSongs = {};
-  String _displayName = '';
+  bool _showOnboarding = false; // first run: the welcome screens
+  bool _circuitDetailsOpen = false;
+  bool _dockCollapsed = false;
+  bool _searchOpen = false;
+  bool _developerOpen =
+      false; // the Developer rows in Settings are folded away until asked for
   DateTime? _recordingStartedAt;
   Timer? _clockTicker;
   // Automatic retry of AI review: how often each note was tried, and when.
@@ -1158,8 +1245,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   bool _circuitPlaybackSupportsStop = false;
   Timer? _playbackRequestTimer;
   bool _recordingAudio = false;
-  final _deviceChipKey =
-      GlobalKey(); // where the recording pill grows from and folds back to
   bool _relayActive = false; // the background service is running
   RelayLink _relayLink = RelayLink.off; // what its link to Circuit is doing
   String _noteSource =
@@ -1428,15 +1513,23 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     String id,
     GeminiTranscription transcription,
   ) async {
+    final model = await const GeminiClient().model();
+    final text = Moments.numberMarkers(transcription.transcript);
     final notes = _notes
         .map(
           (note) => note.id == id
               ? note.copyWith(
+                  transcriptRuns: [
+                    ...note.transcriptRuns,
+                    TranscriptRun(model: model, text: text, at: DateTime.now()),
+                  ].reversed.take(8).toList().reversed.toList(),
+                  transcriptEdited: false,
+                  reviewStale: false,
                   status: _aiConnected
                       ? 'Transcribed. Analysing…'
                       : 'Transcribed. Add an AI service for smart review.',
                   // [[MOMENT]] markers from the model become [Moment 1], [Moment 2]... across the whole note
-                  transcript: Moments.numberMarkers(transcription.transcript),
+                  transcript: text,
                   title: note.titleEdited ? note.title : transcription.title,
                   category: transcription.category,
                   isCall: transcription.isCall,
@@ -1474,7 +1567,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     final timer = Stopwatch()..start();
     try {
       final audio = await readNoteAudio(path);
-      final moments = _useMoments ? await Moments.forPart(path) : const <int>[];
+      final moments = _useMoments
+          ? await Moments.forNoteParts(note!, 0)
+          : const <int>[];
       final transcription = await _gemini.transcribeWav(
         audio,
         detectMusic: !asSpeech,
@@ -1570,6 +1665,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         enrichmentStatus: 'enriching',
       ),
     );
+    final reviewModel = await const GeminiClient().model();
     try {
       final enrichment = await _ai.enrich(
         transcript,
@@ -1603,6 +1699,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
           englishTranslation: enrichment.englishTranslation,
           language: enrichment.language,
           enrichmentStatus: 'ready',
+          reviewStale: false,
+          reviewModel: reviewModel,
           actionSuggestions: merged,
         );
       });
@@ -2253,6 +2351,40 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     }
   }
 
+  /// Pull down on Notes or Circuit: ask Circuit whether anything is waiting (and sync it), or try to
+  /// reach it when it is not connected. Says what happened, so the pull never feels like nothing.
+  Future<void> _pullRefresh() async {
+    if (!_circuitAvailable) {
+      if (_savedCircuitId != null && !_connecting && !_needsPairingRepair) {
+        unawaited(
+          _connect(
+            BluetoothDevice.fromId(_savedCircuitId!),
+            savedReconnect: true,
+          ),
+        );
+        _toast('Looking for Circuit…');
+      } else {
+        _toast('Circuit is not connected');
+      }
+      await Future<void>.delayed(const Duration(seconds: 1));
+      return;
+    }
+    if (_syncActive) return;
+    try {
+      await _writeCircuit('@audio-sync');
+    } catch (error) {
+      _toast('Could not reach Circuit');
+      return;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 2500));
+    if (!mounted) return;
+    if (_syncActive || _syncingNoteId != null) {
+      _toast('Syncing new notes…');
+    } else if ((_boardWaiting ?? 0) == 0) {
+      _toast('Up to date. Nothing new on Circuit.');
+    }
+  }
+
   Future<void> _retrySync() async {
     setState(() {
       _syncError = null;
@@ -2305,11 +2437,17 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         !note.status.startsWith('Waiting for part'),
   );
 
+  /// Notes still to arrive from Circuit: what it says it holds, or the notes here still waiting for their
+  /// audio, whichever is more. One number for every screen, so none says "synced" while another says "waiting".
+  int get _waitingCount =>
+      max(_boardWaiting ?? 0, _notesWithoutAudio(DateTime.now()).length);
+
   Future<void> _pruneLostNotes() async {
     // Only when Circuit itself says nothing at all is waiting. A sync of one note ends with the
     // same "saved" message, and the other notes are then still on the board.
     if (_boardWaiting != 0) return;
-    final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
+    // Two minutes is time enough for a sync that is on its way to start; after that nothing is coming.
+    final cutoff = DateTime.now().subtract(const Duration(minutes: 2));
     final lost = _notesWithoutAudio(cutoff)
         .where(
           (note) =>
@@ -2575,6 +2713,10 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _setStatus('This note has not finished syncing yet.');
       return;
     }
+    if (_phoneRecordingActive || _recordingAudio) {
+      _toast('Stop recording first');
+      return;
+    }
     _playbackToken++; // a new request replaces any part-by-part playback in progress
     _sequencePlaying = false;
     final playedNote = _notes
@@ -2726,13 +2868,31 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   Future<void> _editNote(String id, String title, String transcript) async {
     await _updateNote(id, (note) {
       final changed = transcript != (note.transcript ?? '');
+      final latest = note.transcriptRuns.lastOrNull?.text;
+      final reviewed = note.enrichmentStatus == 'ready';
       return note.copyWith(
         title: title,
         titleEdited: true,
         transcript: transcript,
-        enrichmentStatus: changed && transcript.isNotEmpty
-            ? 'pending'
-            : note.enrichmentStatus,
+        // Whether to review again is the person's call: an edit only says the review is out of date.
+        transcriptEdited: latest != null ? transcript != latest : changed,
+        reviewStale: changed && reviewed ? true : note.reviewStale,
+      );
+    });
+  }
+
+  /// Makes an earlier transcription the working transcript again.
+  Future<void> _useTranscriptRun(String id, int index) async {
+    await _updateNote(id, (note) {
+      if (index < 0 || index >= note.transcriptRuns.length) return note;
+      final run = note.transcriptRuns[index];
+      final changed = run.text != (note.transcript ?? '');
+      return note.copyWith(
+        transcript: run.text,
+        transcriptEdited: index != note.transcriptRuns.length - 1,
+        reviewStale: changed && note.enrichmentStatus == 'ready'
+            ? true
+            : note.reviewStale,
       );
     });
   }
@@ -3174,7 +3334,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
 
   void _goBack() {
     setState(() {
-      _page = _pageHistory.isEmpty ? _AppPage.home : _pageHistory.removeLast();
+      _page = _pageHistory.isEmpty ? _AppPage.notes : _pageHistory.removeLast();
     });
   }
 
@@ -3184,12 +3344,13 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _selectedNoteIds.clear();
       _pageHistory.clear();
       _page = const [
-        _AppPage.home,
         _AppPage.notes,
         _AppPage.tasks,
+        _AppPage.circuit,
         _AppPage.settings,
       ][index];
     });
+    if (_page == _AppPage.circuit && _circuitAvailable) _requestWifiStatus();
   }
 
   /// Shows what a restore brought back.
@@ -3224,8 +3385,15 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _autoTranscribe = preferences.getBool(_autoTranscribeKey) ?? true;
       _autoEnrich = preferences.getBool(_autoEnrichKey) ?? true;
       _useMoments = preferences.getBool(_useMomentsKey) ?? true;
+      appThemeMode.value = themeModeFromName(
+        preferences.getString(_themeModeKey),
+      );
+      // A new install has no saved notes yet; anyone who already uses the app never sees the welcome.
+      _showOnboarding =
+          Onboarding.enabled &&
+          !(preferences.getBool(Onboarding.doneKey) ?? false) &&
+          !preferences.containsKey(_notesKey);
       _shareDiagnostics = preferences.getBool(Telemetry.preferenceKey) ?? true;
-      _displayName = preferences.getString(_displayNameKey) ?? _displayName;
     });
   }
 
@@ -3320,6 +3488,20 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     await preferences.setBool(_autoEnrichKey, value);
   }
 
+  /// Ends the welcome screens for good, and optionally lands on a tab (2 = Circuit, 3 = Settings).
+  Future<void> _finishOnboarding({int? tab}) async {
+    setState(() => _showOnboarding = false);
+    if (tab != null) _selectTab(tab);
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setBool(Onboarding.doneKey, true);
+  }
+
+  Future<void> _setThemeMode(ThemeMode mode) async {
+    appThemeMode.value = mode;
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(_themeModeKey, mode.name);
+  }
+
   Future<void> _setUseMoments(bool value) async {
     setState(() => _useMoments = value);
     final preferences = await SharedPreferences.getInstance();
@@ -3330,12 +3512,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     setState(() => _autoTranscribe = value);
     final preferences = await SharedPreferences.getInstance();
     await preferences.setBool(_autoTranscribeKey, value);
-  }
-
-  Future<void> _saveDisplayName(String name) async {
-    setState(() => _displayName = name);
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(_displayNameKey, name);
   }
 
   void _setStatus(String status) {

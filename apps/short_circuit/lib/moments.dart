@@ -138,6 +138,35 @@ class Moments {
     return joined;
   }
 
+  /// Every Moment of one part of [note], in ms from the start of that part: the ones Circuit sealed
+  /// beside the part, and the ones added in this app while the phone recorded.
+  static Future<List<int>> forNoteParts(CircuitNote note, int index) async {
+    final parts = note.audioFiles;
+    if (index < 0 || index >= parts.length) return const [];
+    final joined = [...await forPart(parts[index])];
+    if (note.ownMoments.isNotEmpty) {
+      var base = 0;
+      for (var i = 0; i < index; i++) {
+        base += await partDurationMs(parts[i]);
+      }
+      final end = index == parts.length - 1
+          ? 1 << 40
+          : base + await partDurationMs(parts[index]);
+      for (final ms in note.ownMoments) {
+        if (ms >= base && ms < end) joined.add(ms - base);
+      }
+    }
+    joined.sort();
+    return joined;
+  }
+
+  /// A note's Moments in ms from its start: Circuit's and the ones added in this app.
+  static Future<List<int>> allForNote(CircuitNote note) async {
+    final joined = [...await forNote(note.audioFiles), ...note.ownMoments]
+      ..sort();
+    return joined;
+  }
+
   /// What the transcription is told about a part's Moments: when the bookmark button was pressed, so
   /// the model can put a marker at that point. Empty when there are none.
   static String transcriptionInstruction(List<int> momentsMs) {

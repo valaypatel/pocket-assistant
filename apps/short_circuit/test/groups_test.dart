@@ -232,11 +232,14 @@ void main() {
     testWidgets('a saved group is there after the app starts again', (
       tester,
     ) async {
+      final semantics = tester.ensureSemantics();
       await openNotes(tester);
       expect(find.text('Planning'), findsOneWidget);
-      expect(find.text('2 notes'), findsOneWidget);
+      // A group chip is named and counted for a screen reader: "<name>, <n> notes".
+      expect(find.bySemanticsLabel('Planning, 2 notes'), findsOneWidget);
       // The built-in group counts every spoken note.
-      expect(find.text('3 voice notes'), findsOneWidget);
+      expect(find.bySemanticsLabel('All notes, 3 notes'), findsOneWidget);
+      semantics.dispose();
       await tester.pump(const Duration(seconds: 3));
     });
 
@@ -267,19 +270,21 @@ void main() {
     });
 
     testWidgets('deleting a note takes it out of its groups', (tester) async {
+      final semantics = tester.ensureSemantics();
       await openNotes(tester);
       expect(
-        find.text('2 notes'),
+        find.bySemanticsLabel('Planning, 2 notes'),
         findsOneWidget,
       ); // Planning: Groceries and Trip plan
+      semantics.dispose();
       await tester.drag(find.text('Groceries'), const Offset(-600, 0));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Delete'));
       await tester.pumpAndSettle();
       expect(find.text('Groceries'), findsNothing);
       // Planning is down to one note; All notes went from three to two.
-      expect(find.text('1 note'), findsOneWidget);
-      expect(find.text('2 voice notes'), findsOneWidget);
+      expect(find.bySemanticsLabel('Planning, 1 note'), findsOneWidget);
+      expect(find.bySemanticsLabel('All notes, 2 notes'), findsOneWidget);
       await tester.pump(const Duration(seconds: 3));
     });
 
