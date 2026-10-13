@@ -384,7 +384,15 @@ extension _ScPages on _CircuitHomePageState {
       return 'Sync failed';
     }
     if (note.status.startsWith('Waiting for Wi-Fi')) return 'Waiting for Wi-Fi';
-    return noteStageLabel(note);
+    final stage = noteStageLabel(note);
+    // The icons at the end of the line already say these.
+    const shownByIcons = {
+      'Transcribed',
+      'AI reviewed',
+      'AI reviewing',
+      'Ready to transcribe',
+    };
+    return shownByIcons.contains(stage) ? null : stage;
   }
 
   VoidCallback? _openNote(CircuitNote note) {
@@ -526,40 +534,67 @@ extension _ScPages on _CircuitHomePageState {
     );
   }
 
+  /// The two steps a spoken note goes through, as icons: transcribed, then AI reviewed. Each shows where
+  /// the step stands and runs it when tapped. Songs and notes not yet on the phone have none.
+  List<Widget> _noteStepIcons(CircuitNote note) {
+    if (note.isSong || note.audioPath == null) return const [];
+    final hasTranscript = (note.transcript ?? '').trim().isNotEmpty;
+    final transcribing = _transcribingNoteId == note.id;
+    final reviewing = note.enrichmentStatus == 'enriching';
+    return [
+      ScStateIcon(
+        icon: LucideIcons.languages,
+        label: transcribing
+            ? 'Transcribing'
+            : hasTranscript
+            ? 'Transcribed. Tap to transcribe again'
+            : 'Transcribe',
+        state: transcribing
+            ? ScStepState.busy
+            : hasTranscript
+            ? ScStepState.done
+            : ScStepState.todo,
+        onPressed: _transcribingNoteId != null
+            ? null
+            : () async {
+                final result = await _transcribeNote(note.id);
+                if (!mounted || result == null) return;
+                final updated = _notes
+                    .where((n) => n.id == note.id)
+                    .firstOrNull;
+                final open = updated == null ? null : _openNote(updated);
+                open?.call();
+              },
+      ),
+      ScStateIcon(
+        icon: LucideIcons.sparkles,
+        label: reviewing
+            ? 'AI reviewing'
+            : note.enrichmentStatus == 'ready'
+            ? 'AI reviewed. Tap to review again'
+            : note.enrichmentStatus == 'failed'
+            ? 'Retry AI review'
+            : hasTranscript
+            ? 'Run AI review'
+            : 'AI review needs a transcript first',
+        state: reviewing
+            ? ScStepState.busy
+            : note.enrichmentStatus == 'ready'
+            ? ScStepState.done
+            : note.enrichmentStatus == 'failed'
+            ? ScStepState.failed
+            : hasTranscript
+            ? ScStepState.todo
+            : ScStepState.disabled,
+        onPressed: hasTranscript ? () => _retryEnrichment(note.id) : null,
+      ),
+    ];
+  }
+
   Widget _noteTile(CircuitNote note, {bool actions = false}) {
     final attention = _noteNeedsAttention(note);
-    final canTranscribe =
-        !note.isSong && note.audioPath != null && note.transcript == null;
     final needsSync = note.audioPath == null && note.id != _syncingNoteId;
     final footerButtons = <Widget>[
-      if (actions &&
-          (note.enrichmentStatus == 'failed' ||
-              note.enrichmentStatus == 'pending') &&
-          (note.transcript ?? '').trim().isNotEmpty)
-        ScActionChip(
-          icon: LucideIcons.sparkles,
-          label: note.enrichmentStatus == 'failed'
-              ? 'Retry AI review'
-              : 'Run AI review',
-          onPressed: () => _retryEnrichment(note.id),
-        ),
-      if (actions && canTranscribe)
-        ScActionChip(
-          icon: LucideIcons.languages,
-          label: _transcribingNoteId == note.id ? 'Transcribing' : 'Transcribe',
-          busy: _transcribingNoteId == note.id,
-          onPressed: _transcribingNoteId != null
-              ? null
-              : () async {
-                  final result = await _transcribeNote(note.id);
-                  if (!mounted || result == null) return;
-                  final updated = _notes
-                      .where((n) => n.id == note.id)
-                      .firstOrNull;
-                  final open = updated == null ? null : _openNote(updated);
-                  open?.call();
-                },
-        ),
       if (actions &&
           note.isSong &&
           note.audioPath != null &&
@@ -586,6 +621,7 @@ extension _ScPages on _CircuitHomePageState {
                 (note.audioPath == null ? 'Voice recording' : 'Voice note'),
       meta: _noteMeta(note),
       status: _noteStatusText(note),
+      statusTrailing: _noteStepIcons(note),
       statusIcon: attention ? LucideIcons.circleAlert : null,
       statusColor: attention
           ? context.sc.danger

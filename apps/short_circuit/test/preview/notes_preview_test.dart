@@ -28,17 +28,19 @@ Widget _notesSample() => ListView(
       statusIcon: LucideIcons.circleAlert,
       statusColor: Sc.danger,
       trailing: ScPlayButton(onPressed: () {}),
-      footer: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: [
-          ScActionChip(
-            icon: LucideIcons.languages,
-            label: 'Transcribe',
-            onPressed: () {},
-          ),
-        ],
-      ),
+      statusTrailing: [
+        ScStateIcon(
+          icon: LucideIcons.languages,
+          label: 'Transcribe',
+          state: ScStepState.todo,
+          onPressed: () {},
+        ),
+        const ScStateIcon(
+          icon: LucideIcons.sparkles,
+          label: 'AI review needs a transcript first',
+          state: ScStepState.disabled,
+        ),
+      ],
     ),
     const SizedBox(height: 18),
     const ScGroupLabel('Today'),
@@ -46,7 +48,20 @@ Widget _notesSample() => ListView(
       icon: LucideIcons.mic,
       title: 'चुनाव आयोग ज्ञानेश कुमार का इस्तीफा होना चाहिए',
       meta: const ['Today · 08:31', '0:49', 'Circuit'],
-      status: 'Transcription ready',
+      statusTrailing: [
+        ScStateIcon(
+          icon: LucideIcons.languages,
+          label: 'Transcribed',
+          state: ScStepState.done,
+          onPressed: () {},
+        ),
+        ScStateIcon(
+          icon: LucideIcons.sparkles,
+          label: 'AI reviewed',
+          state: ScStepState.done,
+          onPressed: () {},
+        ),
+      ],
       trailing: ScPlayButton(onPressed: () {}),
     ),
     ScTile(
@@ -55,6 +70,19 @@ Widget _notesSample() => ListView(
       meta: const ['Today · 07:12', '1:07', 'Phone'],
       status: 'Transcribing…',
       statusColor: Sc.accentInk,
+      statusTrailing: [
+        ScStateIcon(
+          icon: LucideIcons.languages,
+          label: 'Transcribing',
+          state: ScStepState.busy,
+          onPressed: () {},
+        ),
+        const ScStateIcon(
+          icon: LucideIcons.sparkles,
+          label: 'AI review',
+          state: ScStepState.failed,
+        ),
+      ],
       trailing: ScPlayButton(onPressed: () {}),
     ),
     ScTile(

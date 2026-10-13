@@ -572,6 +572,7 @@ class ScTile extends StatelessWidget {
     this.status,
     this.statusIcon,
     this.statusColor,
+    this.statusTrailing = const [],
     this.trailing,
     this.onTap,
     this.footer,
@@ -591,6 +592,9 @@ class ScTile extends StatelessWidget {
   final String? status;
   final IconData? statusIcon;
   final Color? statusColor;
+
+  /// Small icons at the end of the status line (for a note: transcribed, AI reviewed).
+  final List<Widget> statusTrailing;
 
   /// A small marker for the corner of the icon, such as where a note was recorded.
   final Widget? badge;
@@ -658,27 +662,37 @@ class ScTile extends StatelessWidget {
                             ),
                           ),
                         ],
-                        if (status != null && status!.isNotEmpty) ...[
+                        if ((status != null && status!.isNotEmpty) ||
+                            statusTrailing.isNotEmpty) ...[
                           const SizedBox(height: ScSpace.xs),
                           Row(
                             children: [
-                              if (statusIcon != null) ...[
-                                Icon(
-                                  statusIcon,
-                                  size: 14,
-                                  color: statusColor ?? p.muted,
-                                ),
-                                const SizedBox(width: ScSpace.xs),
-                              ],
-                              Flexible(
-                                child: Text(
-                                  status!,
-                                  style: ScType.caption.copyWith(
-                                    color: statusColor ?? p.muted,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
+                              Expanded(
+                                child: status == null || status!.isEmpty
+                                    ? const SizedBox.shrink()
+                                    : Row(
+                                        children: [
+                                          if (statusIcon != null) ...[
+                                            Icon(
+                                              statusIcon,
+                                              size: 14,
+                                              color: statusColor ?? p.muted,
+                                            ),
+                                            const SizedBox(width: ScSpace.xs),
+                                          ],
+                                          Flexible(
+                                            child: Text(
+                                              status!,
+                                              style: ScType.caption.copyWith(
+                                                color: statusColor ?? p.muted,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
                               ),
+                              ...statusTrailing,
                             ],
                           ),
                         ],
@@ -768,6 +782,79 @@ class ScActionChip extends StatelessWidget {
                     ),
                   ],
                 ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum ScStepState { done, todo, busy, failed, disabled }
+
+/// A small round icon that is both a status and a button: filled when the step is done, outlined when it
+/// can be run, a spinner while it runs, red when it failed. The label says which, and what a tap does,
+/// so it is never colour alone. 44 dp to tap, 32 dp to look at.
+class ScStateIcon extends StatelessWidget {
+  const ScStateIcon({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.state,
+    this.onPressed,
+  });
+
+  final IconData icon;
+  final String label;
+  final ScStepState state;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.sc;
+    final (fill, foreground, outline) = switch (state) {
+      ScStepState.done => (p.accentSoft, p.accentInk, Colors.transparent),
+      ScStepState.failed => (p.dangerSoft, p.danger, Colors.transparent),
+      ScStepState.busy => (Colors.transparent, p.accentInk, p.line),
+      ScStepState.todo => (Colors.transparent, p.neutralInk, p.line),
+      ScStepState.disabled => (Colors.transparent, p.muted, p.line),
+    };
+    final tappable =
+        onPressed != null &&
+        state != ScStepState.busy &&
+        state != ScStepState.disabled;
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        button: tappable,
+        enabled: tappable,
+        label: label,
+        excludeSemantics: true,
+        child: InkResponse(
+          onTap: tappable ? onPressed : null,
+          radius: 22,
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: Center(
+              child: Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: fill,
+                  border: Border.all(color: outline),
+                ),
+                child: state == ScStepState.busy
+                    ? Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: foreground,
+                        ),
+                      )
+                    : Icon(icon, size: 16, color: foreground),
               ),
             ),
           ),
