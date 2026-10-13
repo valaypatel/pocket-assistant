@@ -49,8 +49,21 @@ class CaptureDock extends StatefulWidget {
   State<CaptureDock> createState() => _CaptureDockState();
 }
 
-class _CaptureDockState extends State<CaptureDock> {
+class _CaptureDockState extends State<CaptureDock>
+    with TickerProviderStateMixin {
+  // 0 = the pill, 1 = the full-width bar. 0 = label showing, 1 = icon only.
+  late final AnimationController _morph = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 340),
+    value: widget.mode == DockMode.recording ? 1 : 0,
+  );
+  late final AnimationController _collapse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 220),
+    value: widget.collapsed ? 1 : 0,
+  );
   Timer? _tick;
+  bool _still = false;
 
   @override
   void initState() {
@@ -59,9 +72,24 @@ class _CaptureDockState extends State<CaptureDock> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _still = MediaQuery.of(context).disableAnimations;
+  }
+
+  void _go(AnimationController c, double target) {
+    if (_still) {
+      c.value = target;
+    } else {
+      c.animateTo(target, curve: Curves.linear);
+    }
+  }
+
+  @override
   void didUpdateWidget(CaptureDock old) {
     super.didUpdateWidget(old);
     if (old.mode != widget.mode) {
+      _go(_morph, widget.mode == DockMode.recording ? 1 : 0);
       _syncTick();
       if (widget.mode == DockMode.recording) {
         SemanticsService.sendAnnouncement(
@@ -70,6 +98,9 @@ class _CaptureDockState extends State<CaptureDock> {
           Directionality.of(context),
         );
       }
+    }
+    if (old.collapsed != widget.collapsed) {
+      _go(_collapse, widget.collapsed ? 1 : 0);
     }
   }
 
@@ -87,60 +118,108 @@ class _CaptureDockState extends State<CaptureDock> {
   @override
   void dispose() {
     _tick?.cancel();
+    _morph.dispose();
+    _collapse.dispose();
     super.dispose();
+  }
+
+  /// Natural width of the pill with its label, so the grow into the bar is a plain interpolation.
+  double _pillWidth(BuildContext context) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: widget.pillLabel,
+        style: ScType.label.copyWith(fontFamily: 'Roboto', fontSize: 16),
+      ),
+      textDirection: TextDirection.ltr,
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    return 20 + 24 + ScSpace.sm + painter.width + 20;
   }
 
   @override
   Widget build(BuildContext context) {
-    final still = MediaQuery.of(context).disableAnimations;
-    final duration = still ? Duration.zero : const Duration(milliseconds: 260);
     if (widget.mode == DockMode.hidden) return const SizedBox.shrink();
-    final recording = widget.mode == DockMode.recording;
+    final expandedPill = _pillWidth(context);
     return LayoutBuilder(
       builder: (context, constraints) {
         final full = constraints.maxWidth;
-        return Align(
-          alignment: Alignment.centerRight,
-          child: AnimatedContainer(
-            duration: duration,
-            curve: Curves.easeOutCubic,
-            decoration: BoxDecoration(
-              color: recording ? context.sc.ink : context.sc.accent,
-              borderRadius: BorderRadius.circular(ScRadius.pill),
-              boxShadow: const [
-                BoxShadow(
-                  color: Color(0x33000000),
-                  blurRadius: 10,
-                  offset: Offset(0, 3),
-                ),
-              ],
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: AnimatedSize(
-              duration: duration,
-              curve: Curves.easeOutCubic,
+        return AnimatedBuilder(
+          animation: Listenable.merge([_morph, _collapse]),
+          builder: (context, _) {
+            final m = Curves.easeInOutCubic.transform(_morph.value);
+            final c = Curves.easeOutCubic.transform(_collapse.value);
+            final pillW = lerpDouble(expandedPill, 56, c)!;
+            final width = lerpDouble(pillW, full, m)!;
+            // Two lines of text and the padding, so large text makes the bar taller, never clipped.
+            final scaler = MediaQuery.textScalerOf(context);
+            final barHeight = max(
+              64.0,
+              scaler.scale(13 * 18 / 13) + scaler.scale(18 * 24 / 18) + 16,
+            );
+            final height = lerpDouble(56, barHeight, m)!;
+            final barOpacity = ((m - .45) / .55).clamp(0.0, 1.0);
+            final pillOpacity = (1 - m / .55).clamp(0.0, 1.0);
+            return Align(
               alignment: Alignment.centerRight,
-              child: AnimatedSwitcher(
-                duration: duration,
-                child: recording
-                    ? KeyedSubtree(
-                        key: const ValueKey('bar'),
-                        child: SizedBox(width: full, child: _bar(context)),
-                      )
-                    : KeyedSubtree(
-                        key: const ValueKey('pill'),
-                        child: _pill(context),
+              child: Container(
+                width: width,
+                height: height,
+                decoration: BoxDecoration(
+                  color: Color.lerp(context.sc.accent, context.sc.ink, m),
+                  borderRadius: BorderRadius.circular(ScRadius.pill),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x33000000),
+                      blurRadius: 10,
+                      offset: Offset(0, 3),
+                    ),
+                  ],
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: Stack(
+                  children: [
+                    if (pillOpacity > 0)
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          ignoring: m > .5,
+                          child: Opacity(
+                            opacity: pillOpacity,
+                            child: _pill(context, c, expandedPill),
+                          ),
+                        ),
                       ),
+                    if (barOpacity > 0)
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          ignoring: m <= .5,
+                          child: Opacity(
+                            opacity: barOpacity,
+                            // Anchored to the right, where the pill was, so Stop lands under the thumb.
+                            child: OverflowBox(
+                              alignment: Alignment.centerRight,
+                              minWidth: full,
+                              maxWidth: full,
+                              minHeight: barHeight,
+                              maxHeight: barHeight,
+                              child: _bar(context, full),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
-          ),
+            );
+          },
         );
       },
     );
   }
 
-  Widget _pill(BuildContext context) {
+  Widget _pill(BuildContext context, double collapse, double expandedWidth) {
     final fg = context.sc.onAccent;
+    final label = 1 - collapse;
     return Tooltip(
       message: widget.pillTooltip ?? widget.pillLabel,
       child: Semantics(
@@ -150,27 +229,35 @@ class _CaptureDockState extends State<CaptureDock> {
         child: InkWell(
           onTap: widget.onPill,
           onLongPress: widget.onLongPress,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 56, minWidth: 56),
-            child: Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: widget.collapsed ? 16 : 20,
-              ),
+          child: Center(
+            child: OverflowBox(
+              maxWidth: expandedWidth,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(widget.pillIcon, size: 24, color: fg),
-                  if (!widget.collapsed) ...[
-                    const SizedBox(width: ScSpace.sm),
-                    Text(
-                      widget.pillLabel,
-                      style: ScType.label.copyWith(
-                        fontFamily: 'Roboto',
-                        fontSize: 16,
-                        color: fg,
+                  ClipRect(
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      widthFactor: label,
+                      child: Opacity(
+                        opacity: label,
+                        child: Padding(
+                          padding: const EdgeInsets.only(left: ScSpace.sm),
+                          child: Text(
+                            widget.pillLabel,
+                            maxLines: 1,
+                            softWrap: false,
+                            style: ScType.label.copyWith(
+                              fontFamily: 'Roboto',
+                              fontSize: 16,
+                              color: fg,
+                            ),
+                          ),
+                        ),
                       ),
                     ),
-                  ],
+                  ),
                 ],
               ),
             ),
@@ -180,7 +267,10 @@ class _CaptureDockState extends State<CaptureDock> {
     );
   }
 
-  Widget _bar(BuildContext context) {
+  Widget _bar(BuildContext context, double full) {
+    // The meter is the first thing to go when the bar is tight (a narrow phone or large text).
+    final roomy =
+        full >= 340 && MediaQuery.textScalerOf(context).scale(16) <= 20;
     final fg = context.sc.bg;
     final elapsed = widget.elapsed?.call() ?? Duration.zero;
     final level = (widget.level?.call() ?? 0).clamp(0.0, 1.0);
@@ -216,19 +306,28 @@ class _CaptureDockState extends State<CaptureDock> {
                         ),
                       ),
                       ExcludeSemantics(
-                        child: Text(
-                          phoneRecordingClock(elapsed.inMilliseconds),
-                          style: ScType.subtitle.copyWith(
-                            fontFamily: 'Roboto',
-                            color: fg,
-                            fontFeatures: const [FontFeature.tabularFigures()],
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            phoneRecordingClock(elapsed.inMilliseconds),
+                            maxLines: 1,
+                            softWrap: false,
+                            style: ScType.subtitle.copyWith(
+                              fontFamily: 'Roboto',
+                              color: fg,
+                              fontFeatures: const [
+                                FontFeature.tabularFigures(),
+                              ],
+                            ),
                           ),
                         ),
                       ),
                     ],
                   ),
                 ),
-                if (!widget.paused) _LevelMeter(level: level, color: fg),
+                if (!widget.paused && roomy)
+                  _LevelMeter(level: level, color: fg),
                 if (widget.onTogglePause != null)
                   _BarButton(
                     icon: widget.paused ? LucideIcons.play : LucideIcons.pause,

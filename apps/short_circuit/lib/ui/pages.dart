@@ -1956,7 +1956,8 @@ extension _ScPages on _CircuitHomePageState {
     return snack == null
         ? null
         : Padding(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+            key: snack.key,
+            padding: const EdgeInsets.only(top: 8),
             child: snack,
           );
   }
@@ -1975,10 +1976,12 @@ extension _ScPages on _CircuitHomePageState {
         (tab <= 1 || _recordingAudio || _phoneRecording.value != null)
         ? 96.0
         : 28.0;
+    // The player sits under the dock, over the bottom of the list.
+    final listSpace = dockSpace + (_statusSnack() == null ? 0 : 76);
     final list = ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-      padding: EdgeInsets.fromLTRB(24, 18, 24, dockSpace),
+      padding: EdgeInsets.fromLTRB(24, 18, 24, listSpace),
       children: switch (_page) {
         _AppPage.notes => _notesPage(),
         _AppPage.tasks => _tasksPage(),
@@ -2035,6 +2038,8 @@ extension _ScPages on _CircuitHomePageState {
         body: Stack(
           children: [
             Positioned.fill(child: SafeArea(bottom: false, child: body)),
+            // Dock and player share one column: when the player appears the column grows upward over
+            // the pill's own animation, so the Record button glides up instead of jumping.
             Positioned(
               left: 20,
               right: 20,
@@ -2042,7 +2047,37 @@ extension _ScPages on _CircuitHomePageState {
               child: Center(
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 640),
-                  child: _dock(tab),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _dock(tab),
+                      AnimatedSize(
+                        duration: MediaQuery.of(context).disableAnimations
+                            ? Duration.zero
+                            : const Duration(milliseconds: 260),
+                        curve: Curves.easeOutCubic,
+                        alignment: Alignment.topCenter,
+                        child: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 220),
+                          transitionBuilder: (child, animation) =>
+                              FadeTransition(
+                                opacity: animation,
+                                child: SlideTransition(
+                                  position: Tween(
+                                    begin: const Offset(0, .3),
+                                    end: Offset.zero,
+                                  ).animate(animation),
+                                  child: child,
+                                ),
+                              ),
+                          child:
+                              _inlineSnack() ??
+                              const SizedBox.shrink(key: ValueKey('no-snack')),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -2050,11 +2085,7 @@ extension _ScPages on _CircuitHomePageState {
         ),
         bottomNavigationBar: Column(
           mainAxisSize: MainAxisSize.min,
-          children: [
-            // Playback gets its own row here, above the Record button, so nothing is covered.
-            ?_inlineSnack(),
-            ScNavBar(index: tab, onSelect: _selectTab),
-          ],
+          children: [ScNavBar(index: tab, onSelect: _selectTab)],
         ),
       ),
     );

@@ -35,7 +35,8 @@ void main() {
       await tester.pumpWidget(
         _host(const CaptureDock(mode: DockMode.pill, collapsed: true)),
       );
-      expect(find.text('Record'), findsNothing);
+      // The label is folded to nothing, and the pill is just the icon.
+      expect(tester.getSize(find.byType(Container).first).width, 56);
       expect(find.bySemanticsLabel('Record'), findsOneWidget);
     },
   );
@@ -63,7 +64,7 @@ void main() {
     await tester.tap(find.byTooltip('Stop and save'));
     expect(stopped, isTrue);
     // The bar spans the page width.
-    expect(tester.getSize(find.byKey(const ValueKey('bar'))).width, 800 - 40);
+    expect(tester.getSize(find.byType(Container).first).width, 800 - 40);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
@@ -112,5 +113,32 @@ void main() {
   testWidgets('hidden shows nothing', (tester) async {
     await tester.pumpWidget(_host(const CaptureDock(mode: DockMode.hidden)));
     expect(find.byType(InkWell), findsNothing);
+  });
+
+  testWidgets('the pill grows into the bar in small steps, not a jump', (
+    tester,
+  ) async {
+    Widget dock(DockMode mode) => _host(
+      CaptureDock(
+        mode: mode,
+        elapsed: () => const Duration(seconds: 3),
+        onStop: () {},
+      ),
+    );
+    await tester.pumpWidget(dock(DockMode.pill));
+    await tester.pumpWidget(dock(DockMode.recording));
+    final widths = <double>[];
+    for (var i = 0; i < 12; i++) {
+      await tester.pump(const Duration(milliseconds: 30));
+      widths.add(tester.getSize(find.byType(Container).first).width);
+    }
+    for (var i = 1; i < widths.length; i++) {
+      expect(widths[i], greaterThanOrEqualTo(widths[i - 1]));
+      // No single frame covers more than a third of the whole distance.
+      expect(widths[i] - widths[i - 1], lessThan((800 - 40 - 130) / 3));
+    }
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(tester.getSize(find.byType(Container).first).width, 800 - 40);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 }
