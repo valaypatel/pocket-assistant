@@ -401,12 +401,6 @@ extension _ScPages on _CircuitHomePageState {
     return noteStageLabel(note);
   }
 
-  /// The whole line in one string (kept for places that show a note as plain text).
-  String _noteSubtitle(CircuitNote note) {
-    final status = _noteStatusText(note);
-    return [..._noteMeta(note), ?status].join(' · ');
-  }
-
   VoidCallback? _openNote(CircuitNote note) {
     if (note.isSong) {
       return () => Navigator.of(context).push(

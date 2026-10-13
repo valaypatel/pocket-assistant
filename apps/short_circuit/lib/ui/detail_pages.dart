@@ -409,6 +409,9 @@ class _TranscriptPageState extends State<TranscriptPage> {
   /// Bookmarks added on Circuit during the recording, in ms from the start of the note.
   List<int> _moments = const [];
 
+  /// How long the recording plays, worked out from its files; 0 until known.
+  int _lengthMs = 0;
+
   CircuitNote? get _live => widget.noteById?.call(widget.noteId);
 
   Future<void> _approveSuggestion(NoteActionSuggestion suggestion) async {
@@ -475,6 +478,15 @@ class _TranscriptPageState extends State<TranscriptPage> {
   Future<void> _loadMoments() async {
     final files = _live?.audioFiles ?? [?widget.audioPath];
     if (files.isEmpty) return;
+    var total = 0;
+    for (final path in files) {
+      try {
+        total += await Moments.partDurationMs(path);
+      } catch (_) {
+        // a file that cannot be read adds nothing
+      }
+    }
+    if (mounted && total != _lengthMs) setState(() => _lengthMs = total);
     final found = await Moments.forNote(files);
     final same =
         found.length == _moments.length &&
@@ -616,6 +628,97 @@ class _TranscriptPageState extends State<TranscriptPage> {
     super.dispose();
   }
 
+  /// The recording: play it, see how long it is, and jump to a Moment.
+  Widget _playerCard(BuildContext context) {
+    final p = context.sc;
+    return Container(
+      padding: const EdgeInsets.all(ScSpace.lg),
+      decoration: BoxDecoration(
+        color: p.surface,
+        borderRadius: ScRadius.cardBorder,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              ScPlayButton(
+                onPressed: () => widget.onPlayNote(widget.audioPath),
+              ),
+              const SizedBox(width: ScSpace.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Original recording', style: ScType.label),
+                    Text(
+                      _lengthMs >= 1000
+                          ? nowPlayingClock(_lengthMs)
+                          : 'Tap to listen',
+                      style: ScType.caption.copyWith(color: p.muted),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (_moments.isNotEmpty && widget.onPlayMoment != null) ...[
+            const SizedBox(height: ScSpace.lg),
+            Text(
+              'MOMENTS',
+              style: ScType.caption.copyWith(
+                color: p.muted,
+                fontWeight: FontWeight.w600,
+                letterSpacing: .9,
+              ),
+            ),
+            const SizedBox(height: ScSpace.sm),
+            Wrap(
+              spacing: ScSpace.sm,
+              runSpacing: ScSpace.sm,
+              children: [
+                for (final ms in _moments)
+                  Semantics(
+                    button: true,
+                    label: 'Play from ${nowPlayingClock(ms)}',
+                    excludeSemantics: true,
+                    child: Material(
+                      color: p.bg,
+                      shape: StadiumBorder(side: BorderSide(color: p.line)),
+                      child: InkWell(
+                        customBorder: const StadiumBorder(),
+                        onTap: () => widget.onPlayMoment!(widget.noteId, ms),
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(minHeight: 40),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: ScSpace.md + 2,
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  LucideIcons.bookmark,
+                                  size: 16,
+                                  color: p.accentInk,
+                                ),
+                                const SizedBox(width: ScSpace.xs + 2),
+                                Text(nowPlayingClock(ms), style: ScType.label),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final local = widget.createdAt.toLocal();
@@ -643,15 +746,14 @@ class _TranscriptPageState extends State<TranscriptPage> {
                   '${_dayLabel(widget.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}'
                   ' · ${noteSourceOf(widget.audioPath)}',
             ),
-            ScTitle(live?.title ?? _title),
+            Semantics(
+              header: true,
+              child: Text(live?.title ?? _title, style: ScType.display),
+            ),
             const SizedBox(height: 8),
             Text(
               '$status · ${_category.replaceAll('_', ' ')}${language?.isNotEmpty == true ? ' · $language' : ''}',
-              style: const TextStyle(
-                color: Sc.muted,
-                fontSize: 12,
-                height: 1.45,
-              ),
+              style: ScType.caption.copyWith(color: context.sc.muted),
             ),
             const SizedBox(height: 20),
             if ((live?.audioPath ?? widget.audioPath) == null &&
@@ -710,34 +812,8 @@ class _TranscriptPageState extends State<TranscriptPage> {
               const SizedBox(height: 20),
             ],
             if (widget.audioPath != null) ...[
-              ScPanel(
-                color: Sc.surface,
-                child: Row(
-                  children: [
-                    ScPlayButton(
-                      onPressed: () => widget.onPlayNote(widget.audioPath),
-                    ),
-                    const SizedBox(width: 12),
-                    const Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Original recording',
-                            style: TextStyle(fontWeight: FontWeight.w600),
-                          ),
-                          SizedBox(height: 3),
-                          Text(
-                            'Listen while you review',
-                            style: TextStyle(color: Sc.muted, fontSize: 12),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
+              _playerCard(context),
+              const SizedBox(height: ScSpace.lg),
             ],
             Row(
               children: [
@@ -776,12 +852,53 @@ class _TranscriptPageState extends State<TranscriptPage> {
                     ],
                   ),
                 ),
-                if (widget.onEditNote != null)
-                  ScIconButton(
-                    icon: LucideIcons.pencil,
-                    tooltip: 'Edit note',
-                    onPressed: _edit,
-                  ),
+                PopupMenuButton<String>(
+                  tooltip: 'More',
+                  icon: const Icon(LucideIcons.ellipsis),
+                  onSelected: (choice) {
+                    switch (choice) {
+                      case 'edit':
+                        _edit();
+                      case 'review':
+                        widget.onEnrich?.call(widget.noteId);
+                      case 'transcribe':
+                        _transcribeAgain();
+                      case 'delete':
+                        _delete();
+                    }
+                  },
+                  itemBuilder: (context) => [
+                    if (widget.onEditNote != null)
+                      const PopupMenuItem(
+                        value: 'edit',
+                        child: Text('Edit note'),
+                      ),
+                    PopupMenuItem(
+                      value: 'review',
+                      enabled:
+                          hasTranscript &&
+                          widget.onEnrich != null &&
+                          !enriching,
+                      child: Text(
+                        enriching ? 'AI review running' : 'Run AI review again',
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'transcribe',
+                      enabled: !_forcing,
+                      child: Text(
+                        _forcing ? 'Transcribing' : 'Transcribe again',
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'delete',
+                      child: Text(
+                        'Delete note',
+                        style: TextStyle(color: context.sc.danger),
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
             const SizedBox(height: 16),
@@ -793,24 +910,19 @@ class _TranscriptPageState extends State<TranscriptPage> {
                   : hasTranscript
                   ? _transcript
                   : 'Transcript not available yet. The recording will appear here after sync and transcription.',
-              style: TextStyle(
-                fontSize: 16,
-                height: 1.65,
+              style: ScType.transcript.copyWith(
                 color: hasTranscript || summary?.isNotEmpty == true
-                    ? Sc.ink
-                    : Sc.muted,
+                    ? context.sc.ink
+                    : context.sc.muted,
               ),
             ),
             const SizedBox(height: 20),
             if (widget.onOpenChat != null)
-              FilledButton.icon(
-                style: FilledButton.styleFrom(
-                  backgroundColor: Sc.dark,
-                  foregroundColor: Colors.white,
-                ),
+              ScButton(
+                primary: true,
+                icon: LucideIcons.messageCircle,
+                label: 'Ask this note',
                 onPressed: hasTranscript ? widget.onOpenChat : null,
-                icon: const Icon(LucideIcons.messageCircle, size: 18),
-                label: const Text('Ask this note'),
               ),
             if (isCall || categories.isNotEmpty || tags.isNotEmpty) ...[
               const SizedBox(height: 20),
@@ -910,73 +1022,6 @@ class _TranscriptPageState extends State<TranscriptPage> {
                 onTap: _extractingReminder ? null : _createReminder,
               ),
             ],
-            if (_moments.isNotEmpty && widget.onPlayMoment != null) ...[
-              const SizedBox(height: 22),
-              const ScGroupLabel('Moments'),
-              for (var i = 0; i < _moments.length; i++)
-                ScRow(
-                  title: nowPlayingClock(_moments[i]),
-                  caption: 'Moment ${i + 1} · play from here',
-                  trailing: const Icon(
-                    LucideIcons.play,
-                    size: 20,
-                    color: Color(0xff6d5e51),
-                  ),
-                  onTap: () => widget.onPlayMoment!(widget.noteId, _moments[i]),
-                ),
-            ],
-            const SizedBox(height: 22),
-            ScActionBar(
-              children: [
-                ScIconButton(
-                  icon: LucideIcons.play,
-                  tone: ScTone.dark,
-                  caption: 'Play',
-                  tooltip: widget.audioPath == null
-                      ? 'Play recording (not on this phone yet)'
-                      : 'Play recording',
-                  onPressed: widget.audioPath == null
-                      ? null
-                      : () => widget.onPlayNote(widget.audioPath),
-                ),
-                ScIconButton(
-                  icon: LucideIcons.messageCircle,
-                  caption: 'Ask',
-                  tone: ScTone.primary,
-                  tooltip: hasTranscript
-                      ? 'Ask about this note'
-                      : 'Ask about this note (needs a transcript first)',
-                  onPressed: hasTranscript ? widget.onOpenChat : null,
-                ),
-                ScIconButton(
-                  icon: LucideIcons.sparkles,
-                  caption: 'AI review',
-                  busy: enriching,
-                  tooltip: !hasTranscript
-                      ? 'Run AI review (needs a transcript first)'
-                      : enriching
-                      ? 'AI review running'
-                      : 'Run AI review again',
-                  onPressed: hasTranscript && widget.onEnrich != null
-                      ? () => widget.onEnrich!(widget.noteId)
-                      : null,
-                ),
-                ScIconButton(
-                  icon: LucideIcons.languages,
-                  caption: 'Transcribe',
-                  busy: _forcing,
-                  tooltip: _forcing ? 'Transcribing' : 'Transcribe again',
-                  onPressed: _transcribeAgain,
-                ),
-                ScIconButton(
-                  icon: LucideIcons.trash2,
-                  caption: 'Delete',
-                  tone: ScTone.danger,
-                  tooltip: 'Delete note',
-                  onPressed: _delete,
-                ),
-              ],
-            ),
           ],
         ),
       ),

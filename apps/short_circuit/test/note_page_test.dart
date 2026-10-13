@@ -50,13 +50,10 @@ void main() {
     );
     expect(find.byTooltip('Approve suggestion'), findsOneWidget);
     expect(find.byTooltip('Dismiss suggestion'), findsOneWidget);
-    // Deleting must be possible from the note page too (it is further down).
-    await tester.scrollUntilVisible(
-      find.byTooltip('Delete note'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.byTooltip('Delete note'), findsOneWidget);
+    // Deleting must be possible from the note page too (it is in the More menu).
+    await tester.tap(find.byTooltip('More'));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete note'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -114,12 +111,9 @@ void main() {
         ),
       ),
     );
-    await tester.scrollUntilVisible(
-      find.byTooltip('Run AI review again'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.tap(find.byTooltip('Run AI review again'));
+    await tester.tap(find.byTooltip('More'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Run AI review again'));
     await tester.pump();
     expect(requested, 'n3');
     expect(tester.takeException(), isNull);
@@ -256,7 +250,9 @@ void _editTests() {
     );
     await tester.pump();
 
-    await tester.tap(find.byTooltip('Edit note'));
+    await tester.tap(find.byTooltip('More'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit note'));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.widgetWithText(TextField, 'Title'),

@@ -951,54 +951,76 @@ class ScButton extends StatelessWidget {
     required this.label,
     required this.onPressed,
     this.danger = false,
+    this.primary = false,
     this.icon,
     this.busy = false,
   });
   final String label;
   final VoidCallback? onPressed;
   final bool danger;
+
+  /// The one main action on a screen: the accent colour.
+  final bool primary;
   final IconData? icon;
   final bool busy;
 
   @override
-  Widget build(BuildContext context) => SizedBox(
-    width: double.infinity,
-    child: Material(
-      color: danger ? Sc.dangerSoft : Sc.neutralButton,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: busy ? null : onPressed,
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (busy)
-                const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              else if (icon != null)
-                Icon(icon, size: 17, color: danger ? Sc.danger : Sc.neutralInk),
-              if (busy || icon != null) const SizedBox(width: 8),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: onPressed == null && !busy
-                      ? const Color(0xffa89f97)
-                      : (danger ? Sc.danger : Sc.neutralInk),
-                ),
+  Widget build(BuildContext context) {
+    final p = context.sc;
+    final disabled = onPressed == null && !busy;
+    final background = primary
+        ? (disabled ? p.neutralButton : p.accent)
+        : (danger ? p.dangerSoft : p.neutralButton);
+    final foreground = disabled
+        ? p.muted
+        : primary
+        ? p.onAccent
+        : (danger ? p.danger : p.neutralInk);
+    return SizedBox(
+      width: double.infinity,
+      child: Material(
+        color: background,
+        borderRadius: ScRadius.inputBorder,
+        child: InkWell(
+          borderRadius: ScRadius.inputBorder,
+          onTap: busy ? null : onPressed,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: ScSpace.lg,
+                vertical: ScSpace.md,
               ),
-            ],
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (busy)
+                    SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: foreground,
+                      ),
+                    )
+                  else if (icon != null)
+                    Icon(icon, size: 18, color: foreground),
+                  if (busy || icon != null) const SizedBox(width: ScSpace.sm),
+                  Flexible(
+                    child: Text(
+                      label,
+                      textAlign: TextAlign.center,
+                      style: ScType.label.copyWith(color: foreground),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// Persistent destinations stay in one place while notes and devices update.
