@@ -102,6 +102,14 @@ ThemeData _buildTheme(ScPalette p, Brightness brightness) {
         ),
       ),
     ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(
+        foregroundColor:
+            p.accentInk, // the bright accent is under 4.5:1 as text
+        textStyle: ScType.label.copyWith(fontFamily: 'Roboto'),
+        minimumSize: const Size(48, 48),
+      ),
+    ),
     switchTheme: SwitchThemeData(
       thumbColor: WidgetStateProperty.all(Colors.white),
       trackColor: WidgetStateProperty.resolveWith(
@@ -680,6 +688,124 @@ class ScTile extends StatelessWidget {
               ],
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+enum ScStripTone { neutral, progress, danger, good }
+
+/// One line of status at the top of a list: what is true right now and, when it helps, what to do.
+/// Colours come from the theme, so it follows dark mode. A problem or a running sync is announced to
+/// screen readers when it appears.
+class ScStatusStrip extends StatelessWidget {
+  const ScStatusStrip({
+    super.key,
+    required this.tone,
+    required this.title,
+    this.detail,
+    this.leading,
+    this.progress,
+    this.showProgress = false,
+    this.actions = const [],
+  });
+
+  final ScStripTone tone;
+  final String title;
+  final String? detail;
+  final IconData? leading;
+
+  /// 0 to 1 for a determinate bar; with [showProgress] and no value the bar is indeterminate.
+  final double? progress;
+  final bool showProgress;
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.sc;
+    final (background, accent) = switch (tone) {
+      ScStripTone.neutral => (p.surface, p.muted),
+      ScStripTone.progress => (p.hero, p.accent),
+      ScStripTone.danger => (p.dangerSoft, p.danger),
+      ScStripTone.good => (p.circuitCard, p.green),
+    };
+    final titleColor = tone == ScStripTone.danger ? p.danger : p.ink;
+    final stacked = MediaQuery.textScalerOf(context).scale(14) > 19;
+    return Semantics(
+      container: true,
+      liveRegion: tone == ScStripTone.danger || tone == ScStripTone.progress,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: ScSpace.md + 2,
+          vertical: ScSpace.md,
+        ),
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: ScRadius.inputBorder,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                if (tone == ScStripTone.progress)
+                  SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: accent,
+                    ),
+                  )
+                else if (leading != null)
+                  ExcludeSemantics(
+                    child: Icon(leading, size: 20, color: accent),
+                  ),
+                const SizedBox(width: ScSpace.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: ScType.label.copyWith(color: titleColor),
+                      ),
+                      if (detail != null && detail!.isNotEmpty)
+                        Text(
+                          detail!,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          style: ScType.caption.copyWith(color: p.ink),
+                        ),
+                    ],
+                  ),
+                ),
+                // Beside the text normally; under it when text is large and there is no room.
+                if (actions.isNotEmpty && !stacked) ...[
+                  const SizedBox(width: ScSpace.sm),
+                  ...actions,
+                ],
+              ],
+            ),
+            if (actions.isNotEmpty && stacked)
+              Align(
+                alignment: Alignment.centerRight,
+                child: Wrap(spacing: ScSpace.sm, children: actions),
+              ),
+            if (showProgress) ...[
+              const SizedBox(height: ScSpace.md),
+              ClipRRect(
+                borderRadius: ScRadius.pillBorder,
+                child: LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 6,
+                  color: accent,
+                  backgroundColor: p.bg,
+                ),
+              ),
+            ],
+          ],
         ),
       ),
     );

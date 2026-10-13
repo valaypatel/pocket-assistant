@@ -474,6 +474,78 @@ extension _ScPages on _CircuitHomePageState {
     );
   }
 
+  /// The one line of status above the notes: the most important thing right now.
+  Widget _notesStatusStrip(int arriving) {
+    final error = _syncError;
+    if (error != null) {
+      return ScStatusStrip(
+        tone: ScStripTone.danger,
+        leading: LucideIcons.refreshCwOff,
+        title: 'Sync needs attention',
+        detail: error,
+        actions: [
+          TextButton(onPressed: _retrySync, child: const Text('Retry')),
+          IconButton(
+            tooltip: 'Dismiss sync error',
+            icon: const Icon(LucideIcons.x, size: 18),
+            onPressed: () => _update(() => _syncError = null),
+          ),
+        ],
+      );
+    }
+    if (_syncingNoteId != null || _syncActive) {
+      return ScStatusStrip(
+        tone: ScStripTone.progress,
+        title: 'Syncing a voice note',
+        detail: '${_syncProgress ?? 0}%',
+        showProgress: true,
+        progress: _syncProgress == null ? null : _syncProgress! / 100,
+      );
+    }
+    if (arriving > 0) {
+      return ScStatusStrip(
+        tone: ScStripTone.neutral,
+        leading: LucideIcons.download,
+        title: arriving == 1
+            ? 'A longer recording is arriving from Circuit'
+            : '$arriving longer recordings are arriving from Circuit',
+        detail: 'They appear here when all of each is on your phone.',
+      );
+    }
+    if (!_circuitAvailable) {
+      return ScStatusStrip(
+        tone: ScStripTone.neutral,
+        leading: LucideIcons.unplug,
+        title: 'Circuit is not connected',
+        detail: 'Notes already on your phone are still here.',
+        actions: [
+          TextButton(
+            onPressed: () => _goTo(_AppPage.circuit),
+            child: const Text('Open Circuit'),
+          ),
+        ],
+      );
+    }
+    final waiting = _boardWaiting ?? 0;
+    if (waiting > 0) {
+      return ScStatusStrip(
+        tone: ScStripTone.neutral,
+        leading: LucideIcons.refreshCw,
+        title: waiting == 1
+            ? '1 note is waiting on Circuit'
+            : '$waiting notes are waiting on Circuit',
+        actions: [
+          TextButton(onPressed: _retrySync, child: const Text('Sync now')),
+        ],
+      );
+    }
+    return const ScStatusStrip(
+      tone: ScStripTone.good,
+      leading: LucideIcons.circleCheck,
+      title: 'Circuit is connected and everything is synced',
+    );
+  }
+
   Widget _noteTile(CircuitNote note, {bool actions = false}) {
     final attention = _noteNeedsAttention(note);
     final canTranscribe =
@@ -843,6 +915,8 @@ extension _ScPages on _CircuitHomePageState {
                 ),
         ),
       ),
+      const SizedBox(height: 12),
+      _notesStatusStrip(arriving),
       if (shownNotes.isNotEmpty) ...[
         const SizedBox(height: 12),
         NoteSourceFilter(
@@ -855,18 +929,7 @@ extension _ScPages on _CircuitHomePageState {
           onChanged: (choice) => _update(() => _noteSource = choice),
         ),
       ],
-      if (arriving > 0) ...[
-        const SizedBox(height: 12),
-        Text(
-          arriving == 1
-              ? 'A longer recording is still arriving from Circuit. It appears here when all of it is on your phone.'
-              : '$arriving longer recordings are still arriving from Circuit. They appear here when all of each is on your phone.',
-          style: const TextStyle(color: Sc.muted, fontSize: 13),
-        ),
-      ],
-      const SizedBox(height: 14),
-      _syncHealthCard(),
-      _syncBanner(),
+      const SizedBox(height: 12),
       _groupsRow(),
       if (visibleNotes.any(_noteNeedsAttention)) ...[
         const SizedBox(height: 18),
