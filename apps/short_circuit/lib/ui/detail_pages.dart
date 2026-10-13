@@ -321,6 +321,7 @@ class TranscriptPage extends StatefulWidget {
     required this.title,
     required this.status,
     required this.transcript,
+    this.onUseRun,
     required this.onForceTranscribe,
     this.onSyncNote,
     required this.audioPath,
@@ -389,6 +390,9 @@ class TranscriptPage extends StatefulWidget {
 
   /// Opens the chat about this note.
   final VoidCallback? onOpenChat;
+
+  /// Makes the transcription at this index the working transcript again.
+  final Future<void> Function(String noteId, int runIndex)? onUseRun;
 
   /// Saves a hand-edited title and transcript. Hides the edit button when null.
   final Future<void> Function(String noteId, String title, String transcript)?
@@ -608,6 +612,194 @@ class _TranscriptPageState extends State<TranscriptPage> {
       _transcript = transcript;
     });
     _snack('Note updated.');
+  }
+
+  TextStyle _readStyle(BuildContext context, bool filled) => ScType.transcript
+      .copyWith(color: filled ? context.sc.ink : context.sc.muted);
+
+  String _runLabel(TranscriptRun run) =>
+      '${run.model.isEmpty ? 'Unknown model' : run.model} · ${_dayLabel(run.at)} ${_two(run.at.hour)}:${_two(run.at.minute)}';
+
+  /// The transcript as a first-class thing: where it came from, whether it was edited, what the AI
+  /// review has seen, and the two actions that matter (edit it, then review it).
+  Widget _transcriptPanel(
+    BuildContext context,
+    CircuitNote? live,
+    bool hasTranscript,
+    bool enriching,
+  ) {
+    final runs = live?.transcriptRuns ?? const <TranscriptRun>[];
+    final edited = live?.transcriptEdited ?? false;
+    final stale = live?.reviewStale ?? false;
+    final reviewed = live?.enrichmentStatus == 'ready';
+    final source = runs.isEmpty
+        ? 'Original transcript'
+        : edited
+        ? 'Edited by you · original by ${runs.last.model}'
+        : 'Original · ${_runLabel(runs.last)}';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (hasTranscript) ...[
+          Row(
+            children: [
+              Icon(
+                edited ? LucideIcons.pencil : LucideIcons.fileText,
+                size: 16,
+                color: context.sc.muted,
+              ),
+              const SizedBox(width: ScSpace.sm),
+              Expanded(
+                child: Text(
+                  source,
+                  style: ScType.caption.copyWith(color: context.sc.muted),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: ScSpace.md),
+        ],
+        if (stale && hasTranscript && !enriching) ...[
+          ScStatusStrip(
+            tone: ScStripTone.neutral,
+            leading: LucideIcons.refreshCw,
+            title: 'The summary is out of date',
+            detail: 'You changed the transcript after the AI review.',
+            actions: [
+              if (widget.onEnrich != null)
+                TextButton(
+                  onPressed: () => widget.onEnrich!(widget.noteId),
+                  child: const Text('Review again'),
+                ),
+            ],
+          ),
+          const SizedBox(height: ScSpace.md),
+        ],
+        SelectableText(
+          hasTranscript ? _transcript : 'Transcript not available yet. The recording will appear here after sync and transcription.',
+          style: _readStyle(context, hasTranscript),
+        ),
+        if (hasTranscript) ...[
+          const SizedBox(height: ScSpace.lg),
+          Wrap(
+            spacing: ScSpace.sm,
+            runSpacing: ScSpace.sm,
+            children: [
+              if (widget.onEditNote != null)
+                ScActionChip(
+                  icon: LucideIcons.pencil,
+                  label: 'Edit transcript',
+                  onPressed: _edit,
+                ),
+              if (widget.onEnrich != null)
+                ScActionChip(
+                  icon: LucideIcons.sparkles,
+                  label: enriching
+                      ? 'AI review running'
+                      : reviewed && !stale
+                      ? 'Review again'
+                      : 'Run AI review',
+                  onPressed: enriching
+                      ? null
+                      : () => widget.onEnrich!(widget.noteId),
+                ),
+              if (edited && runs.isNotEmpty && widget.onUseRun != null)
+                ScActionChip(
+                  icon: LucideIcons.undo2,
+                  label: 'Back to original',
+                  onPressed: () async {
+                    await widget.onUseRun!(widget.noteId, runs.length - 1);
+                    if (!mounted) return;
+                    setState(() => _transcript = runs.last.text);
+                    _snack('Original transcript restored.');
+                  },
+                ),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// Every transcription of this note, to read side by side and to pick one as the working copy.
+  Future<void> _showVersions() async {
+    final runs = _live?.transcriptRuns ?? const <TranscriptRun>[];
+    if (runs.isEmpty) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      backgroundColor: context.sc.bg,
+      builder: (sheetContext) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: .8,
+        maxChildSize: .95,
+        builder: (context, scroll) => ListView(
+          controller: scroll,
+          padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+          children: [
+            const ScTitle('Transcript versions'),
+            const SizedBox(height: ScSpace.sm),
+            Text(
+              'Each time this note is transcribed, the result is kept here with the model that wrote it.',
+              style: ScType.caption.copyWith(color: context.sc.muted),
+            ),
+            const SizedBox(height: ScSpace.lg),
+            for (var i = runs.length - 1; i >= 0; i--) ...[
+              Container(
+                padding: const EdgeInsets.all(ScSpace.lg),
+                decoration: BoxDecoration(
+                  color: context.sc.surface,
+                  borderRadius: ScRadius.cardBorder,
+                  border: Border.all(color: context.sc.line),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      i == runs.length - 1
+                          ? 'Latest · ${_runLabel(runs[i])}'
+                          : _runLabel(runs[i]),
+                      style: ScType.label.copyWith(color: context.sc.ink),
+                    ),
+                    const SizedBox(height: ScSpace.sm),
+                    SelectableText(
+                      runs[i].text.isEmpty ? '(empty)' : runs[i].text,
+                      style: ScType.body.copyWith(color: context.sc.ink),
+                    ),
+                    if (widget.onUseRun != null &&
+                        runs[i].text != _transcript) ...[
+                      const SizedBox(height: ScSpace.md),
+                      ScActionChip(
+                        icon: LucideIcons.check,
+                        label: 'Use this version',
+                        onPressed: () async {
+                          await widget.onUseRun!(widget.noteId, i);
+                          if (!mounted) return;
+                          setState(() => _transcript = runs[i].text);
+                          if (sheetContext.mounted) Navigator.pop(sheetContext);
+                          _snack('Using this version.');
+                        },
+                      ),
+                    ] else if (runs[i].text == _transcript) ...[
+                      const SizedBox(height: ScSpace.sm),
+                      Text(
+                        'This is the transcript in use.',
+                        style: ScType.caption.copyWith(
+                          color: context.sc.accentInk,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: ScSpace.md),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _delete() async {
@@ -871,6 +1063,8 @@ class _TranscriptPageState extends State<TranscriptPage> {
                         widget.onEnrich?.call(widget.noteId);
                       case 'transcribe':
                         _transcribeAgain();
+                      case 'versions':
+                        _showVersions();
                       case 'delete':
                         _delete();
                     }
@@ -891,6 +1085,13 @@ class _TranscriptPageState extends State<TranscriptPage> {
                         enriching ? 'AI review running' : 'Run AI review again',
                       ),
                     ),
+                    if ((live?.transcriptRuns.isNotEmpty ?? false))
+                      PopupMenuItem(
+                        value: 'versions',
+                        child: Text(
+                          'Transcript versions (${live!.transcriptRuns.length})',
+                        ),
+                      ),
                     PopupMenuItem(
                       value: 'transcribe',
                       enabled: !_forcing,
@@ -910,20 +1111,12 @@ class _TranscriptPageState extends State<TranscriptPage> {
               ],
             ),
             const SizedBox(height: 16),
-            SelectableText(
-              _readingTab == 'Translation' && translation?.isNotEmpty == true
-                  ? translation!
-                  : _readingTab == 'Summary' && summary?.isNotEmpty == true
-                  ? summary!
-                  : hasTranscript
-                  ? _transcript
-                  : 'Transcript not available yet. The recording will appear here after sync and transcription.',
-              style: ScType.transcript.copyWith(
-                color: hasTranscript || summary?.isNotEmpty == true
-                    ? context.sc.ink
-                    : context.sc.muted,
-              ),
-            ),
+            if (_readingTab == 'Translation' && translation?.isNotEmpty == true)
+              SelectableText(translation!, style: _readStyle(context, true))
+            else if (_readingTab == 'Summary' && summary?.isNotEmpty == true)
+              SelectableText(summary!, style: _readStyle(context, true))
+            else
+              _transcriptPanel(context, live, hasTranscript, enriching),
             const SizedBox(height: 20),
             if (widget.onOpenChat != null)
               ScButton(

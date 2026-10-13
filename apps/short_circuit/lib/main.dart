@@ -774,6 +774,32 @@ class ReminderDraft {
   final String details;
 }
 
+/// One transcription of a note: which model wrote it, when, and exactly what it said. Kept apart from the
+/// working transcript (which the person can edit) so the original is never lost and runs by different
+/// models can be compared.
+class TranscriptRun {
+  const TranscriptRun({
+    required this.model,
+    required this.text,
+    required this.at,
+  });
+  final String model;
+  final String text;
+  final DateTime at;
+
+  factory TranscriptRun.fromJson(Map<String, dynamic> json) => TranscriptRun(
+    model: json['model']?.toString() ?? '',
+    text: json['text']?.toString() ?? '',
+    at: DateTime.tryParse(json['at']?.toString() ?? '') ?? DateTime.now(),
+  );
+
+  Map<String, dynamic> toJson() => {
+    'model': model,
+    'text': text,
+    'at': at.toIso8601String(),
+  };
+}
+
 class CircuitNote {
   const CircuitNote({
     required this.id,
@@ -797,6 +823,10 @@ class CircuitNote {
     this.audioParts = const [],
     this.partTexts = const [],
     this.isCall = false,
+    this.transcriptRuns = const [],
+    this.transcriptEdited = false,
+    this.reviewStale = false,
+    this.reviewModel,
   });
 
   final String id;
@@ -842,6 +872,19 @@ class CircuitNote {
   /// Transcription judged this recording to be a phone call.
   final bool isCall;
 
+  /// Every transcription made of this note, oldest first. [transcript] is the working copy: it starts as
+  /// the latest run and is what AI review reads; the person may edit it without touching the runs.
+  final List<TranscriptRun> transcriptRuns;
+
+  /// The working transcript differs from the latest run because the person edited it.
+  final bool transcriptEdited;
+
+  /// The transcript changed after the last AI review, so the summary may be out of date.
+  final bool reviewStale;
+
+  /// The model that wrote the current AI review.
+  final String? reviewModel;
+
   bool get isSong => kind == 'song';
 
   /// Where the recording was made: 'Phone' (this phone's own recorder) or 'Circuit'.
@@ -882,6 +925,13 @@ class CircuitNote {
         .map((value) => value?.toString())
         .toList(),
     isCall: json['isCall'] == true,
+    transcriptRuns: (json['transcriptRuns'] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(TranscriptRun.fromJson)
+        .toList(),
+    transcriptEdited: json['transcriptEdited'] == true,
+    reviewStale: json['reviewStale'] == true,
+    reviewModel: json['reviewModel'] as String?,
   );
 
   CircuitNote copyWith({
@@ -904,6 +954,10 @@ class CircuitNote {
     List<String>? audioParts,
     List<String?>? partTexts,
     bool? isCall,
+    List<TranscriptRun>? transcriptRuns,
+    bool? transcriptEdited,
+    bool? reviewStale,
+    String? reviewModel,
     bool clearSong = false,
   }) => CircuitNote(
     id: id,
@@ -927,6 +981,10 @@ class CircuitNote {
     audioParts: audioParts ?? this.audioParts,
     partTexts: partTexts ?? this.partTexts,
     isCall: isCall ?? this.isCall,
+    transcriptRuns: transcriptRuns ?? this.transcriptRuns,
+    transcriptEdited: transcriptEdited ?? this.transcriptEdited,
+    reviewStale: reviewStale ?? this.reviewStale,
+    reviewModel: reviewModel ?? this.reviewModel,
   );
 
   Map<String, dynamic> toJson() => {
@@ -954,6 +1012,11 @@ class CircuitNote {
     if (audioParts.isNotEmpty) 'audioParts': audioParts,
     if (partTexts.isNotEmpty) 'partTexts': partTexts,
     if (isCall) 'isCall': true,
+    if (transcriptRuns.isNotEmpty)
+      'transcriptRuns': transcriptRuns.map((r) => r.toJson()).toList(),
+    if (transcriptEdited) 'transcriptEdited': true,
+    if (reviewStale) 'reviewStale': true,
+    if (reviewModel != null) 'reviewModel': reviewModel!,
   };
 }
 
@@ -1438,15 +1501,23 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     String id,
     GeminiTranscription transcription,
   ) async {
+    final model = await const GeminiClient().model();
+    final text = Moments.numberMarkers(transcription.transcript);
     final notes = _notes
         .map(
           (note) => note.id == id
               ? note.copyWith(
+                  transcriptRuns: [
+                    ...note.transcriptRuns,
+                    TranscriptRun(model: model, text: text, at: DateTime.now()),
+                  ].reversed.take(8).toList().reversed.toList(),
+                  transcriptEdited: false,
+                  reviewStale: false,
                   status: _aiConnected
                       ? 'Transcribed. Analysing…'
                       : 'Transcribed. Add an AI service for smart review.',
                   // [[MOMENT]] markers from the model become [Moment 1], [Moment 2]... across the whole note
-                  transcript: Moments.numberMarkers(transcription.transcript),
+                  transcript: text,
                   title: note.titleEdited ? note.title : transcription.title,
                   category: transcription.category,
                   isCall: transcription.isCall,
@@ -1580,6 +1651,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         enrichmentStatus: 'enriching',
       ),
     );
+    final reviewModel = await const GeminiClient().model();
     try {
       final enrichment = await _ai.enrich(
         transcript,
@@ -1613,6 +1685,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
           englishTranslation: enrichment.englishTranslation,
           language: enrichment.language,
           enrichmentStatus: 'ready',
+          reviewStale: false,
+          reviewModel: reviewModel,
           actionSuggestions: merged,
         );
       });
@@ -2774,13 +2848,31 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   Future<void> _editNote(String id, String title, String transcript) async {
     await _updateNote(id, (note) {
       final changed = transcript != (note.transcript ?? '');
+      final latest = note.transcriptRuns.lastOrNull?.text;
+      final reviewed = note.enrichmentStatus == 'ready';
       return note.copyWith(
         title: title,
         titleEdited: true,
         transcript: transcript,
-        enrichmentStatus: changed && transcript.isNotEmpty
-            ? 'pending'
-            : note.enrichmentStatus,
+        // Whether to review again is the person's call: an edit only says the review is out of date.
+        transcriptEdited: latest != null ? transcript != latest : changed,
+        reviewStale: changed && reviewed ? true : note.reviewStale,
+      );
+    });
+  }
+
+  /// Makes an earlier transcription the working transcript again.
+  Future<void> _useTranscriptRun(String id, int index) async {
+    await _updateNote(id, (note) {
+      if (index < 0 || index >= note.transcriptRuns.length) return note;
+      final run = note.transcriptRuns[index];
+      final changed = run.text != (note.transcript ?? '');
+      return note.copyWith(
+        transcript: run.text,
+        transcriptEdited: index != note.transcriptRuns.length - 1,
+        reviewStale: changed && note.enrichmentStatus == 'ready'
+            ? true
+            : note.reviewStale,
       );
     });
   }
