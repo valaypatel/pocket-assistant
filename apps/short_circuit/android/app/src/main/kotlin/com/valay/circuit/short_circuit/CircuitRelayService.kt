@@ -159,6 +159,8 @@ class CircuitRelayService : Service() {
     private var syncAckedBytes = 0L
     private var syncGapReported = false
     private var syncLastDuplicateAckMs = 0L
+    // The note's Moments file, arriving as base64 text ahead of its audio; kept only if the note checks out.
+    private var syncMomentChunks: Array<String?>? = null
     private val reconnectRunnable = Runnable { circuitAddress?.let(::connect) }
     // Turning Bluetooth off kills the connection without a callback, and nothing then
     // brought it back when Bluetooth returned. Follow the adapter instead.
@@ -459,6 +461,34 @@ class CircuitRelayService : Service() {
         }
     }
 
+    /** "Moments\n<note number>\n<n>/<count>\n<base64>": one piece of the note's sealed Moments file. */
+    private fun collectMomentChunk(status: String) {
+        val lines = status.split('\n')
+        if (lines.size < 4 || syncOutput == null || lines[1].toLongOrNull() != syncBoardId) return
+        val position = lines[2].split('/')
+        val index = position.getOrNull(0)?.toIntOrNull() ?: return
+        val count = position.getOrNull(1)?.toIntOrNull() ?: return
+        if (count < 1 || count > 16 || index < 1 || index > count) return
+        val chunks = syncMomentChunks?.takeIf { it.size == count } ?: arrayOfNulls<String>(count).also { syncMomentChunks = it }
+        chunks[index - 1] = lines[3].trim()
+    }
+
+    /** Saves the Moments beside the note, like the Wi-Fi sync, if every piece came and it is a plausible size. */
+    private fun saveMoments() {
+        val chunks = syncMomentChunks ?: return
+        syncMomentChunks = null
+        if (chunks.any { it == null }) return
+        try {
+            val bytes = android.util.Base64.decode(chunks.joinToString(""), android.util.Base64.DEFAULT)
+            if (bytes.isNotEmpty() && bytes.size <= 1024) {
+                File(filesDir, "${NoteListing.momentsPrefix}$syncBoardId.cmom").writeBytes(bytes)
+                Log.i("CircuitSync", "Saved ${bytes.size} B of moments for note $syncBoardId")
+            }
+        } catch (_: IllegalArgumentException) {
+            // damaged text: the note is kept without its Moments
+        }
+    }
+
     /** Every byte is here: check the whole file against the length and CRC the board announced. */
     private fun finishNoteTransfer() {
         val output = syncOutput ?: return
@@ -484,6 +514,7 @@ class CircuitRelayService : Service() {
             resetNoteTransfer()
             return
         }
+        saveMoments()
         sendTransferMessage("@xfer-ok")
         Log.i("CircuitSync", "Saved note $syncBoardId over Bluetooth as ${target.name} (${syncExpectedBytes} B)")
         Diagnostics.event(
@@ -494,6 +525,8 @@ class CircuitRelayService : Service() {
         )
         latestSyncedFile = target.absolutePath
         publishAudioStatus("Sync complete: ready on phone|${target.absolutePath}|$syncRecordedAt")
+        // The app ends its sync (banner, busy state) on this, as it does after the Wi-Fi download.
+        publishAudioStatus("Sync complete: all notes saved")
         resetNoteTransfer()
     }
 
@@ -529,6 +562,10 @@ class CircuitRelayService : Service() {
         if (request.startsWith("@audio-status\n")) {
             val status = request.substringAfter("@audio-status\n")
             when {
+                status.startsWith("Moments\n") -> {
+                    collectMomentChunk(status)
+                    return
+                }
                 status.startsWith("Sync started\n") -> {
                     if (!beginAudioSync(status)) {
                         publishAudioStatus("Sync failed: update the Circuit app to sync over Bluetooth")
@@ -585,7 +622,6 @@ class CircuitRelayService : Service() {
         // No response is waited for: the board is busy sending, and a response stuck behind its notifications
         // would hold every later acknowledgement up. Acknowledgements are cumulative, so one lost is made good by the next.
         val started = writeCommand(message, noResponse = true)
-        Log.i("CircuitSync", "Bluetooth transfer: sent ${message.replace('\n', ' ')} -> $started")
         if (started) pendingTransfer = null
     }
 
@@ -606,6 +642,7 @@ class CircuitRelayService : Service() {
         syncReceivedBytes = 0
         syncAckedBytes = 0
         syncGapReported = false
+        syncMomentChunks = null
         syncCrc = java.util.zip.CRC32()
         syncStartedMs = SystemClock.elapsedRealtime()
         syncFile = File(filesDir, "circuit-ble-$id.part")

@@ -1369,6 +1369,35 @@ const char *ble_cannot_carry(uint32_t only_recording, circuit_notes::Note *oldes
     return nullptr;
 }
 
+// The Moments of the note about to be sent (circuit_moments.h): the small sealed file, as base64 text in a few
+// messages, "Moments\n<note number>\n<n>/<count>\n<base64>". The phone keeps it beside the note exactly as the
+// Wi-Fi sync does, once the note itself has arrived and checked out. The file is sealed, so a message that goes
+// missing or is damaged can only cost the moments, never the note.
+void send_moments_before_ble_transfer(uint32_t note_id) {
+    char path[48];
+    circuit_moments::path_for(note_id, path, sizeof(path));
+    FILE *in = fopen(path, "rb");
+    if (in == nullptr) return;
+    uint8_t raw[circuit_moments::kFileMax];
+    const size_t length = fread(raw, 1, sizeof(raw), in);
+    fclose(in);
+    constexpr size_t kRawPerMessage = 84;  // 112 base64 characters
+    const size_t count = (length + kRawPerMessage - 1) / kRawPerMessage;
+    for (size_t i = 0; i < count; ++i) {
+        const size_t take = length - i * kRawPerMessage < kRawPerMessage ? length - i * kRawPerMessage : kRawPerMessage;
+        char encoded[120];
+        size_t written = 0;
+        if (mbedtls_base64_encode(reinterpret_cast<unsigned char *>(encoded), sizeof(encoded) - 1, &written,
+                                  raw + i * kRawPerMessage, take) != 0) return;
+        encoded[written] = '\0';
+        char text[kMaxTextBytes + 1];
+        snprintf(text, sizeof(text), "Moments\n%lu\n%u/%u\n%s", static_cast<unsigned long>(note_id),
+                 static_cast<unsigned>(i + 1), static_cast<unsigned>(count), encoded);
+        report_audio_status(text);
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+}
+
 void audio_sync_task(void *) {
     circuit_notes::Note oldest[1];
     const size_t waiting = circuit_notes::list_unsynced(oldest, 1);
@@ -1419,6 +1448,7 @@ void audio_sync_task(void *) {
     update_storage_status("Syncing audio\n0%");
     report_audio_status(started);
     vTaskDelay(pdMS_TO_TICKS(300));  // the phone opens its file on this message
+    send_moments_before_ble_transfer(oldest[0].id);
 
     const uint32_t total = static_cast<uint32_t>(length);
     uint32_t next = 0;  // next offset to send

@@ -515,7 +515,7 @@ extension _ScPages on _CircuitHomePageState {
         ],
       );
     }
-    final waiting = _boardWaiting ?? 0;
+    final waiting = _waitingCount;
     if (waiting > 0) {
       return ScStatusStrip(
         tone: ScStripTone.neutral,
@@ -1234,8 +1234,7 @@ extension _ScPages on _CircuitHomePageState {
   /// what can be done right now (connect, or record and manage), and the technical details are folded away.
   List<Widget> _circuitPage() {
     final available = _circuitAvailable;
-    final waiting =
-        _boardWaiting ?? _notes.where((n) => n.audioPath == null).length;
+    final waiting = _waitingCount;
     final idle =
         available &&
         !_audioBusy &&

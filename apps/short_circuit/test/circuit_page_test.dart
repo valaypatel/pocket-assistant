@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -82,6 +84,25 @@ void main() {
     expect(find.text('Circuit'), findsWidgets);
     expect(find.text('Bluetooth address'), findsNothing);
     expect(find.text('Wi-Fi MAC address'), findsNothing);
+    await close(tester);
+  });
+
+  testWidgets('a note still waiting for its audio is never called synced', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'circuit_notes': jsonEncode([
+        CircuitNote(
+          id: 'w',
+          createdAt: DateTime.now().subtract(const Duration(seconds: 20)),
+          status: 'Recording saved on Circuit.',
+          boardId: 77,
+        ).toJson(),
+      ]),
+    });
+    await open(tester, tab: 'Notes');
+    expect(find.text('1 note is waiting on Circuit'), findsOneWidget);
+    expect(find.textContaining('everything is synced'), findsNothing);
     await close(tester);
   });
 }

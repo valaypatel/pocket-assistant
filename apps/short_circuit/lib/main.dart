@@ -2437,11 +2437,17 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         !note.status.startsWith('Waiting for part'),
   );
 
+  /// Notes still to arrive from Circuit: what it says it holds, or the notes here still waiting for their
+  /// audio, whichever is more. One number for every screen, so none says "synced" while another says "waiting".
+  int get _waitingCount =>
+      max(_boardWaiting ?? 0, _notesWithoutAudio(DateTime.now()).length);
+
   Future<void> _pruneLostNotes() async {
     // Only when Circuit itself says nothing at all is waiting. A sync of one note ends with the
     // same "saved" message, and the other notes are then still on the board.
     if (_boardWaiting != 0) return;
-    final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
+    // Two minutes is time enough for a sync that is on its way to start; after that nothing is coming.
+    final cutoff = DateTime.now().subtract(const Duration(minutes: 2));
     final lost = _notesWithoutAudio(cutoff)
         .where(
           (note) =>
