@@ -12,6 +12,7 @@
 #endif
 #include "esp_app_desc.h"
 #include "esp_bt.h"
+#include "esp_crc.h"
 #include "esp_bt_main.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
@@ -79,9 +80,15 @@ constexpr uint32_t kMaxRecordingSeconds = 8 * 3600;  // a safety stop; the card 
 constexpr uint32_t kPartSeconds = 60;                // one part of a longer recording
 constexpr uint64_t kMinFreeCardBytes = 8ull * 1024 * 1024;  // less than this and a recording stops
 uint64_t sd_free_bytes();
-// Use the established relay characteristic for binary audio packets too. This
-// avoids requiring Android to discard a bonded device's cached GATT table.
-constexpr size_t kAudioPacketBytes = 158;
+// Small notes can go to the phone over Bluetooth when there is no Wi-Fi sync (see "Bluetooth transfer"
+// below); bigger ones need Wi-Fi. The data uses the established relay characteristic, so Android does not
+// have to discard a bonded device's cached GATT table.
+constexpr uint16_t kBleMtu = 247;                    // 244 bytes per notification
+constexpr size_t kBlePacketHeader = 6;               // 0xA5 0x5A, then the offset of the data (u32, little endian)
+constexpr size_t kBleDataBytes = kBleMtu - 3 - kBlePacketHeader;
+constexpr uint32_t kBleMaxNoteBytes = 2u * 1024 * 1024;  // a full one-minute part is about 1.9 MB
+constexpr uint32_t kBleWindowBytes = 16 * 1024;      // sent ahead of the phone's last acknowledgement
+constexpr int kBleBurstPackets = 3;                  // sent back to back before yielding for a tick
 // The upper side button is the BOOT button (GPIO0). The lower GPIO18 button
 // is power-related, so it deliberately remains outside the audio controls.
 constexpr gpio_num_t kRecordButtonPin = GPIO_NUM_0;
@@ -132,6 +139,11 @@ bool audio_ready = false;
 // claim_audio() so two requests arriving together (the key and the app) cannot both win.
 std::atomic<bool> audio_busy{false};
 TaskHandle_t audio_sync_task_handle = nullptr;
+// What the phone has told the sync task during a Bluetooth transfer (written from the GATT callback).
+std::atomic<uint32_t> ble_acked{0};      // the phone has every byte below this offset
+std::atomic<int64_t> ble_rewind{-1};     // the phone saw a gap: send again from this offset
+std::atomic<int> ble_verdict{0};         // 1: the whole file checked out on the phone, -1: it did not
+std::atomic<bool> ble_congested{false};  // the Bluetooth stack's send queue is full
 volatile bool recording_active = false;
 volatile bool recording_stop_requested = false;
 volatile bool recording_paused = false;
@@ -192,7 +204,7 @@ bool free_audio_from_playback() {
     for (int waited_ms = 0; audio_busy && waited_ms < 3000; waited_ms += 20) vTaskDelay(pdMS_TO_TICKS(20));
     return !audio_busy;
 }
-esp_err_t send_audio_data(const uint8_t *data, size_t length);
+esp_err_t send_note_packet(uint32_t offset, const uint8_t *data, size_t length);
 
 struct TextMessage {
     char value[kMaxTextBytes + 1];
@@ -1314,16 +1326,62 @@ void toggle_pause_recording() {
     report_audio_status(recording_paused ? "Recording paused" : "Recording resumed");
 }
 
-// Slow BLE fallback, used only for a force sync with no Wi-Fi sync available.
-// Sends the oldest unsynced note and marks it synced once every packet has been
-// acknowledged by the phone's BLE stack.
+// ---- Bluetooth transfer of small notes ------------------------------------------------------
+// Used when Wi-Fi sync is not possible and the note is small (one part, under kBleMaxNoteBytes). The note
+// is sent in numbered packets ("0xA5 0x5A", the offset, the data) as notifications, a window ahead of the
+// phone, which tells the board how far it has everything ("@xfer-ack\n<offset>") or where a gap is
+// ("@xfer-nak\n<offset>"). Before the first byte the board announces the length and the CRC-32 of the
+// file; the phone checks the whole file against it and answers "@xfer-ok" or "@xfer-fail". Only "@xfer-ok"
+// marks the note synced, so a transfer that lost anything never counts as done.
+
+// Reads "@xfer-*" messages from the phone straight in the GATT callback, so an acknowledgement is not
+// queued behind other commands. True if the message was one of them.
+bool handle_transfer_message(const uint8_t *value, size_t length) {
+    char text[40];
+    const size_t n = length < sizeof(text) - 1 ? length : sizeof(text) - 1;
+    memcpy(text, value, n);
+    text[n] = '\0';
+    if (strncmp(text, "@xfer-", 6) != 0) return false;
+    unsigned long offset = 0;
+    if (sscanf(text, "@xfer-ack\n%lu", &offset) == 1) {
+        uint32_t seen = ble_acked.load();
+        while (offset > seen && !ble_acked.compare_exchange_weak(seen, static_cast<uint32_t>(offset))) {}
+    } else if (sscanf(text, "@xfer-nak\n%lu", &offset) == 1) {
+        ESP_LOGW(kTag, "BT xfer: phone reports a gap at %lu", offset);
+        ble_rewind = static_cast<int64_t>(offset);
+        ble_acked = static_cast<uint32_t>(offset);  // it has everything below the gap, and nothing past it
+    } else if (strncmp(text, "@xfer-ok", 8) == 0) {
+        ble_verdict = 1;
+    } else if (strncmp(text, "@xfer-fail", 10) == 0) {
+        ble_verdict = -1;
+    }
+    if (audio_sync_task_handle != nullptr) xTaskNotifyGive(audio_sync_task_handle);
+    return true;
+}
+
+// Why the oldest waiting note cannot go over Bluetooth, or nullptr if it can.
+const char *ble_cannot_carry(uint32_t only_recording, circuit_notes::Note *oldest) {
+    if (circuit_notes::list_unsynced_of(oldest, 1, only_recording) == 0) return "nothing waiting";
+    circuit_notes::Group group;
+    if (circuit_notes::read_group(oldest->id, &group)) return "this is part of a long recording";
+    if (oldest->bytes > kBleMaxNoteBytes) return "this note is too large";
+    if (!ble_encrypted || connection_id == UINT16_MAX || relay_handle == 0) return "the phone is not connected";
+    return nullptr;
+}
+
 void audio_sync_task(void *) {
     circuit_notes::Note oldest[1];
     const size_t waiting = circuit_notes::list_unsynced(oldest, 1);
-    char latest[48] = {};
-    if (waiting > 0) circuit_notes::note_path(oldest[0], latest, sizeof(latest));
-    FILE *file = waiting > 0 ? fopen(latest, "rb") : nullptr;
-    if (file == nullptr || connection_id == UINT16_MAX || relay_handle == 0) {
+    char path[48] = {};
+    if (waiting > 0) circuit_notes::note_path(oldest[0], path, sizeof(path));
+    FILE *file = waiting > 0 ? fopen(path, "rb") : nullptr;
+    long length = 0;
+    if (file != nullptr) {
+        fseek(file, 0, SEEK_END);
+        length = ftell(file);
+        rewind(file);
+    }
+    if (file == nullptr || length <= 0 || connection_id == UINT16_MAX || relay_handle == 0) {
         if (file != nullptr) fclose(file);
         update_storage_status("Sync failed\nConnect Short-Circuit");
         report_audio_status("Sync failed: phone is not connected");
@@ -1331,38 +1389,100 @@ void audio_sync_task(void *) {
         audio_sync_task_handle = nullptr;
         return;
     }
-    fseek(file, 0, SEEK_END);
-    const long length = ftell(file);
-    rewind(file);
-    if (length <= 0) {
+
+    // The phone checks the whole file against this before it keeps it.
+    auto *chunk = static_cast<uint8_t *>(heap_caps_malloc(4096, MALLOC_CAP_SPIRAM));
+    uint32_t crc = 0;
+    if (chunk != nullptr) {
+        size_t got;
+        while ((got = fread(chunk, 1, 4096, file)) > 0) crc = esp_crc32_le(crc, chunk, got);
+        rewind(file);
+    }
+    if (chunk == nullptr || ftell(file) != 0) {
+        if (chunk != nullptr) heap_caps_free(chunk);
         fclose(file);
-        update_storage_status("Sync failed\nNo recording found");
-        report_audio_status("Sync failed: no recording found");
+        update_storage_status("Sync failed\nCould not read note");
+        report_audio_status("Sync failed: could not read the note");
         finish_audio_task();
         audio_sync_task_handle = nullptr;
         return;
     }
 
     show_device_screen(DeviceScreen::Syncing);
+    ble_acked = 0;
+    ble_rewind = -1;
+    ble_verdict = 0;
+    ulTaskNotifyTake(pdTRUE, 0);
     char started[kMaxTextBytes + 1];
-    snprintf(started, sizeof(started), "Sync started\n%ld bytes", length);
+    snprintf(started, sizeof(started), "Sync started\n%ld bytes v2 crc=%08lx id=%lu rec=%lld", length,
+        static_cast<unsigned long>(crc), static_cast<unsigned long>(oldest[0].id), static_cast<long long>(oldest[0].recorded));
     update_storage_status("Syncing audio\n0%");
     report_audio_status(started);
+    vTaskDelay(pdMS_TO_TICKS(300));  // the phone opens its file on this message
 
-    uint8_t buffer[kAudioPacketBytes];
-    long sent = 0;
-    int last_progress_bucket = -1;
+    const uint32_t total = static_cast<uint32_t>(length);
+    uint32_t next = 0;  // next offset to send
+    int retries = 0;
+    uint32_t seen_ack = 0;
+    int64_t progress_us = esp_timer_get_time();
+    int last_bucket = -1;
+    int burst = 0;
     bool failed = false;
-    while (!failed) {
-        const size_t bytes = fread(buffer, 1, sizeof(buffer), file);
-        if (bytes == 0) break;
-        if (send_audio_data(buffer, bytes) != ESP_OK) {
-            failed = true;
-            break;
+    int64_t started_us = esp_timer_get_time();
+    while (!failed && ble_acked.load() < total && ble_verdict.load() != 1) {
+        const int64_t rewind_to = ble_rewind.exchange(-1);
+        if (rewind_to >= 0 && static_cast<uint32_t>(rewind_to) < total) {
+            next = static_cast<uint32_t>(rewind_to);
+            fseek(file, next, SEEK_SET);
         }
-        sent += static_cast<long>(bytes);
-        const int percent = static_cast<int>((sent * 100) / length);
-        if (percent / 10 != last_progress_bucket) {
+        // Send ahead, up to a window past what the phone has acknowledged.
+        while (next < total && next - ble_acked.load() < kBleWindowBytes && ble_rewind.load() < 0) {
+            if (connection_id == UINT16_MAX) {
+                failed = true;
+                break;
+            }
+            if (ble_congested.load()) {
+                vTaskDelay(pdMS_TO_TICKS(2));
+                continue;
+            }
+            const size_t want = total - next < kBleDataBytes ? total - next : kBleDataBytes;
+            const size_t got = fread(chunk, 1, want, file);
+            if (got != want || send_note_packet(next, chunk, got) != ESP_OK) {
+                vTaskDelay(pdMS_TO_TICKS(5));  // queue full: take the same bytes again
+                fseek(file, next, SEEK_SET);
+                continue;
+            }
+            next += static_cast<uint32_t>(got);
+            // Pace the radio: a few packets, then a tick, so the Bluetooth stack's buffers never overflow
+            // (an overflow drops packets silently, and the phone then reports a gap).
+            if (++burst >= kBleBurstPackets) {
+                burst = 0;
+                vTaskDelay(1);
+            }
+        }
+        if (failed) break;
+        // Wait for the phone to move the acknowledgement on. Silence for a second and a half means packets or
+        // acknowledgements were lost: carry on from the last byte it confirmed.
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+        const uint32_t acked_now = ble_acked.load();
+        const int64_t now_us = esp_timer_get_time();
+        if (acked_now != seen_ack || ble_rewind.load() >= 0) {
+            seen_ack = acked_now;
+            progress_us = now_us;
+            retries = 0;
+        } else if (now_us - progress_us > 1500000) {
+            ESP_LOGW(kTag, "BT xfer: no acknowledgement (acked %lu, sent %lu), try %d", static_cast<unsigned long>(acked_now),
+                static_cast<unsigned long>(next), retries + 1);
+            if (++retries > 6) {
+                failed = true;  // nothing from the phone for ten seconds
+            } else {
+                next = acked_now;
+                fseek(file, next, SEEK_SET);
+                progress_us = now_us;
+            }
+        }
+        const int percent = static_cast<int>((static_cast<uint64_t>(ble_acked.load()) * 100) / total);
+        if (percent / 10 != last_bucket) {
             char progress[64];
             snprintf(progress, sizeof(progress), "Syncing audio\n%d%%", percent);
             update_storage_status(progress);
@@ -1374,16 +1494,16 @@ void audio_sync_task(void *) {
             }
             snprintf(progress, sizeof(progress), "Sync in progress: %d%%", percent);
             report_audio_status(progress);
-            last_progress_bucket = percent / 10;
+            last_bucket = percent / 10;
         }
-        // ATT confirmation means the packet reached the phone's BLE stack,
-        // not necessarily that Android has finished dispatching the callback
-        // to the app. Give that callback time to drain before sending the
-        // next packet.
-        vTaskDelay(pdMS_TO_TICKS(30));
     }
     fclose(file);
-    if (failed || sent != length) {
+    heap_caps_free(chunk);
+    // The phone has every byte; now it says whether the file checked out.
+    for (int i = 0; !failed && ble_verdict.load() == 0 && i < 40; ++i) ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250));
+    const bool ok = !failed && ble_verdict.load() == 1;
+    const long seconds = static_cast<long>((esp_timer_get_time() - started_us) / 1000000);
+    if (!ok) {
         if (Lvgl_lock(-1)) {
             lv_label_set_text(sync_progress_label, "ERR");
             Lvgl_unlock();
@@ -1392,6 +1512,8 @@ void audio_sync_task(void *) {
         update_storage_status("Sync failed\nTry again in app");
         report_audio_status("Sync failed: connection interrupted");
     } else {
+        ESP_LOGI(kTag, "Bluetooth transfer of note %lu: %ld bytes in %ld s", static_cast<unsigned long>(oldest[0].id),
+            length, seconds);
         if (Lvgl_lock(-1)) {
             lv_label_set_text(sync_progress_label, "100%");
             Lvgl_unlock();
@@ -1692,8 +1814,12 @@ void sync_supervisor_task(void *) {
     }
 }
 
-// `forced` is the device button: it falls back to BLE when Wi-Fi sync is not
-// possible. The app can only ask for Wi-Fi sync.
+#ifdef CIRCUIT_DEV_CONSOLE
+std::atomic<bool> dev_force_ble{false};  // "sync-ble": skip the Wi-Fi offer so the Bluetooth path is the one tested
+#endif
+
+// Wi-Fi sync is tried first, for every request (the key or the app). With none possible a small note goes
+// over Bluetooth; `forced` (the key) also shows the result on the device's screen.
 // `only_recording` (the app's "sync this note") limits the sync to that recording; 0 syncs everything.
 void start_audio_sync(bool forced, uint32_t only_recording = 0) {
     if (!free_audio_from_playback()) {  // playing a note gives way; a recording does not
@@ -1720,7 +1846,12 @@ void start_audio_sync(bool forced, uint32_t only_recording = 0) {
         report_audio_status("Sync already in progress");
         return;
     }
-    if (offer_wifi_sync(only_recording)) {
+#ifdef CIRCUIT_DEV_CONSOLE
+    const bool wifi_offered = !dev_force_ble.load() && offer_wifi_sync(only_recording);
+#else
+    const bool wifi_offered = offer_wifi_sync(only_recording);
+#endif
+    if (wifi_offered) {
         if (forced) {  // show progress right away; the phone connects within a second or two
             show_device_screen(DeviceScreen::Syncing);
             if (Lvgl_lock(-1)) {
@@ -1730,9 +1861,15 @@ void start_audio_sync(bool forced, uint32_t only_recording = 0) {
         }
         return;
     }
-    if (!forced) {
+    // No Wi-Fi sync. A small single-part note can still go over Bluetooth; anything else needs Wi-Fi.
+    circuit_notes::Note first[1];
+    const char *why = ble_cannot_carry(only_recording, first);
+    if (why != nullptr) {
         update_storage_status("Sync needs Wi-Fi\nCircuit and phone");
-        report_audio_status("Sync needs Wi-Fi: connect Circuit and your phone to the same network");
+        char text[kMaxTextBytes];
+        snprintf(text, sizeof(text), "Sync needs Wi-Fi: %s. Connect Circuit and your phone to the same network", why);
+        report_audio_status(text);
+        if (forced) flash_sync_result("ERR");
         return;
     }
     if (!claim_audio()) {
@@ -1864,6 +2001,16 @@ void dev_sync_task(void *) {
     vTaskDelete(nullptr);
 }
 
+// "sync-ble": the Bluetooth transfer, forced, so it can be tested without touching the Wi-Fi settings.
+void dev_sync_ble_task(void *) {
+    for (int i = 0; i < 240 && !(ble_encrypted && connection_id != UINT16_MAX); ++i) vTaskDelay(pdMS_TO_TICKS(500));
+    dev_force_ble = true;
+    start_audio_sync(true);
+    dev_force_ble = false;
+    ESP_LOGW(kTag, "DEV sync-ble requested");
+    vTaskDelete(nullptr);
+}
+
 void dev_console_task(void *) {
     usb_serial_jtag_driver_config_t config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     config.rx_buffer_size = 256;
@@ -1897,6 +2044,8 @@ void dev_console_task(void *) {
             xTaskCreate(dev_sync_task, "dev_sync", 6144, nullptr, 4, nullptr);
         } else if (strcmp(line, "sync") == 0) {
             xTaskCreate(dev_sync_task, "dev_sync", 6144, nullptr, 4, nullptr);
+        } else if (strcmp(line, "sync-ble") == 0) {
+            xTaskCreate(dev_sync_ble_task, "dev_sync_ble", 6144, nullptr, 4, nullptr);
         } else if (strncmp(line, "rec", 3) == 0 && strncmp(line, "rec-", 4) != 0) {
             // "rec [seconds]": record without the key (default: until stopped)
             unsigned long seconds = kMaxRecordingSeconds;
@@ -2593,24 +2742,24 @@ void send_write_response(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param
 
 void send_relay_request(const char *request) {
     if (server_if == ESP_GATT_IF_NONE || relay_handle == 0 || connection_id == UINT16_MAX) return;
-    ESP_ERROR_CHECK(esp_ble_gatts_send_indicate(
+    // A status message is best effort: with the Bluetooth stack congested (a transfer in progress) it can
+    // be refused, and that must never take the whole board down.
+    const esp_err_t status = esp_ble_gatts_send_indicate(
         server_if, connection_id, relay_handle, strlen(request),
-        reinterpret_cast<uint8_t *>(const_cast<char *>(request)), false));
+        reinterpret_cast<uint8_t *>(const_cast<char *>(request)), false);
+    if (status != ESP_OK) ESP_LOGW(kTag, "Status message not sent: %s", esp_err_to_name(status));
 }
 
-esp_err_t send_audio_data(const uint8_t *data, size_t length) {
-    if (server_if == ESP_GATT_IF_NONE || relay_handle == 0 || connection_id == UINT16_MAX || length > kAudioPacketBytes) {
+esp_err_t send_note_packet(uint32_t offset, const uint8_t *data, size_t length) {
+    if (server_if == ESP_GATT_IF_NONE || relay_handle == 0 || connection_id == UINT16_MAX || length > kBleDataBytes) {
         return ESP_ERR_INVALID_STATE;
     }
-    uint8_t packet[kAudioPacketBytes + 2] = {0xA5, 0x5A};
-    memcpy(packet + 2, data, length);
-    // Audio needs flow control. A confirmed indication prevents the BLE stack
-    // from filling its transmit queue after the first packet.
-    ulTaskNotifyTake(pdTRUE, 0);
-    const esp_err_t status = esp_ble_gatts_send_indicate(
-        server_if, connection_id, relay_handle, length + 2, packet, true);
-    if (status != ESP_OK) return status;
-    return ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1500)) > 0 ? ESP_OK : ESP_ERR_TIMEOUT;
+    uint8_t packet[kBlePacketHeader + kBleDataBytes] = {0xA5, 0x5A};
+    for (int i = 0; i < 4; ++i) packet[2 + i] = static_cast<uint8_t>(offset >> (8 * i));
+    memcpy(packet + kBlePacketHeader, data, length);
+    // A notification: no per-packet confirmation. The phone's acknowledgements pace the transfer and a
+    // lost packet shows as a gap it reports, so nothing here waits on the radio.
+    return esp_ble_gatts_send_indicate(server_if, connection_id, relay_handle, kBlePacketHeader + length, packet, false);
 }
 
 void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
@@ -2667,6 +2816,11 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         }
         break;
     case ESP_GATTS_WRITE_EVT: {
+        if (param->write.handle == text_handle && !param->write.is_prep &&
+            handle_transfer_message(param->write.value, param->write.len)) {
+            send_write_response(gatts_if, param);
+            break;
+        }
         if (param->write.handle == text_handle && !param->write.is_prep) {
             TextMessage message{};
             const size_t length = param->write.len < kMaxTextBytes ? param->write.len : kMaxTextBytes;
@@ -2696,6 +2850,16 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         ESP_LOGI(kTag, "Short-Circuit connected: %02x:%02x:%02x:%02x:%02x:%02x (address type %d), %d bonded phone(s) stored, this address %s",
             a[0], a[1], a[2], a[3], a[4], a[5], param->connect.ble_addr_type, bonded_count, known ? "is one of them" : "is not listed");
         log_bonds("on connect");
+        {  // a fast link for the Bluetooth transfer: longest packets, shortest interval the phone allows
+            esp_ble_gap_set_pkt_data_len(param->connect.remote_bda, 251);
+            esp_ble_conn_update_params_t link = {};
+            memcpy(link.bda, param->connect.remote_bda, ESP_BD_ADDR_LEN);
+            link.min_int = 6;    // 7.5 ms
+            link.max_int = 12;   // 15 ms
+            link.latency = 0;
+            link.timeout = 400;  // 4 s
+            esp_ble_gap_update_conn_params(&link);
+        }
         esp_err_t enc = esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
         if (enc != ESP_OK) ESP_LOGW(kTag, "Could not ask for an encrypted link: %s", esp_err_to_name(enc));
         break;
@@ -2707,10 +2871,8 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         ESP_LOGI(kTag, "Client disconnected (reason 0x%x); advertising again", param->disconnect.reason);
         ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&adv_params));
         break;
-    case ESP_GATTS_CONF_EVT:
-        if (param->conf.handle == relay_handle && audio_sync_task_handle != nullptr) {
-            xTaskNotifyGive(audio_sync_task_handle);
-        }
+    case ESP_GATTS_CONGEST_EVT:
+        ble_congested = param->congest.congested;
         break;
     default:
         break;
@@ -2724,7 +2886,7 @@ void start_ble() {
     ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
-    ESP_ERROR_CHECK(esp_ble_gatt_set_local_mtu(185));
+    ESP_ERROR_CHECK(esp_ble_gatt_set_local_mtu(kBleMtu));
     ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_event_handler));
     esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
     esp_ble_io_cap_t io_capability = ESP_IO_CAP_OUT;
