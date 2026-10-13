@@ -491,6 +491,15 @@ extension _ScPages on _CircuitHomePageState {
         progress: _syncProgress == null ? null : _syncProgress! / 100,
       );
     }
+    if (_recordingAudio) {
+      // Each finished minute of a long recording is a note on Circuit, but nothing syncs until it ends.
+      return const ScStatusStrip(
+        tone: ScStripTone.neutral,
+        leading: LucideIcons.mic,
+        title: 'Circuit is recording',
+        detail: 'Its notes sync when the recording ends.',
+      );
+    }
     if (arriving > 0) {
       return ScStatusStrip(
         tone: ScStripTone.neutral,
@@ -1249,7 +1258,9 @@ extension _ScPages on _CircuitHomePageState {
         : _savedCircuitId != null
         ? 'Not connected'
         : 'No Circuit paired yet';
-    final detail = !available
+    final detail = _recordingAudio
+        ? 'Recording. Its notes sync when it ends.'
+        : !available
         ? (_savedCircuitId == null
               ? 'Scan to find your Circuit and bring your thoughts here.'
               : 'Turn Circuit on and keep it close.')
@@ -1398,7 +1409,7 @@ extension _ScPages on _CircuitHomePageState {
             ),
           ],
         ),
-        if (waiting > 0 && !_syncActive) ...[
+        if (waiting > 0 && !_syncActive && !_recordingAudio) ...[
           const SizedBox(height: ScSpace.md),
           ScButton(
             icon: LucideIcons.refreshCw,

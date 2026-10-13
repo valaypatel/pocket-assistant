@@ -44,6 +44,15 @@ void main() {
       (_) async => null,
     );
   });
+  Future<void> status(WidgetTester tester, String value) async {
+    await messenger.handlePlatformMessage(
+      'circuit/audio_status',
+      const StandardMethodCodec().encodeSuccessEnvelope(value),
+      (_) {},
+    );
+    await tester.pump();
+  }
+
   Future<void> open(WidgetTester tester, {String tab = 'Circuit'}) async {
     await tester.binding.setSurfaceSize(const Size(390, 844));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -103,6 +112,18 @@ void main() {
     await open(tester, tab: 'Notes');
     expect(find.text('1 note is waiting on Circuit'), findsOneWidget);
     expect(find.textContaining('everything is synced'), findsNothing);
+    await close(tester);
+  });
+
+  testWidgets('while Circuit records, finished minutes are not "waiting"', (
+    tester,
+  ) async {
+    await open(tester, tab: 'Notes');
+    await status(tester, 'Recording started');
+    // A minute is done on the board: one part waits, but the recording is still going.
+    await status(tester, '@sync-status\nwaiting=1\nreset=1\nuptime=500');
+    expect(find.text('Circuit is recording'), findsOneWidget);
+    expect(find.textContaining('waiting on Circuit'), findsNothing);
     await close(tester);
   });
 }
