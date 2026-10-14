@@ -140,6 +140,25 @@ class CircuitRelayService : Service() {
     private var gatt: BluetoothGatt? = null
     private var command: BluetoothGattCharacteristic? = null
     private var relayReady = false
+    // A link that died without Android saying so (the board was restarted or lost power, say) never calls
+    // back, so nothing reconnected until the person tapped Reconnect. Every write to the board is expected to
+    // be answered; one left unanswered for 20 s means the link is dead, so it is dropped and rebuilt.
+    @Volatile private var lastWriteStartedMs = 0L
+    @Volatile private var lastWriteDoneMs = 0L
+    private val linkWatchdog = object : Runnable {
+        override fun run() {
+            val started = lastWriteStartedMs
+            if (relayReady && started > 0 && lastWriteDoneMs < started &&
+                SystemClock.elapsedRealtime() - started > 20_000
+            ) {
+                BtEventLog.add(this@CircuitRelayService, "watchdog: a write got no answer for 20 s, the link is dead")
+                lastWriteStartedMs = 0L
+                gatt?.let { failConnection(it, "Circuit stopped answering") }
+            }
+            reconnectHandler.postDelayed(this, 10_000)
+        }
+    }
+
     private val homeStatusRunnable = object : Runnable {
         override fun run() {
             if (relayReady) sendHomeStatus()
@@ -251,6 +270,7 @@ class CircuitRelayService : Service() {
         reconnectHandler.removeCallbacks(reconnectRunnable)
         reconnectHandler.removeCallbacks(setupTimeout)
         reconnectHandler.removeCallbacks(homeStatusRunnable)
+        reconnectHandler.removeCallbacks(linkWatchdog)
         unregisterReceiver(bondReceiver)
         unregisterReceiver(adapterReceiver)
         if (activeService === this) activeService = null
@@ -350,6 +370,10 @@ class CircuitRelayService : Service() {
                 failConnection(gatt, "Circuit disconnected")
             }
         }
+        override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            lastWriteDoneMs = SystemClock.elapsedRealtime()
+            if (status != BluetoothGatt.GATT_SUCCESS) BtEventLog.add(this@CircuitRelayService, "write answered with status=$status")
+        }
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             if (this@CircuitRelayService.gatt !== gatt) return
             if (!gatt.discoverServices()) failConnection(gatt, "Could not discover Circuit services")
@@ -406,6 +430,10 @@ class CircuitRelayService : Service() {
             // screen being open, so the service sends them itself.
             reconnectHandler.removeCallbacks(homeStatusRunnable)
             reconnectHandler.postDelayed(homeStatusRunnable, 2500)
+            lastWriteStartedMs = 0L
+            lastWriteDoneMs = 0L
+            reconnectHandler.removeCallbacks(linkWatchdog)
+            reconnectHandler.postDelayed(linkWatchdog, 10_000)
         }
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             handleCharacteristic(characteristic.value ?: byteArrayOf())
@@ -470,7 +498,9 @@ class CircuitRelayService : Service() {
         return characteristic.let {
             characteristic.value = value.toByteArray()
             characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            gatt?.writeCharacteristic(characteristic) ?: false
+            val started = gatt?.writeCharacteristic(characteristic) ?: false
+            if (started && lastWriteDoneMs >= lastWriteStartedMs) lastWriteStartedMs = SystemClock.elapsedRealtime()
+            started
         }
     }
 
