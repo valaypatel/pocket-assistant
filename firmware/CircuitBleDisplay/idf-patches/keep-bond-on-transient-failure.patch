@@ -1,0 +1,48 @@
+diff --git a/components/bt/host/bluedroid/bta/dm/bta_dm_act.c b/components/bt/host/bluedroid/bta/dm/bta_dm_act.c
+index 4f6f496a..c8177110 100644
+--- a/components/bt/host/bluedroid/bta/dm/bta_dm_act.c
++++ b/components/bt/host/bluedroid/bta/dm/bta_dm_act.c
+@@ -4902,10 +4902,21 @@ static UINT8 bta_dm_ble_smp_cback (tBTM_LE_EVT event, BD_ADDR bda, tBTM_LE_EVT_D
+         }
+         if (p_data->complt.reason != 0) {
+             sec_event.auth_cmpl.fail_reason = BTA_DM_AUTH_CONVERT_SMP_CODE(((UINT8)p_data->complt.reason));
++            /* CIRCUIT_KEEP_BOND_PATCH: a timeout, a busy stack or a link that dropped part way through says
++             * nothing about whether the stored keys are still good, so the bond is kept. Only a failure that
++             * means the keys do not match removes it. */
++            if (p_data->complt.reason == SMP_BUSY || p_data->complt.reason == SMP_ENC_FAIL ||
++                p_data->complt.reason == SMP_STARTED || p_data->complt.reason == SMP_RSP_TIMEOUT ||
++                p_data->complt.reason == SMP_FAIL || p_data->complt.reason == SMP_CONN_TOUT ||
++                p_data->complt.reason == SMP_PAIR_FAIL_UNKNOWN) {
++                APPL_TRACE_WARNING("%s keep bond,rsn %d, BDA:0x%02X%02X%02X%02X%02X%02X", __func__, sec_event.auth_cmpl.fail_reason,
++                                bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
++            } else {
+             /* delete this device entry from Sec Dev DB */
+             APPL_TRACE_WARNING("%s remove bond,rsn %d, BDA:0x%02X%02X%02X%02X%02X%02X", __func__, sec_event.auth_cmpl.fail_reason,
+                             bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
+             bta_dm_remove_sec_dev_entry(bda);
++            }
+         } else {
+             sec_event.auth_cmpl.success = TRUE;
+             if (!p_data->complt.smp_over_br) {
+diff --git a/components/bt/host/bluedroid/btc/core/btc_dm.c b/components/bt/host/bluedroid/btc/core/btc_dm.c
+index 02b5a16e..33b0591b 100644
+--- a/components/bt/host/bluedroid/btc/core/btc_dm.c
++++ b/components/bt/host/bluedroid/btc/core/btc_dm.c
+@@ -292,6 +292,17 @@ static void btc_dm_ble_auth_cmpl_evt (tBTA_DM_AUTH_CMPL *p_auth_cmpl)
+         case BTA_DM_AUTH_SMP_PAIR_NOT_SUPPORT:
+             status = BT_STATUS_AUTH_REJECTED;
+             break;
++        /* CIRCUIT_KEEP_BOND_PATCH: failures that are about the link, not about the keys, leave the stored bond. */
++        case BTA_DM_AUTH_SMP_BUSY:
++        case BTA_DM_AUTH_SMP_ENC_FAIL:
++        case BTA_DM_AUTH_SMP_RSP_TIMEOUT:
++        case BTA_DM_AUTH_SMP_UNKNOWN_ERR:
++        case (BTA_DM_AUTH_FAIL_BASE + SMP_STARTED):
++        case (BTA_DM_AUTH_FAIL_BASE + SMP_FAIL):
++        case (BTA_DM_AUTH_FAIL_BASE + SMP_CONN_TOUT):
++            BTC_TRACE_WARNING ("%s, keep bond in flash (link failure, reason %d)", __func__, p_auth_cmpl->fail_reason);
++            status = BT_STATUS_FAIL;
++            break;
+         default:
+             BTC_TRACE_WARNING ("%s, remove bond in flash bd_addr: %08x%04x", __func__,
+                                 (p_auth_cmpl->bd_addr[0] << 24) + (p_auth_cmpl->bd_addr[1] << 16) + (p_auth_cmpl->bd_addr[2] << 8) + p_auth_cmpl->bd_addr[3],

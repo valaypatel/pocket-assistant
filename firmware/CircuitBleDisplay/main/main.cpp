@@ -1642,6 +1642,8 @@ void start_audio_sync(bool forced, uint32_t only_recording = 0) {
 void start_playback();
 void lower_key_released(uint32_t held_ms);
 #ifdef CIRCUIT_DEV_CONSOLE
+uint8_t dev_peer_bda[6] = {};  // the phone on the current link, for "drop-now"
+std::atomic<int> dev_drop_link_ms{-1};  // see dev_drop_link_task: cut the next link this many ms after it connects
 std::atomic<bool> dev_key_down{false};  // the development console "presses" the key through this
 
 // Lower key (GPIO18) state for the development console: what the real key task below has seen.
@@ -1792,6 +1794,14 @@ void dev_console_task(void *) {
             ESP_LOGW(kTag, "DEV marked %u note(s) to be sent again",
                 static_cast<unsigned>(circuit_notes::mark_all_unsynced()));
             xTaskCreate(dev_sync_task, "dev_sync", 6144, nullptr, 4, nullptr);
+        } else if (strncmp(line, "drop-next-link", 14) == 0) {
+            int ms = 100;
+            if (sscanf(line + 14, "%d", &ms) != 1) ms = 100;
+            dev_drop_link_ms = ms;
+            ESP_LOGW(kTag, "DEV drop-next-link armed: %d ms after the next connect", ms);
+        } else if (strcmp(line, "drop-now") == 0) {
+            ESP_LOGW(kTag, "DEV drop-now: cutting the current link");
+            esp_ble_gap_disconnect(dev_peer_bda);
         } else if (strcmp(line, "sync") == 0) {
             xTaskCreate(dev_sync_task, "dev_sync", 6144, nullptr, 4, nullptr);
         } else if (strncmp(line, "rec", 3) == 0 && strncmp(line, "rec-", 4) != 0) {
@@ -2497,6 +2507,20 @@ void send_relay_request(const char *request) {
     if (status != ESP_OK) ESP_LOGW(kTag, "Status message not sent: %s", esp_err_to_name(status));
 }
 
+#ifdef CIRCUIT_DEV_CONSOLE
+// "drop-next-link [ms]": cut the next Bluetooth link this many ms after the phone connects, in the middle of
+// its security handshake, to test that a link failure no longer deletes the stored pairing.
+void dev_drop_link_task(void *arg) {
+    auto *bda = static_cast<uint8_t *>(arg);
+    const int wait_ms = dev_drop_link_ms.exchange(-1);
+    vTaskDelay(pdMS_TO_TICKS(wait_ms > 0 ? wait_ms : 1));
+    ESP_LOGW(kTag, "DEV drop-next-link: cutting the link now");
+    esp_ble_gap_disconnect(bda);
+    heap_caps_free(bda);
+    vTaskDelete(nullptr);
+}
+#endif
+
 void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                          esp_ble_gatts_cb_param_t *param) {
     switch (event) {
@@ -2582,6 +2606,16 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         log_bonds("on connect");
         esp_err_t enc = esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
         if (enc != ESP_OK) ESP_LOGW(kTag, "Could not ask for an encrypted link: %s", esp_err_to_name(enc));
+#ifdef CIRCUIT_DEV_CONSOLE
+        memcpy(dev_peer_bda, param->connect.remote_bda, ESP_BD_ADDR_LEN);
+        if (dev_drop_link_ms.load() >= 0) {
+            auto *copy = static_cast<uint8_t *>(heap_caps_malloc(ESP_BD_ADDR_LEN, MALLOC_CAP_INTERNAL));
+            if (copy != nullptr) {
+                memcpy(copy, param->connect.remote_bda, ESP_BD_ADDR_LEN);
+                xTaskCreate(dev_drop_link_task, "dev_drop", 3072, copy, 5, nullptr);
+            }
+        }
+#endif
         break;
     }
     case ESP_GATTS_DISCONNECT_EVT:
