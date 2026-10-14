@@ -123,6 +123,11 @@ uint16_t service_handle;
 uint16_t text_handle;
 uint16_t relay_handle;
 uint16_t connection_id = UINT16_MAX;
+// Signal strength of the current link as the board hears the phone, sampled every 20 s, so a drop can be
+// put next to how weak the link was just before it.
+uint8_t peer_bda[6] = {};
+int last_rssi_dbm = 0;
+int64_t last_rssi_at_us = 0;
 sdmmc_card_t *sd_card = nullptr;
 bool audio_ready = false;
 // One thing at a time uses the microphone, speaker and the note being sent. It is claimed with
@@ -1642,7 +1647,6 @@ void start_audio_sync(bool forced, uint32_t only_recording = 0) {
 void start_playback();
 void lower_key_released(uint32_t held_ms);
 #ifdef CIRCUIT_DEV_CONSOLE
-uint8_t dev_peer_bda[6] = {};  // the phone on the current link, for "drop-now"
 std::atomic<int> dev_drop_link_ms{-1};  // see dev_drop_link_task: cut the next link this many ms after it connects
 std::atomic<bool> dev_key_down{false};  // the development console "presses" the key through this
 
@@ -1801,7 +1805,7 @@ void dev_console_task(void *) {
             ESP_LOGW(kTag, "DEV drop-next-link armed: %d ms after the next connect", ms);
         } else if (strcmp(line, "drop-now") == 0) {
             ESP_LOGW(kTag, "DEV drop-now: cutting the current link");
-            esp_ble_gap_disconnect(dev_peer_bda);
+            esp_ble_gap_disconnect(peer_bda);
         } else if (strcmp(line, "sync") == 0) {
             xTaskCreate(dev_sync_task, "dev_sync", 6144, nullptr, 4, nullptr);
         } else if (strncmp(line, "rec", 3) == 0 && strncmp(line, "rec-", 4) != 0) {
@@ -2453,6 +2457,16 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
     case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
         ESP_LOGI(kTag, "Advertising as %s", kDeviceName);
         break;
+    case ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT:
+        if (param->read_rssi_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+            const int rssi = param->read_rssi_cmpl.rssi;
+            const bool weak = rssi < -80;
+            const bool moved = last_rssi_at_us == 0 || rssi - last_rssi_dbm >= 10 || last_rssi_dbm - rssi >= 10;
+            last_rssi_dbm = rssi;
+            last_rssi_at_us = esp_timer_get_time();
+            if (weak || moved) ESP_LOGI(kTag, "Signal from the phone: %d dBm%s", rssi, weak ? " (weak)" : "");
+        }
+        break;
     case ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT:
         ESP_LOGW(kTag, "BOND REMOVED (status %d)", static_cast<int>(param->remove_bond_dev_cmpl.status));
         log_bonds("after a bond was removed");
@@ -2604,10 +2618,12 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         ESP_LOGI(kTag, "Short-Circuit connected: %02x:%02x:%02x:%02x:%02x:%02x (address type %d), %d bonded phone(s) stored, this address %s",
             a[0], a[1], a[2], a[3], a[4], a[5], param->connect.ble_addr_type, bonded_count, known ? "is one of them" : "is not listed");
         log_bonds("on connect");
+        memcpy(peer_bda, param->connect.remote_bda, ESP_BD_ADDR_LEN);
+        last_rssi_dbm = 0;
+        last_rssi_at_us = 0;
         esp_err_t enc = esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
         if (enc != ESP_OK) ESP_LOGW(kTag, "Could not ask for an encrypted link: %s", esp_err_to_name(enc));
 #ifdef CIRCUIT_DEV_CONSOLE
-        memcpy(dev_peer_bda, param->connect.remote_bda, ESP_BD_ADDR_LEN);
         if (dev_drop_link_ms.load() >= 0) {
             auto *copy = static_cast<uint8_t *>(heap_caps_malloc(ESP_BD_ADDR_LEN, MALLOC_CAP_INTERNAL));
             if (copy != nullptr) {
@@ -2622,11 +2638,24 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         connection_id = UINT16_MAX;
         ble_encrypted = false;
         show_relay_disconnected();
-        ESP_LOGI(kTag, "Client disconnected (reason 0x%x); advertising again", param->disconnect.reason);
+        if (last_rssi_at_us != 0) {
+            ESP_LOGI(kTag, "Client disconnected (reason 0x%x); last signal %d dBm, %d s before; advertising again",
+                param->disconnect.reason, last_rssi_dbm, static_cast<int>((esp_timer_get_time() - last_rssi_at_us) / 1000000));
+        } else {
+            ESP_LOGI(kTag, "Client disconnected (reason 0x%x); no signal reading yet; advertising again", param->disconnect.reason);
+        }
         ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&adv_params));
         break;
     default:
         break;
+    }
+}
+
+// Asks the stack for the link's signal strength every 20 s while a phone is connected.
+void rssi_task(void *) {
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(20000));
+        if (connection_id != UINT16_MAX) esp_ble_gap_read_rssi(peer_bda);
     }
 }
 
@@ -2846,6 +2875,7 @@ extern "C" void app_main(void) {
     xTaskCreate(local_clock_task, "local_clock", 3072, nullptr, 2, nullptr);
     start_wifi();
     start_ble();
+    xTaskCreate(rssi_task, "ble_rssi", 2560, nullptr, 2, nullptr);
     // Start-up code is done, but give the splash time to be seen: about five seconds on the panel
     // (the board takes roughly two seconds after power-up to draw it, so leave at kSplashMinMs).
     // Home then opens with the clock kept from before, so it is not empty; Wi-Fi and the phone

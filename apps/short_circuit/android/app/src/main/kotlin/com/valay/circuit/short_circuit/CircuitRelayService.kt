@@ -143,6 +143,15 @@ class CircuitRelayService : Service() {
     // A link that died without Android saying so (the board was restarted or lost power, say) never calls
     // back, so nothing reconnected until the person tapped Reconnect. Every write to the board is expected to
     // be answered; one left unanswered for 20 s means the link is dead, so it is dropped and rebuilt.
+    // Signal strength as the phone hears the board, sampled every 20 s while connected. It is written to the
+    // log when weak, when it moves by 10 dB, or every 5 min, and always with a drop, so a drop can be put
+    // next to how weak the link was just before it.
+    @Volatile private var lastRssi: Int? = null
+    @Volatile private var lastRssiAtMs = 0L
+    private var lastRssiLogged: Int? = null
+    private var lastRssiLoggedAtMs = 0L
+    private var watchdogTicks = 0
+
     @Volatile private var lastWriteStartedMs = 0L
     @Volatile private var lastWriteDoneMs = 0L
     private val linkWatchdog = object : Runnable {
@@ -154,6 +163,9 @@ class CircuitRelayService : Service() {
                 BtEventLog.add(this@CircuitRelayService, "watchdog: a write got no answer for 20 s, the link is dead")
                 lastWriteStartedMs = 0L
                 gatt?.let { failConnection(it, "Circuit stopped answering") }
+            }
+            if (relayReady && ++watchdogTicks % 2 == 0) {
+                try { gatt?.readRemoteRssi() } catch (_: SecurityException) {}
             }
             reconnectHandler.postDelayed(this, 10_000)
         }
@@ -346,7 +358,15 @@ class CircuitRelayService : Service() {
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, state: Int) {
             Log.i("CircuitRelay", "[BLE] connection state=$state status=$status")
-            BtEventLog.add(this@CircuitRelayService, "gatt state=$state status=$status bond=${bondName(gatt.device.bondState)}")
+            val seen = lastRssi
+            val signal = if (seen == null) "no signal reading yet"
+                else "last signal $seen dBm, ${(SystemClock.elapsedRealtime() - lastRssiAtMs) / 1000} s before"
+            BtEventLog.add(this@CircuitRelayService, "gatt state=$state status=$status bond=${bondName(gatt.device.bondState)}" +
+                if (state == BluetoothProfile.STATE_CONNECTED) "" else "; $signal")
+            if (state == BluetoothProfile.STATE_CONNECTED) {
+                lastRssi = null
+                lastRssiLogged = null
+            }
             if (state == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 if (this@CircuitRelayService.gatt !== gatt) {
                     gatt.close()
@@ -368,6 +388,18 @@ class CircuitRelayService : Service() {
                     connectedAtMs = 0L
                 }
                 failConnection(gatt, "Circuit disconnected")
+            }
+        }
+        override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) return
+            val now = SystemClock.elapsedRealtime()
+            lastRssi = rssi
+            lastRssiAtMs = now
+            val before = lastRssiLogged
+            if (rssi < -80 || before == null || Math.abs(rssi - before) >= 10 || now - lastRssiLoggedAtMs > 300_000) {
+                BtEventLog.add(this@CircuitRelayService, "signal $rssi dBm" + if (rssi < -80) " (weak)" else "")
+                lastRssiLogged = rssi
+                lastRssiLoggedAtMs = now
             }
         }
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
@@ -598,14 +630,18 @@ class CircuitRelayService : Service() {
             val notes = NoteListing.parse(listing)
             if (notes.isEmpty()) {
                 publishAudioStatus("Sync complete: no new notes")
+                clearSyncNotification()
                 return
             }
             val totalBytes = notes.sumOf { it.bytes }
             var doneBytes = 0L
             var lastPercent = -1
+            var lastNotePercent = -1
             Log.i("CircuitSync", "Listing ok: ${notes.size} notes, $totalBytes bytes")
             publishAudioStatus("Sync started\n$totalBytes bytes")
-            for ((id, bytes, epoch, group) in notes) {
+            for ((noteIndex, entry) in notes.withIndex()) {
+                val (id, bytes, epoch, group) = entry
+                lastNotePercent = -1
                 if (superseded()) return
                 // The same recording may already be here under a different time stamp
                 // (an acknowledgement was lost and Circuit offered it again). Reuse it
@@ -665,6 +701,13 @@ class CircuitRelayService : Service() {
                                             lastPercent = percent
                                             publishAudioStatus("Sync in progress: $percent%")
                                         }
+                                        // This note's own progress, for its row in the app and the notification.
+                                        val notePercent = (partial.length() * 100 / bytes).toInt().coerceIn(0, 99)
+                                        if (notePercent != lastNotePercent && notePercent % 2 == 0) {
+                                            lastNotePercent = notePercent
+                                            publishAudioStatus("Sync note #$id: $notePercent% (${noteIndex + 1} of ${notes.size})")
+                                            setSyncNotification(noteIndex + 1, notes.size, notePercent)
+                                        }
                                     }
                                 }
                             }
@@ -718,6 +761,7 @@ class CircuitRelayService : Service() {
                 publishAudioStatus("Sync complete: ready on phone|${target.absolutePath}|$epoch")
             }
             publishAudioStatus("Sync complete: all notes saved")
+            clearSyncNotification()
         } catch (error: Exception) {
             Log.e("CircuitSync", "Wi-Fi sync failed", error)
             Diagnostics.event(
@@ -746,6 +790,9 @@ class CircuitRelayService : Service() {
                 }
             }
             publishAudioStatus("Sync failed: $reason (${error.javaClass.simpleName})")
+        } finally {
+            // Whatever ended it (done, failed, replaced by a newer sync), the bar does not stay on.
+            clearSyncNotification()
         }
     }
 
@@ -773,8 +820,33 @@ class CircuitRelayService : Service() {
     private fun notificationText(status: String): String =
         if (status == connectedStatus) "Active" else status
 
+    // While notes download, the notification carries a progress bar: "Syncing note 2 of 5" and how far through.
+    @Volatile private var syncNote = 0
+    @Volatile private var syncNotes = 0
+    @Volatile private var syncNotePercent = -1
+    private fun setSyncNotification(index: Int, total: Int, percent: Int) {
+        syncNote = index
+        syncNotes = total
+        syncNotePercent = percent
+        updateNotification(relayStatus)
+    }
+    private fun clearSyncNotification() {
+        if (syncNotePercent < 0) return
+        syncNotePercent = -1
+        updateNotification(relayStatus)
+    }
+
     private fun setRelayStatus(text: String) { relayStatus = text; updateNotification(text) }
     private fun updateNotification(text: String) { getSystemService(NotificationManager::class.java).notify(notificationId, notification(text)) }
-    private fun notification(text: String): Notification = NotificationCompat.Builder(this, channelId)
-        .setSmallIcon(R.drawable.ic_stat_circuit).setContentTitle("Short-Circuit").setContentText(notificationText(text)).setOngoing(true).build()
+    private fun notification(text: String): Notification {
+        val builder = NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.ic_stat_circuit).setContentTitle("Short-Circuit").setOngoing(true)
+        val percent = syncNotePercent
+        return if (percent >= 0) {
+            val which = if (syncNotes > 1) "Syncing note $syncNote of $syncNotes" else "Syncing a note"
+            builder.setContentText("$which · $percent%").setProgress(100, percent, false).setOnlyAlertOnce(true).build()
+        } else {
+            builder.setContentText(notificationText(text)).build()
+        }
+    }
 }
