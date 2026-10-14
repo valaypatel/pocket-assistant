@@ -1750,12 +1750,24 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     }
   }
 
+  /// A line in the phone's private Bluetooth log (read back with the test command `btlog`).
+  void _btLog(String line) {
+    unawaited(
+      _relayChannel
+          .invokeMethod<void>('btLog', {'line': line})
+          .catchError((Object _) {}),
+    );
+  }
+
   Future<void> _restoreLastCircuit() async {
     final preferences = await SharedPreferences.getInstance();
     final deviceId = preferences.getString(_savedCircuitIdKey);
     if (deviceId == null || !mounted) return;
     final savedDevice = BluetoothDevice.fromId(deviceId);
     if (await savedDevice.bondState.first != BluetoothBondState.bonded) {
+      _btLog(
+        'start-up: saved Circuit is not bonded on this phone -> Repair pairing',
+      );
       // Keep the saved Circuit: only the user's "Repair pairing" starts pairing.
       if (mounted) {
         setState(() {
@@ -1847,11 +1859,13 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         userRequestedPairing: userRequestedPairing,
       )) {
         _setStatus('Replacing the old pairing…');
+        _btLog('connect: replacing the old pairing (removing the phone bond)');
         await _removeAndroidPairing(device);
         isBonded = false;
       }
       if (!isBonded && !userRequestedPairing) {
         debugPrint('Short-Circuit: not bonded; waiting for Repair pairing');
+        _btLog('connect: not bonded on this phone -> Repair pairing');
         if (mounted) {
           setState(() {
             _needsPairingRepair = true;
@@ -1947,6 +1961,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   /// The user's choice to pair again. Only Android's own pairing record is replaced:
   /// notes, keys and settings on the phone and the board are not touched.
   Future<void> _repairPairing() async {
+    _btLog('Repair pairing tapped');
     final deviceId = _savedCircuitId;
     if (deviceId == null) {
       _setStatus('Scan for Circuit first.');

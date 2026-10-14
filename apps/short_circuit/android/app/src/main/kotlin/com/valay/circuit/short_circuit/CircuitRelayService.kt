@@ -152,7 +152,15 @@ class CircuitRelayService : Service() {
     private val adapterReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
-            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+            val adapterState = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+            BtEventLog.add(this@CircuitRelayService, "phone Bluetooth " + when (adapterState) {
+                BluetoothAdapter.STATE_OFF -> "off"
+                BluetoothAdapter.STATE_ON -> "on"
+                BluetoothAdapter.STATE_TURNING_OFF -> "turning off"
+                BluetoothAdapter.STATE_TURNING_ON -> "turning on"
+                else -> "state $adapterState"
+            })
+            when (adapterState) {
                 BluetoothAdapter.STATE_OFF -> {
                     Log.i("CircuitRelay", "[BLE] Bluetooth turned off")
                     if (connectedAtMs > 0) {
@@ -185,12 +193,27 @@ class CircuitRelayService : Service() {
     private val setupTimeout = Runnable {
         gatt?.let { failConnection(it, "Circuit setup timed out") }
     }
+    private fun bondName(state: Int) = when (state) {
+        BluetoothDevice.BOND_NONE -> "none"
+        BluetoothDevice.BOND_BONDING -> "bonding"
+        BluetoothDevice.BOND_BONDED -> "bonded"
+        else -> "?$state"
+    }
+
     private val bondReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
             val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
             if (device.address != circuitAddress) return
-            when (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)) {
+            val newState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
+            val oldState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, -1)
+            // The first domino of a broken pairing: who changed the phone's bond, and when.
+            BtEventLog.add(
+                this@CircuitRelayService,
+                "bond ${bondName(oldState)} -> ${bondName(newState)}" +
+                    " reason=${intent.getIntExtra("android.bluetooth.device.extra.REASON", -1)}",
+            )
+            when (newState) {
                 BluetoothDevice.BOND_BONDED -> {
                     reconnectDelayMs = 1000L
                     reconnectHandler.post { connect(device.address) }
@@ -277,6 +300,7 @@ class CircuitRelayService : Service() {
      */
     private fun pauseForRepair() {
         Log.w("CircuitRelay", "[BLE] Circuit is not bonded; waiting for the user to repair pairing")
+        BtEventLog.add(this, "relay paused: Circuit is not bonded, waiting for Repair pairing")
         shouldReconnect = false
         reconnectHandler.removeCallbacks(reconnectRunnable)
         reconnectHandler.removeCallbacks(setupTimeout)
@@ -288,6 +312,7 @@ class CircuitRelayService : Service() {
     }
 
     private fun failConnection(candidate: BluetoothGatt, reason: String) {
+        BtEventLog.add(this, "relay failed: $reason")
         if (this.gatt !== candidate) return
         reconnectHandler.removeCallbacks(setupTimeout)
         command = null
@@ -301,6 +326,7 @@ class CircuitRelayService : Service() {
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, state: Int) {
             Log.i("CircuitRelay", "[BLE] connection state=$state status=$status")
+            BtEventLog.add(this@CircuitRelayService, "gatt state=$state status=$status bond=${bondName(gatt.device.bondState)}")
             if (state == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 if (this@CircuitRelayService.gatt !== gatt) {
                     gatt.close()
