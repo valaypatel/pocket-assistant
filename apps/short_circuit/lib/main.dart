@@ -1206,6 +1206,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   bool _showOnboarding = false; // first run: the welcome screens
   bool _circuitDetailsOpen = false;
   bool _dockCollapsed = false;
+
+  /// How far each note is through its download, by Circuit's number for it, while a sync runs; and which note
+  /// of how many it is. The phone reports it as "Sync note #172: 40% (2 of 5)".
+  final Map<int, int> _noteProgress = {};
+  int _syncNoteIndex = 0;
+  int _syncNoteCount = 0;
   bool _searchOpen = false;
   bool _developerOpen =
       false; // the Developer rows in Settings are folded away until asked for
@@ -1750,12 +1756,24 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     }
   }
 
+  /// A line in the phone's private Bluetooth log (read back with the test command `btlog`).
+  void _btLog(String line) {
+    unawaited(
+      _relayChannel
+          .invokeMethod<void>('btLog', {'line': line})
+          .catchError((Object _) {}),
+    );
+  }
+
   Future<void> _restoreLastCircuit() async {
     final preferences = await SharedPreferences.getInstance();
     final deviceId = preferences.getString(_savedCircuitIdKey);
     if (deviceId == null || !mounted) return;
     final savedDevice = BluetoothDevice.fromId(deviceId);
     if (await savedDevice.bondState.first != BluetoothBondState.bonded) {
+      _btLog(
+        'start-up: saved Circuit is not bonded on this phone -> Repair pairing',
+      );
       // Keep the saved Circuit: only the user's "Repair pairing" starts pairing.
       if (mounted) {
         setState(() {
@@ -1847,11 +1865,13 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         userRequestedPairing: userRequestedPairing,
       )) {
         _setStatus('Replacing the old pairing…');
+        _btLog('connect: replacing the old pairing (removing the phone bond)');
         await _removeAndroidPairing(device);
         isBonded = false;
       }
       if (!isBonded && !userRequestedPairing) {
         debugPrint('Short-Circuit: not bonded; waiting for Repair pairing');
+        _btLog('connect: not bonded on this phone -> Repair pairing');
         if (mounted) {
           setState(() {
             _needsPairingRepair = true;
@@ -1947,6 +1967,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   /// The user's choice to pair again. Only Android's own pairing record is replaced:
   /// notes, keys and settings on the phone and the board are not touched.
   Future<void> _repairPairing() async {
+    _btLog('Repair pairing tapped');
     final deviceId = _savedCircuitId;
     if (deviceId == null) {
       _setStatus('Scan for Circuit first.');
@@ -2106,6 +2127,29 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       return;
     }
     if (!mounted) return;
+    final noteProgress = RegExp(r'^Sync note #(\d+): (\d+)% \((\d+) of (\d+)\)')
+        .firstMatch(status);
+    if (noteProgress != null) {
+      setState(() {
+        _noteProgress[int.parse(noteProgress.group(1)!)] = int.parse(
+          noteProgress.group(2)!,
+        );
+        _syncNoteIndex = int.parse(noteProgress.group(3)!);
+        _syncNoteCount = int.parse(noteProgress.group(4)!);
+        _syncActive = true;
+        _lastSyncActivity = DateTime.now();
+      });
+      return;
+    }
+    if (status.startsWith('Sync started') ||
+        status.startsWith('Sync complete: all notes saved') ||
+        status.startsWith('Sync complete: no new notes') ||
+        status.startsWith('Sync failed') ||
+        status.startsWith('Sync needs Wi-Fi')) {
+      _noteProgress.clear();
+      _syncNoteIndex = 0;
+      _syncNoteCount = 0;
+    }
     if (_applyCircuitPlaybackStatus(status)) return;
     if (status == _lastAudioStatus) return;
     _lastAudioStatus = status;
@@ -3358,6 +3402,10 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     await _loadNotes();
     await _loadGroups();
     await _loadPreferences();
+    // Keys that came back with the backup switch the AI services on without a restart.
+    await _loadGeminiState();
+    await _loadAiState();
+    await _loadMusicState();
   }
 
   Future<void> _loadPreferences() async {

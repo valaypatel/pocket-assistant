@@ -126,4 +126,33 @@ void main() {
     expect(find.textContaining('waiting on Circuit'), findsNothing);
     await close(tester);
   });
+
+  testWidgets(
+    'each note shows its own sync progress, and the strip has no bar',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'circuit_notes': jsonEncode([
+          for (final id in [77, 78])
+            CircuitNote(
+              id: 'n$id',
+              createdAt: DateTime.now().subtract(Duration(seconds: 30 + id)),
+              status: 'Recording saved on Circuit.',
+              boardId: id,
+            ).toJson(),
+        ]),
+      });
+      await open(tester, tab: 'Notes');
+      await status(tester, 'Sync started\n1000 bytes');
+      await status(tester, 'Sync note #77: 40% (1 of 2)');
+      expect(find.text('Syncing 40%'), findsOneWidget);
+      // One bar, in the note that is downloading; the other note just waits.
+      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+      expect(find.text('Note 1 of 2'), findsOneWidget);
+      expect(find.text('Syncing a voice note'), findsNothing);
+      expect(find.text('Waiting to sync'), findsOneWidget);
+      await status(tester, 'Sync note #78: 10% (2 of 2)');
+      expect(find.text('Syncing 10%'), findsOneWidget);
+      await close(tester);
+    },
+  );
 }

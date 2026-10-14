@@ -177,6 +177,11 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "status" -> result.success(CircuitRelayService.relayStatus)
+                    "btLog" -> {
+                        call.argument<String>("line")?.let { BtEventLog.add(this, "app: $it") }
+                        result.success(null)
+                    }
+                    "btLogRead" -> result.success(BtEventLog.read(this, call.argument<Int>("lines") ?: 80))
                     "write" -> {
                         val value = call.argument<String>("value")
                         result.success(value != null && CircuitRelayService.writeToCircuit(value))

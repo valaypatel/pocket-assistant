@@ -361,9 +361,23 @@ extension _ScPages on _CircuitHomePageState {
     ];
   }
 
+  /// This note's own download progress (0 to 100), or null when it is not downloading. Circuit's number for the
+  /// note names it exactly; with no per-note figures (an older phone service) the note being synced shows the
+  /// overall one.
+  int? _noteSyncPercent(CircuitNote note) {
+    if (note.audioPath != null) return null;
+    if (_noteProgress.isNotEmpty) {
+      final id = note.boardId;
+      return id == null ? null : _noteProgress[id];
+    }
+    return note.id == _syncingNoteId ? (_syncProgress ?? 0) : null;
+  }
+
   /// Where the note stands, in a few words; null when there is nothing to add.
   String? _noteStatusText(CircuitNote note) {
-    if (note.id == _syncingNoteId) return 'Syncing';
+    final syncing = _noteSyncPercent(note);
+    if (syncing != null) return 'Syncing $syncing%';
+    if (note.id == _syncingNoteId && _noteProgress.isEmpty) return 'Syncing';
     final song = note.song;
     if (note.isSong && song != null) {
       if (song.matched) return song.artist;
@@ -483,11 +497,18 @@ extension _ScPages on _CircuitHomePageState {
       );
     }
     if (_syncingNoteId != null || _syncActive) {
+      // Each note shows its own progress bar in its row; the strip only says a sync is running and how far
+      // along the list it is. Without per-note figures it keeps the single bar.
+      final perNote = _noteProgress.isNotEmpty;
       return ScStatusStrip(
         tone: ScStripTone.progress,
-        title: 'Syncing a voice note',
-        detail: '${_syncProgress ?? 0}%',
-        showProgress: true,
+        title: perNote ? 'Syncing from Circuit' : 'Syncing a voice note',
+        detail: perNote
+            ? (_syncNoteCount > 1
+                  ? 'Note $_syncNoteIndex of $_syncNoteCount'
+                  : null)
+            : '${_syncProgress ?? 0}%',
+        showProgress: !perNote,
         progress: _syncProgress == null ? null : _syncProgress! / 100,
       );
     }
@@ -601,7 +622,8 @@ extension _ScPages on _CircuitHomePageState {
 
   Widget _noteTile(CircuitNote note, {bool actions = false}) {
     final attention = _noteNeedsAttention(note);
-    final needsSync = note.audioPath == null && note.id != _syncingNoteId;
+    final syncPercent = _noteSyncPercent(note);
+    final needsSync = note.audioPath == null && syncPercent == null;
     final footerButtons = <Widget>[
       if (actions &&
           note.isSong &&
@@ -633,7 +655,7 @@ extension _ScPages on _CircuitHomePageState {
       statusIcon: attention ? LucideIcons.circleAlert : null,
       statusColor: attention
           ? context.sc.danger
-          : (note.id == _syncingNoteId || note.id == _transcribingNoteId)
+          : (syncPercent != null || note.id == _transcribingNoteId)
           ? context.sc.accentInk
           : null,
       badge: NoteSourceBadge(source: note.source),
@@ -643,11 +665,11 @@ extension _ScPages on _CircuitHomePageState {
             ? null
             : () => _playSyncedNote(note.audioPath),
       ),
-      footer: note.id == _syncingNoteId
+      footer: syncPercent != null
           ? ClipRRect(
               borderRadius: BorderRadius.circular(99),
               child: LinearProgressIndicator(
-                value: (_syncProgress ?? 0) / 100,
+                value: syncPercent / 100,
                 minHeight: 5,
                 color: context.sc.accent,
                 backgroundColor: context.sc.line,

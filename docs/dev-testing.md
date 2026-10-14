@@ -67,3 +67,11 @@ without taking the card out: `board_dev.py logtail [KB] [file 0-3]`.
 It also records, on its own, when the board's saved pairings change (`BOND COUNT CHANGED`), which pairings
 it holds on every connection (`BONDS (on connect)`), and any wipe of the saved settings at start-up
 (`NVS ERASED`). If a pairing request appears on the phone, these lines say whether the board still held the pairing.
+
+## Does a failed Bluetooth handshake keep the pairing?
+
+`board_dev.py drop-next-link MS` then `board_dev.py drop-now` cuts the next link MS milliseconds after the phone
+connects (1 to 40 ms lands inside the security handshake). The board logs "BLE security failed ... reason 0x66"
+and then "BONDS (after failed security): 1 stored": the pairing is kept (`firmware/CircuitBleDisplay/idf-patches/`),
+the phone reconnects by itself and nothing asks to repair. Without the patch the same cut leaves "0 stored".
+

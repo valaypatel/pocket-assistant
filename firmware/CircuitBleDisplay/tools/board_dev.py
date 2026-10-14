@@ -5,6 +5,8 @@
   board_dev.py flash            stop the logger, flash the development firmware, restart the logger
   board_dev.py copy [N]         copy the N newest synced notes (default 3) as new, unsynced notes
   board_dev.py sync             offer a Wi-Fi sync to the phone now and wait for it to end
+  board_dev.py drop-next-link [MS]  cut the next Bluetooth link MS ms after it connects (tests that the pairing survives)
+  board_dev.py drop-now         cut the current Bluetooth link at once (the phone reconnects by itself)
   board_dev.py copy-sync [N]    both: copy N notes, then sync them
   board_dev.py status           internal RAM, notes waiting, and whether it is recording / playing / syncing
   board_dev.py rec [SECONDS]    start recording (default: until rec-stop)
@@ -143,6 +145,12 @@ def main():
         return send(f"copy {n}", "DEV copy done", 60)
     if cmd == "sync":
         return send("sync", ("SYNCSTAT", "no new notes", "Nothing to sync", "0 file(s)"), 600)
+    if cmd == "drop-next-link":
+        return send("drop-next-link " + (n if len(args) > 1 else "100"), "DEV drop-next-link armed", 15)
+    if cmd == "drop-now":
+        return send("drop-now", "DEV drop-now", 15)
+    if cmd == "bonds":
+        return send("status", "DEV status", 10)
     if cmd == "copy-sync":
         return send(f"copy-sync {n}", ("SYNCSTAT", "0 file(s)"), 600)
     if cmd == "status":

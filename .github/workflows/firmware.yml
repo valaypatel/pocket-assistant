@@ -93,11 +93,14 @@ jobs:
           (cd ../../dist && sha256sum -- * > SHA256SUMS)
           cat ../../dist/SHA256SUMS
 
+      # Pull requests only prove the build works; the files are needed by the jobs that publish, which run on
+      # pushes to main and development. Keeping PR builds out of artifact storage stopped it filling up.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: github.event_name != 'pull_request'
         with:
           name: circuit-firmware
           path: dist/
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: error
 
   release:

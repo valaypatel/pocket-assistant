@@ -140,6 +140,37 @@ class CircuitRelayService : Service() {
     private var gatt: BluetoothGatt? = null
     private var command: BluetoothGattCharacteristic? = null
     private var relayReady = false
+    // A link that died without Android saying so (the board was restarted or lost power, say) never calls
+    // back, so nothing reconnected until the person tapped Reconnect. Every write to the board is expected to
+    // be answered; one left unanswered for 20 s means the link is dead, so it is dropped and rebuilt.
+    // Signal strength as the phone hears the board, sampled every 20 s while connected. It is written to the
+    // log when weak, when it moves by 10 dB, or every 5 min, and always with a drop, so a drop can be put
+    // next to how weak the link was just before it.
+    @Volatile private var lastRssi: Int? = null
+    @Volatile private var lastRssiAtMs = 0L
+    private var lastRssiLogged: Int? = null
+    private var lastRssiLoggedAtMs = 0L
+    private var watchdogTicks = 0
+
+    @Volatile private var lastWriteStartedMs = 0L
+    @Volatile private var lastWriteDoneMs = 0L
+    private val linkWatchdog = object : Runnable {
+        override fun run() {
+            val started = lastWriteStartedMs
+            if (relayReady && started > 0 && lastWriteDoneMs < started &&
+                SystemClock.elapsedRealtime() - started > 20_000
+            ) {
+                BtEventLog.add(this@CircuitRelayService, "watchdog: a write got no answer for 20 s, the link is dead")
+                lastWriteStartedMs = 0L
+                gatt?.let { failConnection(it, "Circuit stopped answering") }
+            }
+            if (relayReady && ++watchdogTicks % 2 == 0) {
+                try { gatt?.readRemoteRssi() } catch (_: SecurityException) {}
+            }
+            reconnectHandler.postDelayed(this, 10_000)
+        }
+    }
+
     private val homeStatusRunnable = object : Runnable {
         override fun run() {
             if (relayReady) sendHomeStatus()
@@ -152,7 +183,15 @@ class CircuitRelayService : Service() {
     private val adapterReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
-            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+            val adapterState = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+            BtEventLog.add(this@CircuitRelayService, "phone Bluetooth " + when (adapterState) {
+                BluetoothAdapter.STATE_OFF -> "off"
+                BluetoothAdapter.STATE_ON -> "on"
+                BluetoothAdapter.STATE_TURNING_OFF -> "turning off"
+                BluetoothAdapter.STATE_TURNING_ON -> "turning on"
+                else -> "state $adapterState"
+            })
+            when (adapterState) {
                 BluetoothAdapter.STATE_OFF -> {
                     Log.i("CircuitRelay", "[BLE] Bluetooth turned off")
                     if (connectedAtMs > 0) {
@@ -185,12 +224,27 @@ class CircuitRelayService : Service() {
     private val setupTimeout = Runnable {
         gatt?.let { failConnection(it, "Circuit setup timed out") }
     }
+    private fun bondName(state: Int) = when (state) {
+        BluetoothDevice.BOND_NONE -> "none"
+        BluetoothDevice.BOND_BONDING -> "bonding"
+        BluetoothDevice.BOND_BONDED -> "bonded"
+        else -> "?$state"
+    }
+
     private val bondReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
             val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
             if (device.address != circuitAddress) return
-            when (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)) {
+            val newState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
+            val oldState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, -1)
+            // The first domino of a broken pairing: who changed the phone's bond, and when.
+            BtEventLog.add(
+                this@CircuitRelayService,
+                "bond ${bondName(oldState)} -> ${bondName(newState)}" +
+                    " reason=${intent.getIntExtra("android.bluetooth.device.extra.REASON", -1)}",
+            )
+            when (newState) {
                 BluetoothDevice.BOND_BONDED -> {
                     reconnectDelayMs = 1000L
                     reconnectHandler.post { connect(device.address) }
@@ -228,6 +282,7 @@ class CircuitRelayService : Service() {
         reconnectHandler.removeCallbacks(reconnectRunnable)
         reconnectHandler.removeCallbacks(setupTimeout)
         reconnectHandler.removeCallbacks(homeStatusRunnable)
+        reconnectHandler.removeCallbacks(linkWatchdog)
         unregisterReceiver(bondReceiver)
         unregisterReceiver(adapterReceiver)
         if (activeService === this) activeService = null
@@ -277,6 +332,7 @@ class CircuitRelayService : Service() {
      */
     private fun pauseForRepair() {
         Log.w("CircuitRelay", "[BLE] Circuit is not bonded; waiting for the user to repair pairing")
+        BtEventLog.add(this, "relay paused: Circuit is not bonded, waiting for Repair pairing")
         shouldReconnect = false
         reconnectHandler.removeCallbacks(reconnectRunnable)
         reconnectHandler.removeCallbacks(setupTimeout)
@@ -288,6 +344,7 @@ class CircuitRelayService : Service() {
     }
 
     private fun failConnection(candidate: BluetoothGatt, reason: String) {
+        BtEventLog.add(this, "relay failed: $reason")
         if (this.gatt !== candidate) return
         reconnectHandler.removeCallbacks(setupTimeout)
         command = null
@@ -301,6 +358,15 @@ class CircuitRelayService : Service() {
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, state: Int) {
             Log.i("CircuitRelay", "[BLE] connection state=$state status=$status")
+            val seen = lastRssi
+            val signal = if (seen == null) "no signal reading yet"
+                else "last signal $seen dBm, ${(SystemClock.elapsedRealtime() - lastRssiAtMs) / 1000} s before"
+            BtEventLog.add(this@CircuitRelayService, "gatt state=$state status=$status bond=${bondName(gatt.device.bondState)}" +
+                if (state == BluetoothProfile.STATE_CONNECTED) "" else "; $signal")
+            if (state == BluetoothProfile.STATE_CONNECTED) {
+                lastRssi = null
+                lastRssiLogged = null
+            }
             if (state == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 if (this@CircuitRelayService.gatt !== gatt) {
                     gatt.close()
@@ -323,6 +389,22 @@ class CircuitRelayService : Service() {
                 }
                 failConnection(gatt, "Circuit disconnected")
             }
+        }
+        override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) return
+            val now = SystemClock.elapsedRealtime()
+            lastRssi = rssi
+            lastRssiAtMs = now
+            val before = lastRssiLogged
+            if (rssi < -80 || before == null || Math.abs(rssi - before) >= 10 || now - lastRssiLoggedAtMs > 300_000) {
+                BtEventLog.add(this@CircuitRelayService, "signal $rssi dBm" + if (rssi < -80) " (weak)" else "")
+                lastRssiLogged = rssi
+                lastRssiLoggedAtMs = now
+            }
+        }
+        override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            lastWriteDoneMs = SystemClock.elapsedRealtime()
+            if (status != BluetoothGatt.GATT_SUCCESS) BtEventLog.add(this@CircuitRelayService, "write answered with status=$status")
         }
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             if (this@CircuitRelayService.gatt !== gatt) return
@@ -380,6 +462,10 @@ class CircuitRelayService : Service() {
             // screen being open, so the service sends them itself.
             reconnectHandler.removeCallbacks(homeStatusRunnable)
             reconnectHandler.postDelayed(homeStatusRunnable, 2500)
+            lastWriteStartedMs = 0L
+            lastWriteDoneMs = 0L
+            reconnectHandler.removeCallbacks(linkWatchdog)
+            reconnectHandler.postDelayed(linkWatchdog, 10_000)
         }
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             handleCharacteristic(characteristic.value ?: byteArrayOf())
@@ -444,7 +530,9 @@ class CircuitRelayService : Service() {
         return characteristic.let {
             characteristic.value = value.toByteArray()
             characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            gatt?.writeCharacteristic(characteristic) ?: false
+            val started = gatt?.writeCharacteristic(characteristic) ?: false
+            if (started && lastWriteDoneMs >= lastWriteStartedMs) lastWriteStartedMs = SystemClock.elapsedRealtime()
+            started
         }
     }
 
@@ -542,14 +630,18 @@ class CircuitRelayService : Service() {
             val notes = NoteListing.parse(listing)
             if (notes.isEmpty()) {
                 publishAudioStatus("Sync complete: no new notes")
+                clearSyncNotification()
                 return
             }
             val totalBytes = notes.sumOf { it.bytes }
             var doneBytes = 0L
             var lastPercent = -1
+            var lastNotePercent = -1
             Log.i("CircuitSync", "Listing ok: ${notes.size} notes, $totalBytes bytes")
             publishAudioStatus("Sync started\n$totalBytes bytes")
-            for ((id, bytes, epoch, group) in notes) {
+            for ((noteIndex, entry) in notes.withIndex()) {
+                val (id, bytes, epoch, group) = entry
+                lastNotePercent = -1
                 if (superseded()) return
                 // The same recording may already be here under a different time stamp
                 // (an acknowledgement was lost and Circuit offered it again). Reuse it
@@ -609,6 +701,13 @@ class CircuitRelayService : Service() {
                                             lastPercent = percent
                                             publishAudioStatus("Sync in progress: $percent%")
                                         }
+                                        // This note's own progress, for its row in the app and the notification.
+                                        val notePercent = (partial.length() * 100 / bytes).toInt().coerceIn(0, 99)
+                                        if (notePercent != lastNotePercent && notePercent % 2 == 0) {
+                                            lastNotePercent = notePercent
+                                            publishAudioStatus("Sync note #$id: $notePercent% (${noteIndex + 1} of ${notes.size})")
+                                            setSyncNotification(noteIndex + 1, notes.size, notePercent)
+                                        }
                                     }
                                 }
                             }
@@ -662,6 +761,7 @@ class CircuitRelayService : Service() {
                 publishAudioStatus("Sync complete: ready on phone|${target.absolutePath}|$epoch")
             }
             publishAudioStatus("Sync complete: all notes saved")
+            clearSyncNotification()
         } catch (error: Exception) {
             Log.e("CircuitSync", "Wi-Fi sync failed", error)
             Diagnostics.event(
@@ -690,6 +790,9 @@ class CircuitRelayService : Service() {
                 }
             }
             publishAudioStatus("Sync failed: $reason (${error.javaClass.simpleName})")
+        } finally {
+            // Whatever ended it (done, failed, replaced by a newer sync), the bar does not stay on.
+            clearSyncNotification()
         }
     }
 
@@ -717,8 +820,33 @@ class CircuitRelayService : Service() {
     private fun notificationText(status: String): String =
         if (status == connectedStatus) "Active" else status
 
+    // While notes download, the notification carries a progress bar: "Syncing note 2 of 5" and how far through.
+    @Volatile private var syncNote = 0
+    @Volatile private var syncNotes = 0
+    @Volatile private var syncNotePercent = -1
+    private fun setSyncNotification(index: Int, total: Int, percent: Int) {
+        syncNote = index
+        syncNotes = total
+        syncNotePercent = percent
+        updateNotification(relayStatus)
+    }
+    private fun clearSyncNotification() {
+        if (syncNotePercent < 0) return
+        syncNotePercent = -1
+        updateNotification(relayStatus)
+    }
+
     private fun setRelayStatus(text: String) { relayStatus = text; updateNotification(text) }
     private fun updateNotification(text: String) { getSystemService(NotificationManager::class.java).notify(notificationId, notification(text)) }
-    private fun notification(text: String): Notification = NotificationCompat.Builder(this, channelId)
-        .setSmallIcon(R.drawable.ic_stat_circuit).setContentTitle("Short-Circuit").setContentText(notificationText(text)).setOngoing(true).build()
+    private fun notification(text: String): Notification {
+        val builder = NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.ic_stat_circuit).setContentTitle("Short-Circuit").setOngoing(true)
+        val percent = syncNotePercent
+        return if (percent >= 0) {
+            val which = if (syncNotes > 1) "Syncing note $syncNote of $syncNotes" else "Syncing a note"
+            builder.setContentText("$which · $percent%").setProgress(100, percent, false).setOnlyAlertOnce(true).build()
+        } else {
+            builder.setContentText(notificationText(text)).build()
+        }
+    }
 }

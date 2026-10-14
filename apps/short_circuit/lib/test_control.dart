@@ -93,6 +93,18 @@ extension _TestControl on _CircuitHomePageState {
             'transcribe $board: ${text.length} characters, $devanagari Devanagari, $latin Latin; '
             '${jsonEncode(text.length > 140 ? text.substring(0, 140) : text)}',
           );
+        case 'btlog':
+          // btlog [lines]: the phone's private Bluetooth log (bond changes, drops, repair taps), newest last
+          final count = int.tryParse(first ?? '') ?? 80;
+          final text =
+              await _relayChannel.invokeMethod<String>('btLogRead', {
+                'lines': count,
+              }) ??
+              '';
+          for (final line in text.split('\n').where((l) => l.isNotEmpty)) {
+            await _testLog('btlog $line');
+          }
+          await _testLog('btlog end');
         case 'moments':
           // moments <board number>: the note's Moments, in ms from the start of the whole note
           final board = int.tryParse(first ?? '');
