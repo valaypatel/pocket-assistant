@@ -9,6 +9,9 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Reminders ring at the minute they are set for. Android 13+ grants USE_EXACT_ALARM at install; 12 grants SCHEDULE_EXACT_ALARM. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
@@ -63,6 +66,9 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/record_widget_info" />
         </receiver>
+        <receiver
+            android:name=".ReminderReceiver"
+            android:exported="false" />
         <receiver
             android:name=".RelayRestartReceiver"
             android:exported="true">

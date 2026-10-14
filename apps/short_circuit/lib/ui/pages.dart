@@ -28,6 +28,59 @@ String _dayLabel(DateTime value) {
   return '${local.day} ${_months[local.month - 1].substring(0, 3)}';
 }
 
+/// "Today 4:00 pm", "Tomorrow 9:30 am" or "15 Oct 4:00 pm": when a reminder rings.
+String reminderLabel(DateTime value) {
+  final local = value.toLocal();
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final day = DateTime(local.year, local.month, local.day);
+  final ahead = day.difference(today).inDays;
+  final date = switch (ahead) {
+    0 => 'Today',
+    1 => 'Tomorrow',
+    _ => '${local.day} ${_months[local.month - 1].substring(0, 3)}',
+  };
+  final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
+  return '$date $hour:${_two(local.minute)} ${local.hour < 12 ? 'am' : 'pm'}';
+}
+
+/// Asks for a day and a time in the future; null when the person backs out.
+Future<DateTime?> pickReminderTime(
+  BuildContext context, {
+  DateTime? initial,
+}) async {
+  final now = DateTime.now();
+  final start = initial != null && initial.isAfter(now)
+      ? initial
+      : now.add(const Duration(hours: 1));
+  final day = await showDatePicker(
+    context: context,
+    initialDate: start,
+    firstDate: DateTime(now.year, now.month, now.day),
+    lastDate: now.add(const Duration(days: 365 * 3)),
+    helpText: 'Remind me on',
+  );
+  if (day == null || !context.mounted) return null;
+  final time = await showTimePicker(
+    context: context,
+    initialTime: TimeOfDay.fromDateTime(start),
+    helpText: 'Remind me at',
+  );
+  if (time == null) return null;
+  final picked = DateTime(day.year, day.month, day.day, time.hour, time.minute);
+  if (!picked.isAfter(now) && context.mounted) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text('That time has passed. Pick a time later than now.'),
+        ),
+      );
+    return null;
+  }
+  return picked;
+}
+
 /// What to delete when a note that came from Circuit is deleted in the app.
 enum NoteDeleteChoice { everywhere, phoneOnly }
 
@@ -448,6 +501,8 @@ extension _ScPages on _CircuitHomePageState {
               : (id) => _deleteNote(id, phoneOnly: true),
           onCreateReminder: _extractReminder,
           onAddTask: (title, detail) => _addTask(title, detail: detail),
+          onAddReminder: (title, detail, at) =>
+              _addTask(title, detail: detail, dueAt: at),
           summary: note.summary,
           englishTranslation: note.englishTranslation,
           language: note.language,
@@ -956,6 +1011,53 @@ extension _ScPages on _CircuitHomePageState {
     if (title != null && title.trim().isNotEmpty) await _addTask(title.trim());
   }
 
+  /// Sets, changes or clears a task's reminder from its bell.
+  Future<void> _editReminder(CircuitTask task) async {
+    final due = task.dueAt;
+    final hasFuture = due != null && due.isAfter(DateTime.now());
+    final choice = hasFuture
+        ? await showModalBottomSheet<String>(
+            context: context,
+            builder: (sheet) => SafeArea(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ListTile(
+                    leading: const Icon(LucideIcons.clock),
+                    title: const Text('Change time'),
+                    subtitle: Text(reminderLabel(due)),
+                    onTap: () => Navigator.pop(sheet, 'change'),
+                  ),
+                  ListTile(
+                    leading: const Icon(LucideIcons.bellOff),
+                    title: const Text('Remove reminder'),
+                    onTap: () => Navigator.pop(sheet, 'clear'),
+                  ),
+                ],
+              ),
+            ),
+          )
+        : 'change';
+    if (!mounted || choice == null) return;
+    if (choice == 'clear') {
+      await _setTaskDue(task.id, null);
+      return;
+    }
+    final picked = await pickReminderTime(context, initial: due);
+    if (picked == null || !mounted) return;
+    final allowed = await _setTaskDue(task.id, picked);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            allowed ? 'Reminder set for ${reminderLabel(picked)}.' : 'Notifications are off for Circuit. Turn them on in Android settings to hear reminders.',
+          ),
+        ),
+      );
+  }
+
   Widget _taskRow(CircuitTask task) => Dismissible(
     key: ValueKey(task.id),
     direction: DismissDirection.endToStart,
@@ -1003,9 +1105,37 @@ extension _ScPages on _CircuitHomePageState {
                       style: TextStyle(fontSize: 11, color: context.sc.muted),
                     ),
                   ],
+                  if (task.dueAt != null) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      '${task.done || task.dueAt!.isAfter(DateTime.now()) ? 'Reminder' : 'Was due'} · ${reminderLabel(task.dueAt!)}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color:
+                            !task.done && !task.dueAt!.isAfter(DateTime.now())
+                            ? context.sc.danger
+                            : context.sc.accent,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
+            if (!task.done)
+              IconButton(
+                tooltip: task.dueAt == null
+                    ? 'Set a reminder'
+                    : 'Change reminder',
+                onPressed: () => _editReminder(task),
+                icon: Icon(
+                  task.dueAt == null ? LucideIcons.bell : LucideIcons.bellRing,
+                  size: 18,
+                  color: task.dueAt == null
+                      ? context.sc.muted
+                      : context.sc.accent,
+                ),
+              ),
             IconButton(
               tooltip: 'Delete task',
               onPressed: () => _deleteTask(task.id),
@@ -1018,7 +1148,14 @@ extension _ScPages on _CircuitHomePageState {
   );
 
   List<Widget> _tasksPage() {
-    final open = _tasks.where((t) => !t.done).toList();
+    // Tasks with a time come first, soonest first; the rest keep newest-first order.
+    final open = _tasks.where((t) => !t.done).toList()
+      ..sort((a, b) {
+        if (a.dueAt == null && b.dueAt == null) return 0;
+        if (a.dueAt == null) return 1;
+        if (b.dueAt == null) return -1;
+        return a.dueAt!.compareTo(b.dueAt!);
+      });
     final done = _tasks.where((t) => t.done).toList();
     return [
       Row(children: [const Expanded(child: ScTitle('Tasks'))]),
@@ -1033,7 +1170,7 @@ extension _ScPages on _CircuitHomePageState {
         Padding(
           padding: EdgeInsets.symmetric(vertical: 10),
           child: Text(
-            'Nothing to do right now. Add a task with the button below, or approve a suggested action on a note.',
+            'Nothing to do right now. Add a task with the button below, or approve a suggested action on a note. The bell on a task rings a reminder.',
             style: ScType.caption.copyWith(color: context.sc.muted),
           ),
         ),

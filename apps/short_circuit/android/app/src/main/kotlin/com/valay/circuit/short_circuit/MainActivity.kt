@@ -220,6 +220,19 @@ class MainActivity : FlutterActivity() {
                         if (needed) requestPermissions(arrayOf(permission), 4217)
                         result.success(!needed)
                     }
+                    "syncReminders" -> {
+                        @Suppress("UNCHECKED_CAST")
+                        val items = (call.argument<List<Map<String, Any?>>>("items") ?: emptyList())
+                        Reminders.sync(this, Reminders.parse(items))
+                        result.success(Reminders.exactAllowed(this))
+                    }
+                    "takeReminderEvents" -> result.success(Reminders.takeEvents(this))
+                    "openExactAlarmSettings" -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:$packageName")))
+                        }
+                        result.success(null)
+                    }
                     "openCalendarEvent" -> {
                         val title = call.argument<String>("title")
                         val description = call.argument<String>("description")

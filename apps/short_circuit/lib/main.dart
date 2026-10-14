@@ -625,7 +625,10 @@ class AiClient {
   }
 
   /// Looks for a reminder with a date and time in a voice note.
-  Future<ReminderDraft> extractReminder(String transcript) async {
+  Future<ReminderDraft> extractReminder(
+    String transcript, {
+    DateTime? recordedAt,
+  }) async {
     final response = await _completion([
       {
         'role': 'system',
@@ -633,8 +636,7 @@ class AiClient {
       },
       {
         'role': 'user',
-        'content':
-            'Today is ${DateTime.now().toIso8601String()}. Transcript:\n$transcript',
+        'content': '${_whenText(recordedAt)} Transcript:\n$transcript',
       },
     ]);
     final when = response['scheduledAt']?.toString();
@@ -653,6 +655,7 @@ class AiClient {
   Future<AiEnrichment> enrich(
     String transcript, {
     bool highlightMoments = true,
+    DateTime? recordedAt,
   }) async {
     final response = await _completion([
       {
@@ -663,8 +666,7 @@ class AiClient {
       },
       {
         'role': 'user',
-        'content':
-            'Today is ${DateTime.now().toIso8601String()}. Transcript:\n$transcript',
+        'content': '${_whenText(recordedAt)} Transcript:\n$transcript',
       },
     ]);
     const valid = {
@@ -732,6 +734,25 @@ class AiClient {
       actions: actions,
     );
   }
+}
+
+/// Tells the AI when the note was spoken, so "tomorrow" or "on Friday" means the right day
+/// even when the note is transcribed later.
+String _whenText(DateTime? recordedAt) {
+  const days = [
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+    'Sunday',
+  ];
+  final spoken = (recordedAt ?? DateTime.now()).toLocal();
+  final now = DateTime.now();
+  return 'The note was recorded on ${days[spoken.weekday - 1]} ${spoken.toIso8601String()}; '
+      'it is now ${days[now.weekday - 1]} ${now.toIso8601String()}. '
+      'Work out relative dates from when it was recorded.';
 }
 
 const _ai = AiClient();
@@ -1081,6 +1102,7 @@ class CircuitTask {
     required this.title,
     this.detail,
     this.done = false,
+    this.dueAt,
   });
 
   final String id;
@@ -1088,18 +1110,24 @@ class CircuitTask {
   final String? detail;
   final bool done;
 
-  CircuitTask copyWith({bool? done}) => CircuitTask(
-    id: id,
-    title: title,
-    detail: detail,
-    done: done ?? this.done,
-  );
+  /// When the app should ring a reminder; null for a task with no time.
+  final DateTime? dueAt;
+
+  CircuitTask copyWith({bool? done, DateTime? dueAt, bool clearDue = false}) =>
+      CircuitTask(
+        id: id,
+        title: title,
+        detail: detail,
+        done: done ?? this.done,
+        dueAt: clearDue ? null : dueAt ?? this.dueAt,
+      );
 
   factory CircuitTask.fromJson(Map<String, dynamic> json) => CircuitTask(
     id: json['id'] as String,
     title: json['title'] as String,
     detail: json['detail'] as String?,
     done: json['done'] == true,
+    dueAt: DateTime.tryParse(json['dueAt']?.toString() ?? ''),
   );
 
   Map<String, dynamic> toJson() => {
@@ -1107,6 +1135,7 @@ class CircuitTask {
     'title': title,
     if (detail != null) 'detail': detail,
     'done': done,
+    if (dueAt != null) 'dueAt': dueAt!.toIso8601String(),
   };
 }
 
@@ -1331,6 +1360,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     // while the app was away.
     if (state == AppLifecycleState.resumed) {
       unawaited(_recoverPhoneRecording().then((_) => _checkLaunchAction()));
+      unawaited(_takeReminderEvents());
     }
   }
 
@@ -1676,6 +1706,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       final enrichment = await _ai.enrich(
         transcript,
         highlightMoments: _useMoments,
+        recordedAt: note?.createdAt,
       );
       _enrichAttempts.remove(id);
       await _updateNote(id, (item) {
@@ -3033,9 +3064,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     }
   }
 
-  Future<ReminderDraft?> _extractReminder(String transcript) async {
+  Future<ReminderDraft?> _extractReminder(
+    String transcript,
+    DateTime recordedAt,
+  ) async {
     try {
-      return await _ai.extractReminder(transcript);
+      return await _ai.extractReminder(transcript, recordedAt: recordedAt);
     } catch (error) {
       _setStatus('Reminder extraction failed: $error');
       return null;
@@ -3443,6 +3477,10 @@ class _CircuitHomePageState extends State<CircuitHomePage>
           !preferences.containsKey(_notesKey);
       _shareDiagnostics = preferences.getBool(Telemetry.preferenceKey) ?? true;
     });
+    // Reminders that rang or were snoozed while the app was closed, then make sure
+    // Android has every reminder (a restore or an update may have changed the list).
+    await _takeReminderEvents();
+    unawaited(_syncReminders());
   }
 
   Future<void> _loadGeminiState() async {
@@ -3469,13 +3507,102 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       jsonEncode(_tasks.map((task) => task.toJson()).toList()),
     );
     unawaited(_sendHomeStatus());
+    unawaited(_syncReminders());
   }
 
-  Future<void> _addTask(String title, {String? detail}) async {
+  /// Sends every open task that has a time to Android, which rings the reminders.
+  Future<void> _syncReminders() async {
+    try {
+      await _relayChannel.invokeMethod<bool>('syncReminders', {
+        'items': [
+          for (final task in _tasks)
+            if (!task.done && task.dueAt != null)
+              {
+                'id': task.id,
+                'title': task.title,
+                'detail': task.detail ?? '',
+                'at': task.dueAt!.millisecondsSinceEpoch,
+              },
+        ],
+      });
+    } on MissingPluginException {
+      // not running on the phone (tests)
+    } catch (_) {
+      // reminders are retried on the next change
+    }
+  }
+
+  /// Applies what the person did from a reminder notification while the app was closed.
+  Future<void> _takeReminderEvents() async {
+    List<Object?> events;
+    try {
+      events =
+          await _relayChannel.invokeMethod<List<Object?>>(
+            'takeReminderEvents',
+          ) ??
+          const [];
+    } catch (_) {
+      return;
+    }
+    if (events.isEmpty || !mounted) return;
+    setState(() {
+      for (final raw in events.whereType<Map<Object?, Object?>>()) {
+        final id = raw['id'];
+        final at = raw['at'];
+        _tasks = [
+          for (final task in _tasks)
+            if (task.id != id)
+              task
+            else if (raw['kind'] == 'done')
+              task.copyWith(done: true)
+            else if (at is num)
+              task.copyWith(
+                dueAt: DateTime.fromMillisecondsSinceEpoch(at.toInt()),
+              )
+            else
+              task,
+        ];
+      }
+    });
+    await _saveTasks();
+  }
+
+  /// Asks for the notification permission the first time a reminder is set.
+  /// Returns false when the person said no, so the app can say so.
+  Future<bool> _allowReminderNotifications() async {
+    try {
+      return (await Permission.notification.request()).isGranted;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// Sets, changes or clears the time a task rings. Returns false when notifications are off.
+  Future<bool> _setTaskDue(String id, DateTime? at) async {
+    if (at != null && !await _allowReminderNotifications()) return false;
+    setState(() {
+      _tasks = [
+        for (final task in _tasks)
+          task.id == id
+              ? (at == null
+                    ? task.copyWith(clearDue: true)
+                    : task.copyWith(dueAt: at))
+              : task,
+      ];
+    });
+    await _saveTasks();
+    return true;
+  }
+
+  Future<bool> _addTask(String title, {String? detail, DateTime? dueAt}) async {
+    // A time in the past cannot ring; the task is kept without one.
+    final future = dueAt != null && dueAt.isAfter(DateTime.now());
+    final allowed = !future || await _allowReminderNotifications();
     final task = CircuitTask(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       title: title,
       detail: detail,
+      dueAt: future ? dueAt : null,
     );
     if (mounted) {
       setState(() => _tasks = [task, ..._tasks]);
@@ -3483,6 +3610,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _tasks = [task, ..._tasks];
     }
     await _saveTasks();
+    return allowed;
   }
 
   Future<void> _setSuggestionState(

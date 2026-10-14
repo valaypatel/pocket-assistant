@@ -16,7 +16,7 @@ Widget _page() => TranscriptPage(
   onPlayNote: (_) async {},
   onPlayMoment: (_, _) async {},
   onDeleteNote: (_) async {},
-  onCreateReminder: (_) async => null,
+  onCreateReminder: (_, _) async => null,
   onAddTask: (_, _) async {},
   summary: 'Two demands about the election commission, with a request for a public statement.',
   language: 'English',

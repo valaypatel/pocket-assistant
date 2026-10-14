@@ -52,7 +52,7 @@ Widget _page(
     audioPath: null,
     onPlayNote: (_) async {},
     onDeleteNote: (_) async {},
-    onCreateReminder: (_) async => null,
+    onCreateReminder: (_, _) async => null,
     onAddTask: (_, _) async {},
     onSuggestionState: (_, _, _) async {},
     onEnrich: (id) async => reviewed?.add(id),

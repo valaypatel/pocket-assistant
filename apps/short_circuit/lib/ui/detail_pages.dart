@@ -332,6 +332,7 @@ class TranscriptPage extends StatefulWidget {
     this.onDeletePhoneOnly,
     required this.onCreateReminder,
     required this.onAddTask,
+    this.onAddReminder,
     this.summary,
     this.englishTranslation,
     this.language,
@@ -370,8 +371,13 @@ class TranscriptPage extends StatefulWidget {
 
   /// Set for a note that is also on Circuit: deletes only the phone's copy.
   final Future<void> Function(String noteId)? onDeletePhoneOnly;
-  final Future<ReminderDraft?> Function(String transcript) onCreateReminder;
+  final Future<ReminderDraft?> Function(String transcript, DateTime recordedAt)
+  onCreateReminder;
   final Future<void> Function(String title, String? detail) onAddTask;
+
+  /// Adds a task that rings an app notification at [at]; false when notifications are off.
+  final Future<bool> Function(String title, String? detail, DateTime at)?
+  onAddReminder;
   final String? summary;
   final String? englishTranslation;
   final String? language;
@@ -422,7 +428,82 @@ class _TranscriptPageState extends State<TranscriptPage> {
 
   CircuitNote? get _live => widget.noteById?.call(widget.noteId);
 
+  /// Sets a reminder that rings as an app notification. [when] is what the AI found; the
+  /// person can change it first. Without a usable future time the note becomes a task.
+  Future<void> _remindMe({
+    required String title,
+    required String details,
+    required DateTime? found,
+  }) async {
+    var when = found != null && found.isAfter(DateTime.now()) ? found : null;
+    final passed = found != null && when == null;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setLocal) => AlertDialog(
+          title: Text(when == null ? 'Add to your tasks?' : 'Remind you?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('$title${details.isEmpty ? '' : '\n\n$details'}'),
+              const SizedBox(height: 12),
+              Text(
+                when != null
+                    ? reminderLabel(when!)
+                    : passed
+                    ? 'That time has already passed.'
+                    : 'No date or time was found.',
+                style: ScType.caption.copyWith(color: dialogContext.sc.muted),
+              ),
+              TextButton.icon(
+                icon: const Icon(LucideIcons.clock, size: 16),
+                label: Text(when == null ? 'Pick a time' : 'Change time'),
+                onPressed: () async {
+                  final picked = await pickReminderTime(
+                    dialogContext,
+                    initial: when,
+                  );
+                  if (picked != null) setLocal(() => when = picked);
+                },
+              ),
+            ],
+          ),
+          actions: scDialogActions(
+            dialogContext,
+            confirmIcon: when == null
+                ? LucideIcons.listPlus
+                : LucideIcons.bellRing,
+            confirmTooltip: when == null ? 'Add as task' : 'Set reminder',
+            onCancel: () => Navigator.pop(dialogContext, false),
+            onConfirm: () => Navigator.pop(dialogContext, true),
+          ),
+        ),
+      ),
+    );
+    if (confirmed != true) return;
+    final at = when;
+    if (at == null || widget.onAddReminder == null) {
+      await widget.onAddTask(title, details);
+      _snack('Added to your tasks.');
+      return;
+    }
+    final allowed = await widget.onAddReminder!(title, details, at);
+    _snack(
+      allowed ? 'Reminder set for ${reminderLabel(at)}.' : 'Saved as a task, but notifications are off for Circuit. Turn them on in Android settings to hear it.',
+    );
+  }
+
   Future<void> _approveSuggestion(NoteActionSuggestion suggestion) async {
+    if (suggestion.type == 'reminder' && widget.onAddReminder != null) {
+      await _remindMe(
+        title: suggestion.title,
+        details: suggestion.details,
+        found: DateTime.tryParse(suggestion.scheduledAt ?? ''),
+      );
+      await widget.onSuggestionState(widget.noteId, suggestion.id, 'approved');
+      return;
+    }
     final when = suggestion.type == 'task'
         ? null
         : DateTime.tryParse(suggestion.scheduledAt ?? '');
@@ -517,11 +598,22 @@ class _TranscriptPageState extends State<TranscriptPage> {
   bool get _actionable =>
       {'reminder', 'task', 'calendar_event'}.contains(_category);
 
-  Future<void> _createReminder() async {
+  Future<void> _createReminder({bool inApp = false}) async {
     setState(() => _extractingReminder = true);
     try {
-      final draft = await widget.onCreateReminder(_transcript);
+      final draft = await widget.onCreateReminder(
+        _transcript,
+        widget.createdAt,
+      );
       if (!mounted || draft == null) return;
+      if (inApp) {
+        await _remindMe(
+          title: draft.title,
+          details: draft.details,
+          found: draft.hasReminder ? draft.scheduledAt : null,
+        );
+        return;
+      }
       if (!draft.hasReminder || draft.scheduledAt == null) {
         final addTask = await showDialog<bool>(
           context: context,
@@ -1213,6 +1305,21 @@ class _TranscriptPageState extends State<TranscriptPage> {
                   _snack('Added to your tasks');
                 },
               ),
+              if (widget.onAddReminder != null)
+                ScRow(
+                  title: 'Remind me',
+                  caption: _extractingReminder
+                      ? 'Checking the note…'
+                      : 'Ring a notification at the time in this note',
+                  trailing: Icon(
+                    LucideIcons.bellRing,
+                    size: 20,
+                    color: context.sc.muted,
+                  ),
+                  onTap: _extractingReminder
+                      ? null
+                      : () => _createReminder(inApp: true),
+                ),
               ScRow(
                 title: 'Calendar reminder',
                 caption: _extractingReminder

@@ -55,7 +55,7 @@ TranscriptPage _note() => TranscriptPage(
   audioPath: null,
   onPlayNote: (_) async {},
   onDeleteNote: (_) async {},
-  onCreateReminder: (_) async => null,
+  onCreateReminder: (_, _) async => null,
   onAddTask: (_, _) async {},
   onOpenChat: () {},
   onSuggestionState: (_, _, _) async {},
