@@ -54,4 +54,16 @@ void main() {
       expect(File(file).existsSync(), isTrue, reason: file);
     }
   });
+
+  test('declares exact reminders and the receiver that rings them', () {
+    expect(manifest, contains('android.permission.USE_EXACT_ALARM'));
+    expect(manifest, contains('android.permission.SCHEDULE_EXACT_ALARM'));
+    expect(manifest, contains('android.permission.POST_NOTIFICATIONS'));
+    final receiver = RegExp(
+      r'<receiver[^>]*ReminderReceiver[^>]*/>',
+      dotAll: true,
+    ).firstMatch(manifest);
+    expect(receiver, isNotNull);
+    expect(receiver!.group(0), contains('android:exported="false"'));
+  });
 }

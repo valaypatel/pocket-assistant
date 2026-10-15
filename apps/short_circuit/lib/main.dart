@@ -625,7 +625,10 @@ class AiClient {
   }
 
   /// Looks for a reminder with a date and time in a voice note.
-  Future<ReminderDraft> extractReminder(String transcript) async {
+  Future<ReminderDraft> extractReminder(
+    String transcript, {
+    DateTime? recordedAt,
+  }) async {
     final response = await _completion([
       {
         'role': 'system',
@@ -633,8 +636,7 @@ class AiClient {
       },
       {
         'role': 'user',
-        'content':
-            'Today is ${DateTime.now().toIso8601String()}. Transcript:\n$transcript',
+        'content': '${_whenText(recordedAt)} Transcript:\n$transcript',
       },
     ]);
     final when = response['scheduledAt']?.toString();
@@ -653,18 +655,18 @@ class AiClient {
   Future<AiEnrichment> enrich(
     String transcript, {
     bool highlightMoments = true,
+    DateTime? recordedAt,
   }) async {
     final response = await _completion([
       {
         'role': 'system',
         'content':
-            'You analyse private voice-note transcripts. Return JSON only: {"title":"short heading in English","category":"primary category","categories":["primary category","optional secondary categories"],"tags":["short English searchable tags"],"summary":"one short English sentence","englishTranslation":"faithful English translation; if already English, repeat it","language":"language or mixed","actions":[{"type":"task|reminder|calendar_event","title":"action title in English","details":"brief detail in English","scheduledAt":"ISO-8601 local time or null"}]}. Categories may include note, idea, task, reminder, calendar_event, shopping, journal, project, meeting, reference. Translate Hindi/Gujarati faithfully but never alter the original transcript. The transcript may label voices as "Speaker 1:", "Speaker 2:"; keep those labels in englishTranslation, say who said or agreed to what in the summary and action details when it matters, and never use a speaker label as a title or tag. Suggest actions only when clearly supported; never invent dates. Use reminder or calendar_event only when the note states a date or time; otherwise the action type must be task.'
+            'You analyse private voice-note transcripts. Return JSON only: {"title":"short heading in English","category":"primary category","categories":["primary category","optional secondary categories"],"tags":["short English searchable tags"],"summary":"one short English sentence","englishTranslation":"faithful English translation; if already English, repeat it","language":"language or mixed","actions":[{"type":"task|reminder|calendar_event","title":"action title in English","details":"brief detail in English","scheduledAt":"ISO-8601 local time or null"}]}. Categories may include note, idea, task, reminder, calendar_event, shopping, journal, project, meeting, reference. Translate Hindi/Gujarati faithfully but never alter the original transcript. The transcript may label voices as "Speaker 1:", "Speaker 2:"; keep those labels in englishTranslation, say who said or agreed to what in the summary and action details when it matters, and never use a speaker label as a title or tag. Suggest an action only when the speaker says they themselves must do, remember or attend something. News, commentary, opinions and events involving other people are not actions: for those return an empty actions list. Never invent dates. Use reminder or calendar_event only when the note states a date or time that has not passed yet when the note was recorded; otherwise the action type must be task, or leave it out.'
             '${highlightMoments && Moments.hasMarkers(transcript) ? Moments.reviewInstruction : ''}',
       },
       {
         'role': 'user',
-        'content':
-            'Today is ${DateTime.now().toIso8601String()}. Transcript:\n$transcript',
+        'content': '${_whenText(recordedAt)} Transcript:\n$transcript',
       },
     ]);
     const valid = {
@@ -729,9 +731,42 @@ class AiClient {
       englishTranslation:
           response['englishTranslation']?.toString().trim() ?? transcript,
       language: response['language']?.toString().trim() ?? '',
-      actions: actions,
+      actions: dropPastActions(actions, recordedAt ?? DateTime.now()),
     );
   }
+}
+
+/// Keeps the actions that can still be acted on. A reminder or event for a time that had already
+/// passed when the note was recorded is something the AI misread (often a news item).
+List<NoteActionSuggestion> dropPastActions(
+  List<NoteActionSuggestion> actions,
+  DateTime recordedAt,
+) => [
+  for (final action in actions)
+    if (action.type == 'task' ||
+        DateTime.tryParse(action.scheduledAt ?? '') == null ||
+        DateTime.parse(action.scheduledAt!)
+            .isAfter(recordedAt.subtract(const Duration(minutes: 5))))
+      action,
+];
+
+/// Tells the AI when the note was spoken, so "tomorrow" or "on Friday" means the right day
+/// even when the note is transcribed later.
+String _whenText(DateTime? recordedAt) {
+  const days = [
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+    'Sunday',
+  ];
+  final spoken = (recordedAt ?? DateTime.now()).toLocal();
+  final now = DateTime.now();
+  return 'The note was recorded on ${days[spoken.weekday - 1]} ${spoken.toIso8601String()}; '
+      'it is now ${days[now.weekday - 1]} ${now.toIso8601String()}. '
+      'Work out relative dates from when it was recorded.';
 }
 
 const _ai = AiClient();
@@ -892,8 +927,11 @@ class CircuitNote {
 
   bool get isSong => kind == 'song';
 
+  /// A note written on the phone: it never had audio and never comes from Circuit.
+  bool get isText => kind == 'text';
+
   /// Where the recording was made: 'Phone' (this phone's own recorder) or 'Circuit'.
-  String get source => noteSourceOf(audioPath);
+  String get source => isText ? 'Phone' : noteSourceOf(audioPath);
 
   factory CircuitNote.fromJson(Map<String, dynamic> json) => CircuitNote(
     id: json['id'] as String,
@@ -918,7 +956,11 @@ class CircuitNote {
         .map(NoteActionSuggestion.fromJson)
         .toList(),
     boardId: int.tryParse(json['boardId']?.toString() ?? ''),
-    kind: json['kind']?.toString() == 'song' ? 'song' : 'voice',
+    kind: switch (json['kind']?.toString()) {
+      'song' => 'song',
+      'text' => 'text',
+      _ => 'voice',
+    },
     song: json['song'] is Map<String, dynamic>
         ? SongResult.fromJson(json['song'] as Map<String, dynamic>)
         : null,
@@ -1017,7 +1059,7 @@ class CircuitNote {
           .map((item) => item.toJson())
           .toList(),
     if (boardId != null) 'boardId': boardId.toString(),
-    if (isSong) 'kind': kind,
+    if (isSong || isText) 'kind': kind,
     if (song != null) 'song': song!.toJson(),
     if (titleEdited) 'titleEdited': true,
     if (audioParts.isNotEmpty) 'audioParts': audioParts,
@@ -1081,6 +1123,7 @@ class CircuitTask {
     required this.title,
     this.detail,
     this.done = false,
+    this.dueAt,
   });
 
   final String id;
@@ -1088,18 +1131,24 @@ class CircuitTask {
   final String? detail;
   final bool done;
 
-  CircuitTask copyWith({bool? done}) => CircuitTask(
-    id: id,
-    title: title,
-    detail: detail,
-    done: done ?? this.done,
-  );
+  /// When the app should ring a reminder; null for a task with no time.
+  final DateTime? dueAt;
+
+  CircuitTask copyWith({bool? done, DateTime? dueAt, bool clearDue = false}) =>
+      CircuitTask(
+        id: id,
+        title: title,
+        detail: detail,
+        done: done ?? this.done,
+        dueAt: clearDue ? null : dueAt ?? this.dueAt,
+      );
 
   factory CircuitTask.fromJson(Map<String, dynamic> json) => CircuitTask(
     id: json['id'] as String,
     title: json['title'] as String,
     detail: json['detail'] as String?,
     done: json['done'] == true,
+    dueAt: DateTime.tryParse(json['dueAt']?.toString() ?? ''),
   );
 
   Map<String, dynamic> toJson() => {
@@ -1107,6 +1156,7 @@ class CircuitTask {
     'title': title,
     if (detail != null) 'detail': detail,
     'done': done,
+    if (dueAt != null) 'dueAt': dueAt!.toIso8601String(),
   };
 }
 
@@ -1286,10 +1336,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     _phoneRecording.addListener(_publishStatusUi);
     _restoreLastCircuit();
     _initTestControl();
-    _loadNotes().then((_) {
-      _reconcileSyncedNotes();
-      _listenForPhoneRecording();
-    });
+    unawaited(_openNotesAtStart());
     unawaited(_loadGroups());
     unawaited(_relayChannel.invokeMethod<bool>('requestLocalNetwork'));
     _loadPreferences();
@@ -1331,6 +1378,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     // while the app was away.
     if (state == AppLifecycleState.resumed) {
       unawaited(_recoverPhoneRecording().then((_) => _checkLaunchAction()));
+      unawaited(_takeReminderEvents());
     }
   }
 
@@ -1387,19 +1435,23 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     }
   }
 
-  Future<void> _loadNotes() async {
+  /// Opens the saved notes. Returns false when they exist but could not be read; the stored
+  /// copy is then left alone (see [_notesUnreadable]) and the caller must not rebuild the list.
+  Future<bool> _loadNotes() async {
     final preferences = await SharedPreferences.getInstance();
     final String? storedNotes;
     try {
       storedNotes = await _readSecret(preferences, _notesKey);
     } catch (error) {
       // Never delete what could not be read: the data is still there.
+      _notesUnreadable = true;
       _setStatus(
         'Saved notes could not be opened ($error). They have not been deleted.',
       );
-      return;
+      return false;
     }
-    if (storedNotes == null || !mounted) return;
+    _notesUnreadable = false;
+    if (storedNotes == null || !mounted) return true;
     try {
       final decoded = jsonDecode(storedNotes) as List<dynamic>;
       var changed = false;
@@ -1460,10 +1512,28 @@ class _CircuitHomePageState extends State<CircuitHomePage>
           jsonEncode(notes.map((item) => item.toJson()).toList()),
         );
       }
+      return true;
     } catch (error) {
       // Leave the stored notes untouched so nothing is lost; they can be recovered.
+      _notesUnreadable = true;
       debugPrint('Short-Circuit: saved notes could not be read: $error');
       _setStatus('Saved notes could not be read. They have not been deleted.');
+      return false;
+    }
+  }
+
+  /// Opens the saved notes at start. A failed read is tried again a few times, because the
+  /// keystore is sometimes not ready for a moment right after an update; audio files are only
+  /// matched to notes once the notes are open.
+  Future<void> _openNotesAtStart() async {
+    for (final wait in const [0, 2, 5, 12]) {
+      if (wait > 0) await Future<void>.delayed(Duration(seconds: wait));
+      if (!mounted) return;
+      if (await _loadNotes()) {
+        _reconcileSyncedNotes();
+        _listenForPhoneRecording();
+        return;
+      }
     }
   }
 
@@ -1676,6 +1746,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       final enrichment = await _ai.enrich(
         transcript,
         highlightMoments: _useMoments,
+        recordedAt: note?.createdAt,
       );
       _enrichAttempts.remove(id);
       await _updateNote(id, (item) {
@@ -2475,6 +2546,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   Iterable<CircuitNote> _notesWithoutAudio(DateTime cutoff) => _notes.where(
     (note) =>
         note.audioPath == null &&
+        !note.isText &&
         note.createdAt.isBefore(cutoff) &&
         // A long recording whose parts are still arriving has none of its audio in the note yet.
         !note.status.startsWith('Receiving') &&
@@ -3033,9 +3105,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     }
   }
 
-  Future<ReminderDraft?> _extractReminder(String transcript) async {
+  Future<ReminderDraft?> _extractReminder(
+    String transcript,
+    DateTime recordedAt,
+  ) async {
     try {
-      return await _ai.extractReminder(transcript);
+      return await _ai.extractReminder(transcript, recordedAt: recordedAt);
     } catch (error) {
       _setStatus('Reminder extraction failed: $error');
       return null;
@@ -3443,6 +3518,10 @@ class _CircuitHomePageState extends State<CircuitHomePage>
           !preferences.containsKey(_notesKey);
       _shareDiagnostics = preferences.getBool(Telemetry.preferenceKey) ?? true;
     });
+    // Reminders that rang or were snoozed while the app was closed, then make sure
+    // Android has every reminder (a restore or an update may have changed the list).
+    await _takeReminderEvents();
+    unawaited(_syncReminders());
   }
 
   Future<void> _loadGeminiState() async {
@@ -3469,13 +3548,102 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       jsonEncode(_tasks.map((task) => task.toJson()).toList()),
     );
     unawaited(_sendHomeStatus());
+    unawaited(_syncReminders());
   }
 
-  Future<void> _addTask(String title, {String? detail}) async {
+  /// Sends every open task that has a time to Android, which rings the reminders.
+  Future<void> _syncReminders() async {
+    try {
+      await _relayChannel.invokeMethod<bool>('syncReminders', {
+        'items': [
+          for (final task in _tasks)
+            if (!task.done && task.dueAt != null)
+              {
+                'id': task.id,
+                'title': task.title,
+                'detail': task.detail ?? '',
+                'at': task.dueAt!.millisecondsSinceEpoch,
+              },
+        ],
+      });
+    } on MissingPluginException {
+      // not running on the phone (tests)
+    } catch (_) {
+      // reminders are retried on the next change
+    }
+  }
+
+  /// Applies what the person did from a reminder notification while the app was closed.
+  Future<void> _takeReminderEvents() async {
+    List<Object?> events;
+    try {
+      events =
+          await _relayChannel.invokeMethod<List<Object?>>(
+            'takeReminderEvents',
+          ) ??
+          const [];
+    } catch (_) {
+      return;
+    }
+    if (events.isEmpty || !mounted) return;
+    setState(() {
+      for (final raw in events.whereType<Map<Object?, Object?>>()) {
+        final id = raw['id'];
+        final at = raw['at'];
+        _tasks = [
+          for (final task in _tasks)
+            if (task.id != id)
+              task
+            else if (raw['kind'] == 'done')
+              task.copyWith(done: true)
+            else if (at is num)
+              task.copyWith(
+                dueAt: DateTime.fromMillisecondsSinceEpoch(at.toInt()),
+              )
+            else
+              task,
+        ];
+      }
+    });
+    await _saveTasks();
+  }
+
+  /// Asks for the notification permission the first time a reminder is set.
+  /// Returns false when the person said no, so the app can say so.
+  Future<bool> _allowReminderNotifications() async {
+    try {
+      return (await Permission.notification.request()).isGranted;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// Sets, changes or clears the time a task rings. Returns false when notifications are off.
+  Future<bool> _setTaskDue(String id, DateTime? at) async {
+    if (at != null && !await _allowReminderNotifications()) return false;
+    setState(() {
+      _tasks = [
+        for (final task in _tasks)
+          task.id == id
+              ? (at == null
+                    ? task.copyWith(clearDue: true)
+                    : task.copyWith(dueAt: at))
+              : task,
+      ];
+    });
+    await _saveTasks();
+    return true;
+  }
+
+  Future<bool> _addTask(String title, {String? detail, DateTime? dueAt}) async {
+    // A time in the past cannot ring; the task is kept without one.
+    final future = dueAt != null && dueAt.isAfter(DateTime.now());
+    final allowed = !future || await _allowReminderNotifications();
     final task = CircuitTask(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       title: title,
       detail: detail,
+      dueAt: future ? dueAt : null,
     );
     if (mounted) {
       setState(() => _tasks = [task, ..._tasks]);
@@ -3483,6 +3651,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _tasks = [task, ..._tasks];
     }
     await _saveTasks();
+    return allowed;
   }
 
   Future<void> _setSuggestionState(

@@ -17,7 +17,7 @@ Widget _page({String? audioPath, Future<void> Function(String)? onSync}) =>
         audioPath: audioPath,
         onPlayNote: (_) async {},
         onDeleteNote: (_) async {},
-        onCreateReminder: (_) async => null,
+        onCreateReminder: (_, _) async => null,
         onAddTask: (_, _) async {},
         onOpenChat: () {},
         onSuggestionState: (_, _, _) async {},

@@ -332,6 +332,7 @@ class TranscriptPage extends StatefulWidget {
     this.onDeletePhoneOnly,
     required this.onCreateReminder,
     required this.onAddTask,
+    this.onAddReminder,
     this.summary,
     this.englishTranslation,
     this.language,
@@ -370,8 +371,13 @@ class TranscriptPage extends StatefulWidget {
 
   /// Set for a note that is also on Circuit: deletes only the phone's copy.
   final Future<void> Function(String noteId)? onDeletePhoneOnly;
-  final Future<ReminderDraft?> Function(String transcript) onCreateReminder;
+  final Future<ReminderDraft?> Function(String transcript, DateTime recordedAt)
+  onCreateReminder;
   final Future<void> Function(String title, String? detail) onAddTask;
+
+  /// Adds a task that rings an app notification at [at]; false when notifications are off.
+  final Future<bool> Function(String title, String? detail, DateTime at)?
+  onAddReminder;
   final String? summary;
   final String? englishTranslation;
   final String? language;
@@ -422,7 +428,85 @@ class _TranscriptPageState extends State<TranscriptPage> {
 
   CircuitNote? get _live => widget.noteById?.call(widget.noteId);
 
+  /// The note was there at some point, so a later absence means it was deleted.
+  bool _hadLive = false;
+
+  /// Sets a reminder that rings as an app notification. [when] is what the AI found; the
+  /// person can change it first. Without a usable future time the note becomes a task.
+  Future<void> _remindMe({
+    required String title,
+    required String details,
+    required DateTime? found,
+  }) async {
+    var when = found != null && found.isAfter(DateTime.now()) ? found : null;
+    final passed = found != null && when == null;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setLocal) => AlertDialog(
+          title: Text(when == null ? 'Add to your tasks?' : 'Remind you?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('$title${details.isEmpty ? '' : '\n\n$details'}'),
+              const SizedBox(height: 12),
+              Text(
+                when != null
+                    ? reminderLabel(when!)
+                    : passed
+                    ? 'That time has already passed.'
+                    : 'No date or time was found.',
+                style: ScType.caption.copyWith(color: dialogContext.sc.muted),
+              ),
+              TextButton.icon(
+                icon: const Icon(LucideIcons.clock, size: 16),
+                label: Text(when == null ? 'Pick a time' : 'Change time'),
+                onPressed: () async {
+                  final picked = await pickReminderTime(
+                    dialogContext,
+                    initial: when,
+                  );
+                  if (picked != null) setLocal(() => when = picked);
+                },
+              ),
+            ],
+          ),
+          actions: scDialogActions(
+            dialogContext,
+            confirmIcon: when == null
+                ? LucideIcons.listPlus
+                : LucideIcons.bellRing,
+            confirmTooltip: when == null ? 'Add as task' : 'Set reminder',
+            onCancel: () => Navigator.pop(dialogContext, false),
+            onConfirm: () => Navigator.pop(dialogContext, true),
+          ),
+        ),
+      ),
+    );
+    if (confirmed != true) return;
+    final at = when;
+    if (at == null || widget.onAddReminder == null) {
+      await widget.onAddTask(title, details);
+      _snack('Added to your tasks.');
+      return;
+    }
+    final allowed = await widget.onAddReminder!(title, details, at);
+    _snack(
+      allowed ? 'Reminder set for ${reminderLabel(at)}.' : 'Saved as a task, but notifications are off for Circuit. Turn them on in Android settings to hear it.',
+    );
+  }
+
   Future<void> _approveSuggestion(NoteActionSuggestion suggestion) async {
+    if (suggestion.type == 'reminder' && widget.onAddReminder != null) {
+      await _remindMe(
+        title: suggestion.title,
+        details: suggestion.details,
+        found: DateTime.tryParse(suggestion.scheduledAt ?? ''),
+      );
+      await widget.onSuggestionState(widget.noteId, suggestion.id, 'approved');
+      return;
+    }
     final when = suggestion.type == 'task'
         ? null
         : DateTime.tryParse(suggestion.scheduledAt ?? '');
@@ -437,7 +521,8 @@ class _TranscriptPageState extends State<TranscriptPage> {
       builder: (context) => AlertDialog(
         title: Text(asTask ? 'Add to your tasks?' : 'Add to Calendar?'),
         content: Text(
-          '${suggestion.title}${suggestion.details.isEmpty ? '' : '\n\n${suggestion.details}'}$note',
+          '${suggestion.title}${when == null ? '' : '\n${reminderLabel(when)}'}'
+          '${suggestion.details.isEmpty ? '' : '\n\n${suggestion.details}'}$note',
         ),
         actions: scDialogActions(
           context,
@@ -517,11 +602,22 @@ class _TranscriptPageState extends State<TranscriptPage> {
   bool get _actionable =>
       {'reminder', 'task', 'calendar_event'}.contains(_category);
 
-  Future<void> _createReminder() async {
+  Future<void> _createReminder({bool inApp = false}) async {
     setState(() => _extractingReminder = true);
     try {
-      final draft = await widget.onCreateReminder(_transcript);
+      final draft = await widget.onCreateReminder(
+        _transcript,
+        widget.createdAt,
+      );
       if (!mounted || draft == null) return;
+      if (inApp) {
+        await _remindMe(
+          title: draft.title,
+          details: draft.details,
+          found: draft.hasReminder ? draft.scheduledAt : null,
+        );
+        return;
+      }
       if (!draft.hasReminder || draft.scheduledAt == null) {
         final addTask = await showDialog<bool>(
           context: context,
@@ -918,10 +1014,61 @@ class _TranscriptPageState extends State<TranscriptPage> {
     );
   }
 
+  /// The three ways to follow up on a note by hand.
+  List<({IconData icon, String title, String caption, VoidCallback? run})>
+  _followUps(BuildContext context) => [
+    (
+      icon: LucideIcons.listPlus,
+      title: 'Add to tasks',
+      caption: _title,
+      run: () async {
+        await widget.onAddTask(_title, null);
+        _snack('Added to your tasks');
+      },
+    ),
+    if (widget.onAddReminder != null)
+      (
+        icon: LucideIcons.bellRing,
+        title: 'Remind me',
+        caption: _extractingReminder
+            ? 'Checking the note…'
+            : 'Ring a notification at the time in this note',
+        run: _extractingReminder ? null : () => _createReminder(inApp: true),
+      ),
+    (
+      icon: LucideIcons.calendarPlus,
+      title: 'Add to calendar',
+      caption: _extractingReminder
+          ? 'Checking the note…'
+          : 'Find a date and time in this note',
+      run: _extractingReminder ? null : _createReminder,
+    ),
+  ];
+
+  Widget _followUpRow(
+    BuildContext context,
+    ({IconData icon, String title, String caption, VoidCallback? run}) option,
+  ) => ScRow(
+    title: option.title,
+    caption: option.caption,
+    trailing: Icon(option.icon, size: 20, color: context.sc.muted),
+    onTap: option.run,
+  );
+
   @override
   Widget build(BuildContext context) {
     final local = widget.createdAt.toLocal();
     final live = _live;
+    // The note was deleted while this page was open: there is nothing left to show.
+    if (live != null) {
+      _hadLive = true;
+    } else if (_hadLive && widget.noteById != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && (ModalRoute.of(context)?.isCurrent ?? false)) {
+          Navigator.pop(context);
+        }
+      });
+    }
     final status = live?.status ?? widget.status;
     final summary = live?.summary ?? widget.summary;
     final translation = live?.englishTranslation ?? widget.englishTranslation;
@@ -943,7 +1090,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
               onBack: () => Navigator.pop(context),
               eyebrow:
                   '${_dayLabel(widget.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}'
-                  ' · ${noteSourceOf(widget.audioPath)}',
+                  ' · ${live?.source ?? noteSourceOf(widget.audioPath)}',
             ),
             Semantics(
               header: true,
@@ -956,6 +1103,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
             ),
             const SizedBox(height: 20),
             if ((live?.audioPath ?? widget.audioPath) == null &&
+                !(live?.isText ?? false) &&
                 widget.onSyncNote != null) ...[
               ValueListenableBuilder<SyncUiState>(
                 valueListenable: syncUiState,
@@ -1197,34 +1345,45 @@ class _TranscriptPageState extends State<TranscriptPage> {
                   ],
                 ),
             ],
-            if (_actionable) ...[
+            if (_actionable || suggestions.isNotEmpty) ...[
               const SizedBox(height: 22),
-              const ScGroupLabel('Detected action'),
-              ScRow(
-                title: 'Add to tasks',
-                caption: _title,
-                trailing: Icon(
-                  LucideIcons.listPlus,
-                  size: 20,
-                  color: context.sc.muted,
+              // The AI's own suggestions come first. When it found nothing, the three ways to
+              // follow up are listed here; when it found something, they sit behind one row
+              // so the same thing is not offered twice.
+              if (suggestions.isEmpty) ...[
+                const ScGroupLabel('Follow up'),
+                for (final option in _followUps(context))
+                  _followUpRow(context, option),
+              ] else
+                ScRow(
+                  title: 'Add something else',
+                  caption: 'A task, a reminder or a calendar event',
+                  trailing: Icon(
+                    LucideIcons.plus,
+                    size: 20,
+                    color: context.sc.muted,
+                  ),
+                  onTap: () => showModalBottomSheet<void>(
+                    context: context,
+                    builder: (sheet) => SafeArea(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          for (final option in _followUps(context))
+                            ListTile(
+                              leading: Icon(option.icon),
+                              title: Text(option.title),
+                              subtitle: Text(option.caption),
+                              onTap: () {
+                                Navigator.pop(sheet);
+                                option.run?.call();
+                              },
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
-                onTap: () async {
-                  await widget.onAddTask(_title, null);
-                  _snack('Added to your tasks');
-                },
-              ),
-              ScRow(
-                title: 'Calendar reminder',
-                caption: _extractingReminder
-                    ? 'Checking the note…'
-                    : 'Find a date and time in this note',
-                trailing: Icon(
-                  LucideIcons.calendarPlus,
-                  size: 20,
-                  color: context.sc.muted,
-                ),
-                onTap: _extractingReminder ? null : _createReminder,
-              ),
             ],
           ],
         ),
