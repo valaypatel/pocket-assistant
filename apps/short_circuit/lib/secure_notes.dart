@@ -249,7 +249,20 @@ Future<void> _writeSecret(
   SharedPreferences preferences,
   String key,
   String plain,
-) async => preferences.setString(key, await SecureText.encrypt(plain));
+) async {
+  // The saved notes could not be opened, so the list in memory is empty or partial. Saving it
+  // would replace every note that is still safely stored.
+  if (key == _notesKey && _notesUnreadable) return;
+  await preferences.setString(key, await SecureText.encrypt(plain));
+}
+
+/// True while the saved notes could not be read (the Android keystore can be briefly unavailable
+/// right after an update). Nothing may overwrite them, and nothing is rebuilt from audio files,
+/// until they open again.
+bool _notesUnreadable = false;
+
+@visibleForTesting
+set notesUnreadableForTest(bool value) => _notesUnreadable = value;
 
 // Exposed so tests can reach the private helpers above.
 @visibleForTesting

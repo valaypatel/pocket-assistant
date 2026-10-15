@@ -661,7 +661,7 @@ class AiClient {
       {
         'role': 'system',
         'content':
-            'You analyse private voice-note transcripts. Return JSON only: {"title":"short heading in English","category":"primary category","categories":["primary category","optional secondary categories"],"tags":["short English searchable tags"],"summary":"one short English sentence","englishTranslation":"faithful English translation; if already English, repeat it","language":"language or mixed","actions":[{"type":"task|reminder|calendar_event","title":"action title in English","details":"brief detail in English","scheduledAt":"ISO-8601 local time or null"}]}. Categories may include note, idea, task, reminder, calendar_event, shopping, journal, project, meeting, reference. Translate Hindi/Gujarati faithfully but never alter the original transcript. The transcript may label voices as "Speaker 1:", "Speaker 2:"; keep those labels in englishTranslation, say who said or agreed to what in the summary and action details when it matters, and never use a speaker label as a title or tag. Suggest actions only when clearly supported; never invent dates. Use reminder or calendar_event only when the note states a date or time; otherwise the action type must be task.'
+            'You analyse private voice-note transcripts. Return JSON only: {"title":"short heading in English","category":"primary category","categories":["primary category","optional secondary categories"],"tags":["short English searchable tags"],"summary":"one short English sentence","englishTranslation":"faithful English translation; if already English, repeat it","language":"language or mixed","actions":[{"type":"task|reminder|calendar_event","title":"action title in English","details":"brief detail in English","scheduledAt":"ISO-8601 local time or null"}]}. Categories may include note, idea, task, reminder, calendar_event, shopping, journal, project, meeting, reference. Translate Hindi/Gujarati faithfully but never alter the original transcript. The transcript may label voices as "Speaker 1:", "Speaker 2:"; keep those labels in englishTranslation, say who said or agreed to what in the summary and action details when it matters, and never use a speaker label as a title or tag. Suggest an action only when the speaker says they themselves must do, remember or attend something. News, commentary, opinions and events involving other people are not actions: for those return an empty actions list. Never invent dates. Use reminder or calendar_event only when the note states a date or time that has not passed yet when the note was recorded; otherwise the action type must be task, or leave it out.'
             '${highlightMoments && Moments.hasMarkers(transcript) ? Moments.reviewInstruction : ''}',
       },
       {
@@ -731,10 +731,24 @@ class AiClient {
       englishTranslation:
           response['englishTranslation']?.toString().trim() ?? transcript,
       language: response['language']?.toString().trim() ?? '',
-      actions: actions,
+      actions: dropPastActions(actions, recordedAt ?? DateTime.now()),
     );
   }
 }
+
+/// Keeps the actions that can still be acted on. A reminder or event for a time that had already
+/// passed when the note was recorded is something the AI misread (often a news item).
+List<NoteActionSuggestion> dropPastActions(
+  List<NoteActionSuggestion> actions,
+  DateTime recordedAt,
+) => [
+  for (final action in actions)
+    if (action.type == 'task' ||
+        DateTime.tryParse(action.scheduledAt ?? '') == null ||
+        DateTime.parse(action.scheduledAt!)
+            .isAfter(recordedAt.subtract(const Duration(minutes: 5))))
+      action,
+];
 
 /// Tells the AI when the note was spoken, so "tomorrow" or "on Friday" means the right day
 /// even when the note is transcribed later.
@@ -1322,10 +1336,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     _phoneRecording.addListener(_publishStatusUi);
     _restoreLastCircuit();
     _initTestControl();
-    _loadNotes().then((_) {
-      _reconcileSyncedNotes();
-      _listenForPhoneRecording();
-    });
+    unawaited(_openNotesAtStart());
     unawaited(_loadGroups());
     unawaited(_relayChannel.invokeMethod<bool>('requestLocalNetwork'));
     _loadPreferences();
@@ -1424,19 +1435,23 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     }
   }
 
-  Future<void> _loadNotes() async {
+  /// Opens the saved notes. Returns false when they exist but could not be read; the stored
+  /// copy is then left alone (see [_notesUnreadable]) and the caller must not rebuild the list.
+  Future<bool> _loadNotes() async {
     final preferences = await SharedPreferences.getInstance();
     final String? storedNotes;
     try {
       storedNotes = await _readSecret(preferences, _notesKey);
     } catch (error) {
       // Never delete what could not be read: the data is still there.
+      _notesUnreadable = true;
       _setStatus(
         'Saved notes could not be opened ($error). They have not been deleted.',
       );
-      return;
+      return false;
     }
-    if (storedNotes == null || !mounted) return;
+    _notesUnreadable = false;
+    if (storedNotes == null || !mounted) return true;
     try {
       final decoded = jsonDecode(storedNotes) as List<dynamic>;
       var changed = false;
@@ -1497,10 +1512,28 @@ class _CircuitHomePageState extends State<CircuitHomePage>
           jsonEncode(notes.map((item) => item.toJson()).toList()),
         );
       }
+      return true;
     } catch (error) {
       // Leave the stored notes untouched so nothing is lost; they can be recovered.
+      _notesUnreadable = true;
       debugPrint('Short-Circuit: saved notes could not be read: $error');
       _setStatus('Saved notes could not be read. They have not been deleted.');
+      return false;
+    }
+  }
+
+  /// Opens the saved notes at start. A failed read is tried again a few times, because the
+  /// keystore is sometimes not ready for a moment right after an update; audio files are only
+  /// matched to notes once the notes are open.
+  Future<void> _openNotesAtStart() async {
+    for (final wait in const [0, 2, 5, 12]) {
+      if (wait > 0) await Future<void>.delayed(Duration(seconds: wait));
+      if (!mounted) return;
+      if (await _loadNotes()) {
+        _reconcileSyncedNotes();
+        _listenForPhoneRecording();
+        return;
+      }
     }
   }
 

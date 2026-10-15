@@ -21,6 +21,8 @@ extension _TestControl on _CircuitHomePageState {
         'pending',
       );
       if (pending != null) {
+        // A command that starts the app must not run before the saved notes and tasks are open.
+        await Future<void>.delayed(const Duration(seconds: 3));
         await _runTestCommand('${pending['cmd']}', '${pending['args'] ?? ''}');
       }
     }());
@@ -171,6 +173,52 @@ extension _TestControl on _CircuitHomePageState {
           );
           _update(() => _notes = notes);
           await _testLog('add-note ${note.id}');
+        case 'notes':
+          // what the AI review made of each note: its state, how many transcripts, and its suggestions
+          await _testLog(
+            'notes ${jsonEncode([
+              for (final n in _notes) {
+                  'id': n.id,
+                  'board': _boardIdOf(n),
+                  'title': n.title,
+                  'at': n.createdAt.toIso8601String(),
+                  'status': n.status,
+                  'review': n.enrichmentStatus,
+                  'category': n.category,
+                  'runs': n.transcriptRuns.length,
+                  'suggestions': [for (final a in n.actionSuggestions) '${a.state}:${a.type}:${a.title}:${a.scheduledAt ?? ''}'],
+                  'text': (n.transcript ?? '').replaceAll('\n', ' ').substring(0, (n.transcript ?? '').length.clamp(0, 400)),
+                },
+            ])}',
+          );
+        case 'add-reminder':
+          // add-reminder <title>|<minutes ahead>: a task with a reminder, set without touching the screen
+          final bits = args.split('|');
+          final minutes =
+              int.tryParse(bits.length > 1 ? bits[1].trim() : '') ?? 1;
+          final ok = await _addTask(
+            bits.first.trim().isEmpty ? 'Test reminder' : bits.first.trim(),
+            detail: 'Set by the test command',
+            dueAt: DateTime.now().add(Duration(minutes: minutes)),
+          );
+          await _testLog(
+            'add-reminder in $minutes min, notifications allowed: $ok',
+          );
+        case 'delete-tasks':
+          // delete-tasks <text>: every task whose title contains the text (test tasks only)
+          final needle = args.trim().toLowerCase();
+          if (needle.isEmpty) {
+            await _testLog('delete-tasks needs some text from the title');
+            return;
+          }
+          final doomed = [
+            for (final t in _tasks)
+              if (t.title.toLowerCase().contains(needle)) t.id,
+          ];
+          for (final id in doomed) {
+            await _deleteTask(id);
+          }
+          await _testLog('delete-tasks removed ${doomed.length} task(s)');
         case 'tasks':
           await _testLog(
             'tasks ${jsonEncode([for (final t in _tasks) t.toJson()])}',

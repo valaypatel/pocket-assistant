@@ -12,6 +12,9 @@
   app_dev.py delete ID [ID...]  delete notes (also removes them from Circuit when connected)
   app_dev.py delete-from N      delete every note that came from Circuit note number N or higher
   app_dev.py add-note "T|text|MIN|TYPE"  add a text note (no audio) with one suggestion due in MIN minutes; TYPE reminder, calendar_event or task
+  app_dev.py add-reminder "T|MIN"  a task with a reminder MIN minutes from now (no screen needed)
+  app_dev.py delete-tasks TEXT  delete every task whose title contains TEXT
+  app_dev.py notes              each note's AI review state, transcript count and suggestions, as JSON
   app_dev.py tasks              the Tasks list with their reminder times, as JSON
   app_dev.py transcribe N       transcribe the note Circuit numbered N now, and report how much of it is Devanagari / Latin
   app_dev.py btlog [N]          the phone's own Bluetooth log: bond changes, drops, Repair pairing taps (last N lines, default 80)
@@ -80,7 +83,7 @@ def main():
     if argv[0] == "install":
         return install()
     known = {"state", "sync", "sync-note", "play", "play-stop", "rec-start", "rec-pause", "rec-resume",
-             "rec-stop", "delete", "delete-from", "btlog", "moments", "play-moment", "transcribe", "add-note", "tasks"}
+             "rec-stop", "delete", "delete-from", "btlog", "moments", "play-moment", "transcribe", "add-note", "tasks", "notes", "add-reminder", "delete-tasks"}
     if argv[0] not in known:
         print(__doc__)
         return 1
