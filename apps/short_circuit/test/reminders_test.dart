@@ -7,10 +7,13 @@ TranscriptPage _page(
   required List<(String, DateTime)> reminders,
   required List<String> tasks,
   List<String>? states,
+  String category = 'reminder',
+  CircuitNote? Function(String id)? noteById,
 }) => TranscriptPage(
   createdAt: DateTime(2026, 10, 4, 21, 53),
   noteId: 'n1',
-  category: 'reminder',
+  category: category,
+  noteById: noteById,
   title: 'Dentist',
   status: 'Transcription ready',
   transcript: 'Remind me to call the dentist.',
@@ -136,5 +139,107 @@ void main() {
     await tester.pumpAndSettle();
     expect(reminders, isEmpty);
     expect(tasks, ['Call the dentist']);
+  });
+
+  testWidgets(
+    'with nothing suggested, the three ways to follow up are listed',
+    (tester) async {
+      await _open(
+        tester,
+        _page(const [], reminders: [], tasks: [], category: 'task'),
+      );
+      expect(find.text('FOLLOW UP'), findsOneWidget);
+      expect(find.text('Add to tasks'), findsOneWidget);
+      expect(find.text('Remind me'), findsOneWidget);
+      expect(find.text('Add to calendar'), findsOneWidget);
+      expect(find.text('Add something else'), findsNothing);
+    },
+  );
+
+  testWidgets('with a suggestion, the same options wait behind one row', (
+    tester,
+  ) async {
+    await _open(
+      tester,
+      _page(
+        [
+          NoteActionSuggestion(
+            id: 's1',
+            type: 'task',
+            title: 'Call the dentist',
+            details: '',
+          ),
+        ],
+        reminders: [],
+        tasks: [],
+        category: 'task',
+      ),
+    );
+    expect(find.text('Add to tasks'), findsNothing);
+    expect(find.text('Remind me'), findsNothing);
+    await tester.scrollUntilVisible(
+      find.text('Add something else'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Add something else'));
+    await tester.pumpAndSettle();
+    expect(find.text('Add to tasks'), findsOneWidget);
+    expect(find.text('Remind me'), findsOneWidget);
+    expect(find.text('Add to calendar'), findsOneWidget);
+  });
+
+  testWidgets('a note deleted while its page is open closes the page', (
+    tester,
+  ) async {
+    CircuitNote? note = CircuitNote(
+      id: 'n1',
+      createdAt: DateTime(2026, 10, 4, 21, 53),
+      status: 'Ready for review',
+      kind: 'text',
+      title: 'Dentist',
+      transcript: 'Call the dentist.',
+    );
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    late StateSetter refresh;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildScTheme(),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => StatefulBuilder(
+                      builder: (context, setState) {
+                        refresh = setState;
+                        return _page(
+                          const [],
+                          reminders: [],
+                          tasks: [],
+                          noteById: (_) => note,
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    expect(find.byType(TranscriptPage), findsOneWidget);
+    note = null;
+    refresh(() {});
+    await tester.pumpAndSettle();
+    expect(find.byType(TranscriptPage), findsNothing);
+    expect(find.text('open'), findsOneWidget);
   });
 }

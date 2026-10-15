@@ -428,6 +428,9 @@ class _TranscriptPageState extends State<TranscriptPage> {
 
   CircuitNote? get _live => widget.noteById?.call(widget.noteId);
 
+  /// The note was there at some point, so a later absence means it was deleted.
+  bool _hadLive = false;
+
   /// Sets a reminder that rings as an app notification. [when] is what the AI found; the
   /// person can change it first. Without a usable future time the note becomes a task.
   Future<void> _remindMe({
@@ -1011,10 +1014,61 @@ class _TranscriptPageState extends State<TranscriptPage> {
     );
   }
 
+  /// The three ways to follow up on a note by hand.
+  List<({IconData icon, String title, String caption, VoidCallback? run})>
+  _followUps(BuildContext context) => [
+    (
+      icon: LucideIcons.listPlus,
+      title: 'Add to tasks',
+      caption: _title,
+      run: () async {
+        await widget.onAddTask(_title, null);
+        _snack('Added to your tasks');
+      },
+    ),
+    if (widget.onAddReminder != null)
+      (
+        icon: LucideIcons.bellRing,
+        title: 'Remind me',
+        caption: _extractingReminder
+            ? 'Checking the note…'
+            : 'Ring a notification at the time in this note',
+        run: _extractingReminder ? null : () => _createReminder(inApp: true),
+      ),
+    (
+      icon: LucideIcons.calendarPlus,
+      title: 'Add to calendar',
+      caption: _extractingReminder
+          ? 'Checking the note…'
+          : 'Find a date and time in this note',
+      run: _extractingReminder ? null : _createReminder,
+    ),
+  ];
+
+  Widget _followUpRow(
+    BuildContext context,
+    ({IconData icon, String title, String caption, VoidCallback? run}) option,
+  ) => ScRow(
+    title: option.title,
+    caption: option.caption,
+    trailing: Icon(option.icon, size: 20, color: context.sc.muted),
+    onTap: option.run,
+  );
+
   @override
   Widget build(BuildContext context) {
     final local = widget.createdAt.toLocal();
     final live = _live;
+    // The note was deleted while this page was open: there is nothing left to show.
+    if (live != null) {
+      _hadLive = true;
+    } else if (_hadLive && widget.noteById != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && (ModalRoute.of(context)?.isCurrent ?? false)) {
+          Navigator.pop(context);
+        }
+      });
+    }
     final status = live?.status ?? widget.status;
     final summary = live?.summary ?? widget.summary;
     final translation = live?.englishTranslation ?? widget.englishTranslation;
@@ -1291,49 +1345,45 @@ class _TranscriptPageState extends State<TranscriptPage> {
                   ],
                 ),
             ],
-            if (_actionable) ...[
+            if (_actionable || suggestions.isNotEmpty) ...[
               const SizedBox(height: 22),
-              const ScGroupLabel('Detected action'),
-              ScRow(
-                title: 'Add to tasks',
-                caption: _title,
-                trailing: Icon(
-                  LucideIcons.listPlus,
-                  size: 20,
-                  color: context.sc.muted,
-                ),
-                onTap: () async {
-                  await widget.onAddTask(_title, null);
-                  _snack('Added to your tasks');
-                },
-              ),
-              if (widget.onAddReminder != null)
+              // The AI's own suggestions come first. When it found nothing, the three ways to
+              // follow up are listed here; when it found something, they sit behind one row
+              // so the same thing is not offered twice.
+              if (suggestions.isEmpty) ...[
+                const ScGroupLabel('Follow up'),
+                for (final option in _followUps(context))
+                  _followUpRow(context, option),
+              ] else
                 ScRow(
-                  title: 'Remind me',
-                  caption: _extractingReminder
-                      ? 'Checking the note…'
-                      : 'Ring a notification at the time in this note',
+                  title: 'Add something else',
+                  caption: 'A task, a reminder or a calendar event',
                   trailing: Icon(
-                    LucideIcons.bellRing,
+                    LucideIcons.plus,
                     size: 20,
                     color: context.sc.muted,
                   ),
-                  onTap: _extractingReminder
-                      ? null
-                      : () => _createReminder(inApp: true),
+                  onTap: () => showModalBottomSheet<void>(
+                    context: context,
+                    builder: (sheet) => SafeArea(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          for (final option in _followUps(context))
+                            ListTile(
+                              leading: Icon(option.icon),
+                              title: Text(option.title),
+                              subtitle: Text(option.caption),
+                              onTap: () {
+                                Navigator.pop(sheet);
+                                option.run?.call();
+                              },
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
-              ScRow(
-                title: 'Calendar reminder',
-                caption: _extractingReminder
-                    ? 'Checking the note…'
-                    : 'Find a date and time in this note',
-                trailing: Icon(
-                  LucideIcons.calendarPlus,
-                  size: 20,
-                  color: context.sc.muted,
-                ),
-                onTap: _extractingReminder ? null : _createReminder,
-              ),
             ],
           ],
         ),
