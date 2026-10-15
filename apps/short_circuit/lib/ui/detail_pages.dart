@@ -518,7 +518,8 @@ class _TranscriptPageState extends State<TranscriptPage> {
       builder: (context) => AlertDialog(
         title: Text(asTask ? 'Add to your tasks?' : 'Add to Calendar?'),
         content: Text(
-          '${suggestion.title}${suggestion.details.isEmpty ? '' : '\n\n${suggestion.details}'}$note',
+          '${suggestion.title}${when == null ? '' : '\n${reminderLabel(when)}'}'
+          '${suggestion.details.isEmpty ? '' : '\n\n${suggestion.details}'}$note',
         ),
         actions: scDialogActions(
           context,
@@ -1035,7 +1036,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
               onBack: () => Navigator.pop(context),
               eyebrow:
                   '${_dayLabel(widget.createdAt)} · ${_two(local.hour)}:${_two(local.minute)}'
-                  ' · ${noteSourceOf(widget.audioPath)}',
+                  ' · ${live?.source ?? noteSourceOf(widget.audioPath)}',
             ),
             Semantics(
               header: true,
@@ -1048,6 +1049,7 @@ class _TranscriptPageState extends State<TranscriptPage> {
             ),
             const SizedBox(height: 20),
             if ((live?.audioPath ?? widget.audioPath) == null &&
+                !(live?.isText ?? false) &&
                 widget.onSyncNote != null) ...[
               ValueListenableBuilder<SyncUiState>(
                 valueListenable: syncUiState,

@@ -128,6 +128,53 @@ extension _TestControl on _CircuitHomePageState {
           await _testLog(
             'play-moment $board at $at: part ${now?.part}/${now?.parts} position ${now?.positionMs} ms',
           );
+        case 'add-note':
+          // add-note <title>|<text>|<minutes ahead>|<reminder|calendar_event|task>: a text note with no
+          // audio and one pending suggestion, to try reminders and the calendar without recording
+          final bits = args.split('|');
+          final title = bits.first.trim().isEmpty
+              ? 'Test note'
+              : bits.first.trim();
+          final minutes =
+              int.tryParse(bits.length > 2 ? bits[2].trim() : '') ?? 2;
+          final type = bits.length > 3 ? bits[3].trim() : 'reminder';
+          final now = DateTime.now();
+          final note = CircuitNote(
+            id: 'test-${now.microsecondsSinceEpoch}',
+            createdAt: now,
+            status: 'Ready for review',
+            title: title,
+            kind: 'text',
+            transcript: bits.length > 1 ? bits[1].trim() : title,
+            category: type,
+            categories: [type],
+            summary: title,
+            enrichmentStatus: 'ready',
+            actionSuggestions: [
+              NoteActionSuggestion(
+                id: 'test-s-${now.microsecondsSinceEpoch}',
+                type: type,
+                title: title,
+                details: '',
+                scheduledAt: type == 'task'
+                    ? null
+                    : now.add(Duration(minutes: minutes)).toIso8601String(),
+              ),
+            ],
+          );
+          final preferences = await SharedPreferences.getInstance();
+          final notes = [note, ..._notes];
+          await _writeSecret(
+            preferences,
+            _notesKey,
+            jsonEncode(notes.map((item) => item.toJson()).toList()),
+          );
+          _update(() => _notes = notes);
+          await _testLog('add-note ${note.id}');
+        case 'tasks':
+          await _testLog(
+            'tasks ${jsonEncode([for (final t in _tasks) t.toJson()])}',
+          );
         case 'delete':
           // delete <note id> ...: the app's own ids, as `state` lists them
           var removed = 0;

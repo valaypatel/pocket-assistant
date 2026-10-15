@@ -913,8 +913,11 @@ class CircuitNote {
 
   bool get isSong => kind == 'song';
 
+  /// A note written on the phone: it never had audio and never comes from Circuit.
+  bool get isText => kind == 'text';
+
   /// Where the recording was made: 'Phone' (this phone's own recorder) or 'Circuit'.
-  String get source => noteSourceOf(audioPath);
+  String get source => isText ? 'Phone' : noteSourceOf(audioPath);
 
   factory CircuitNote.fromJson(Map<String, dynamic> json) => CircuitNote(
     id: json['id'] as String,
@@ -939,7 +942,11 @@ class CircuitNote {
         .map(NoteActionSuggestion.fromJson)
         .toList(),
     boardId: int.tryParse(json['boardId']?.toString() ?? ''),
-    kind: json['kind']?.toString() == 'song' ? 'song' : 'voice',
+    kind: switch (json['kind']?.toString()) {
+      'song' => 'song',
+      'text' => 'text',
+      _ => 'voice',
+    },
     song: json['song'] is Map<String, dynamic>
         ? SongResult.fromJson(json['song'] as Map<String, dynamic>)
         : null,
@@ -1038,7 +1045,7 @@ class CircuitNote {
           .map((item) => item.toJson())
           .toList(),
     if (boardId != null) 'boardId': boardId.toString(),
-    if (isSong) 'kind': kind,
+    if (isSong || isText) 'kind': kind,
     if (song != null) 'song': song!.toJson(),
     if (titleEdited) 'titleEdited': true,
     if (audioParts.isNotEmpty) 'audioParts': audioParts,
@@ -2506,6 +2513,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   Iterable<CircuitNote> _notesWithoutAudio(DateTime cutoff) => _notes.where(
     (note) =>
         note.audioPath == null &&
+        !note.isText &&
         note.createdAt.isBefore(cutoff) &&
         // A long recording whose parts are still arriving has none of its audio in the note yet.
         !note.status.startsWith('Receiving') &&

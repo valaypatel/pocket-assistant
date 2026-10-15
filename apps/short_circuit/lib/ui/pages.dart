@@ -678,7 +678,8 @@ extension _ScPages on _CircuitHomePageState {
   Widget _noteTile(CircuitNote note, {bool actions = false}) {
     final attention = _noteNeedsAttention(note);
     final syncPercent = _noteSyncPercent(note);
-    final needsSync = note.audioPath == null && syncPercent == null;
+    final needsSync =
+        note.audioPath == null && !note.isText && syncPercent == null;
     final footerButtons = <Widget>[
       if (actions &&
           note.isSong &&
