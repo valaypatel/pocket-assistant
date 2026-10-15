@@ -95,6 +95,14 @@ transit and on the phone. Nothing deletes a note or a key. See
 [docs/security/README.md](docs/security/README.md) for how it works and what it
 does and does not protect against.
 
+## License
+
+Circuit is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE): you can
+read, run, change and share it for noncommercial purposes, and every copy must keep the licence
+and the "Required Notice" line in [NOTICE](NOTICE), which names the copyright holder. Commercial
+use needs a separate licence from the copyright holder. The ESP-IDF patch and other third-party
+parts keep their own licences; [NOTICE](NOTICE) lists them.
+
 ## CI/CD
 
 GitHub Actions builds and tests each part when its files change, and can release
