@@ -1,0 +1,46 @@
+Required Notice: Copyright (c) 2026 Valay Patel (https://github.com/valaypatel/pocket-assistant)
+
+Circuit (the e-paper pocket recorder firmware and the Short-Circuit Android app) is
+licensed under the PolyForm Noncommercial License 1.0.0. The full terms are in the
+LICENSE file and at https://polyformproject.org/licenses/noncommercial/1.0.0
+
+In short: you may read, run, modify and share this software for noncommercial purposes,
+as long as everyone you pass it to also gets the LICENSE (or its URL) and the
+"Required Notice:" line above. Anything commercial needs a separate licence from the
+copyright holder.
+
+The names "Circuit" and "Short-Circuit", and the logo and device artwork under
+apps/short_circuit/assets/brand, are not licensed for use as the name or mark of another
+product. The licence grants copyright permissions only.
+
+
+Third-party software
+--------------------
+
+Parts of this repository, and software it builds on, are NOT under the PolyForm licence.
+They keep their own terms, which apply to them instead:
+
+* ESP-IDF 5.5.3 (Espressif Systems) - Apache License 2.0.
+  firmware/CircuitBleDisplay/idf-patches/ holds a patch to ESP-IDF source files; that
+  patch is a modification of Apache-2.0 code and is offered under Apache License 2.0.
+* ESP Component Registry components used by the firmware (see
+  firmware/CircuitBleDisplay/dependencies.lock):
+    espressif/button, espressif/esp_codec_dev, espressif/cmake_utilities,
+    pedrominatel/shtc3, waveshare/pcf85063a - Apache License 2.0
+    lvgl/lvgl - MIT License, Copyright (c) LVGL Kft
+* Lucide icons (firmware/CircuitBleDisplay/tools/lucide and the lucide_icons_flutter
+  package) - ISC License, Copyright (c) Lucide Contributors.
+* Dart and Flutter packages used by the app (see apps/short_circuit/pubspec.lock) - mostly
+  BSD-3-Clause, MIT or Apache-2.0. Their licence texts are included in the app through
+  Flutter's licence registry.
+* FlutterBluePlus (flutter_blue_plus and its federated packages), Copyright (c) Chip
+  Weinberger - FlutterBluePlus License 1.5. It is free for personal, nonprofit and
+  educational use; use by for-profit organisations, including commercial use by
+  individuals, requires a paid commercial licence from its author. It may send limited
+  licence telemetry at build time (package name, app name and version, date). Read its
+  LICENSE in the package before using this app commercially.
+* Python packages of the music service (services/music-lambda/requirements.txt) - each
+  under its own licence.
+
+The vendor/ directory (a checkout of Waveshare's board examples, used only to build the
+firmware) is not part of this repository.

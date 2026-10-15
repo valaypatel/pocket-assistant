@@ -1,5 +1,7 @@
 # ESP-IDF patches
 
+These patches modify ESP-IDF source files, so they are under ESP-IDF's own licence, Apache License 2.0 (SPDX-License-Identifier: Apache-2.0), not the repository's PolyForm licence. See the root `NOTICE`.
+
 Applied to ESP-IDF automatically by `CMakeLists.txt` (once, idempotent) for every build, local and CI.
 
 ## keep-bond-on-transient-failure.patch (ESP-IDF v5.5.3)
