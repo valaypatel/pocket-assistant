@@ -1286,6 +1286,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   DateTime? _waitingSince;
   int? _boardReset; // esp_reset_reason of Circuit's last start
   int _boardUptime = 0;
+
+  /// Circuit's battery, 0 to 100, from its last status; null until it has reported one.
+  int? _boardBattery;
   bool _resetNoticeShown = false;
   // What Circuit reports about its own Wi-Fi: none, connecting, connected, failed.
   String _wifiState = 'none';
@@ -2419,7 +2422,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     final waiting = field('waiting');
     final reset = field('reset');
     final uptime = field('uptime');
+    final battery = field('bat');
     setState(() {
+      if (battery != null) _boardBattery = battery >= 0 ? battery : null;
       if (waiting != null) {
         if (waiting > 0 && (_boardWaiting ?? 0) == 0)
           _waitingSince = DateTime.now();

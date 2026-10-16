@@ -49,6 +49,7 @@
 #include "circuit_demo_screens.h"
 #include "circuit_moment_icon.h"
 #include "circuit_recording_icon.h"
+#include "circuit_battery.h"
 #include "circuit_crypto.h"
 #include "circuit_moments.h"
 #include "circuit_notes.h"
@@ -156,6 +157,13 @@ bool wifi_auth_failure = false;
 int64_t wifi_failed_at_ms = 0;
 constexpr int kWifiMaxRetries = 4;
 lv_obj_t *icon_wifi_obj;
+// Battery in the header: an outline, a fill that follows the charge, a small tip, and the number.
+lv_obj_t *battery_body;
+lv_obj_t *battery_fill;
+lv_obj_t *battery_nub;
+lv_obj_t *battery_label;
+// The charge shown, 0 to 100 in steps of 5; -1 until the first reading.
+volatile int battery_percent = -1;
 lv_obj_t *icon_phone_obj;
 lv_obj_t *icon_storage_obj;
 uint8_t status_icon_frame = 0;
@@ -1356,12 +1364,12 @@ void send_sync_status() {
     // The first three lines are what the app has always read; the rest is board health,
     // forwarded to the app's diagnostics (counts and sizes only).
     snprintf(message, sizeof(message),
-        "@sync-status\nwaiting=%u\nreset=%d\nuptime=%lld\nfree_min=%u\nstack_min=%u\nstops=%u",
+        "@sync-status\nwaiting=%u\nreset=%d\nuptime=%lld\nfree_min=%u\nstack_min=%u\nstops=%u\nbat=%d",
         static_cast<unsigned>(circuit_notes::count_unsynced_recordings()), boot_reset_reason,
         static_cast<long long>(circuit_sync::now_ms() / 1000),
         static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(text_stack_min_bytes == UINT32_MAX ? 0 : text_stack_min_bytes),
-        static_cast<unsigned>(circuit_sync::download_stops));
+        static_cast<unsigned>(circuit_sync::download_stops), battery_percent);
     send_relay_request(message);
     // A separate short snapshot keeps both packets within the 160-byte BLE limit.
     // "recording" lets the app drop a recording indicator that outlived a restart of the board.
@@ -1398,10 +1406,13 @@ void refresh_status_icons() {
     const bool phone = ble_encrypted;
     const bool storage = sd_card != nullptr;
     const int state = (phone ? 1 : 0) | (storage ? 2 : 0);
-    if (wifi_src == shown_wifi && state == shown_state) return;
+    static int shown_battery = -2;
+    const int battery = battery_percent;
+    if (wifi_src == shown_wifi && state == shown_state && battery == shown_battery) return;
     if (!Lvgl_lock(-1)) return;
     shown_wifi = wifi_src;
     shown_state = state;
+    shown_battery = battery;
     int x_right = 198;
     const auto place = [&x_right](lv_obj_t *object, const lv_image_dsc_t *source, int y) {
         if (source == nullptr) {
@@ -1416,7 +1427,60 @@ void refresh_status_icons() {
     place(icon_storage_obj, storage ? &circuit_icon_hard_drive : nullptr, 5);
     place(icon_phone_obj, phone ? &circuit_icon_phone : nullptr, 5);
     place(icon_wifi_obj, wifi_src, 3);
+    // Battery, to the left of the other icons: [number][body][tip].
+    if (battery < 0) {
+        for (lv_obj_t *part : {battery_body, battery_nub, battery_label}) lv_obj_add_flag(part, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        const int body_x = x_right - 18;
+        lv_obj_set_pos(battery_body, body_x, 6);
+        lv_obj_set_pos(battery_nub, body_x + 16, 8);
+        int fill = (battery * 12 + 50) / 100;
+        if (battery > 0 && fill < 1) fill = 1;
+        lv_obj_set_size(battery_fill, fill, 6);
+        lv_obj_set_style_bg_opa(battery_fill, fill > 0 ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        char text[16];
+        snprintf(text, sizeof(text), "%d", battery);
+        lv_label_set_text(battery_label, text);
+        lv_obj_update_layout(battery_label);
+        lv_obj_set_pos(battery_label, body_x - 3 - lv_obj_get_width(battery_label), 5);
+        for (lv_obj_t *part : {battery_body, battery_nub, battery_label}) lv_obj_clear_flag(part, LV_OBJ_FLAG_HIDDEN);
+    }
     Lvgl_unlock();
+}
+
+// Reads the battery about every 30 s (the status icon task ticks every 0.9 s), skipping moments of heavy
+// load, when the voltage sags and would read low. The median of the last five readings is rounded to steps
+// of 5 and only changes when it has really moved, so the screen is not redrawn for noise. A change is also
+// sent to the phone.
+void battery_tick() {
+    static int ticks = 0;
+    static int samples[5];
+    static int count = 0;
+    if (++ticks % 33 != 1) return;
+    if (recording_active || playback_active.load() || active_screen == DeviceScreen::Syncing) return;
+    const int mv = circuit_battery::read_mv();
+    if (mv <= 0) return;
+    samples[count % 5] = mv;
+    count++;
+    int sorted[5];
+    const int n = count < 5 ? count : 5;
+    for (int i = 0; i < n; i++) sorted[i] = samples[i];
+    for (int i = 1; i < n; i++) {
+        for (int j = i; j > 0 && sorted[j - 1] > sorted[j]; j--) {
+            const int t = sorted[j];
+            sorted[j] = sorted[j - 1];
+            sorted[j - 1] = t;
+        }
+    }
+    const int raw = circuit_battery::percent_from_mv(sorted[n / 2]);
+    const int shown = battery_percent;
+    if (shown >= 0 && (raw - shown < 4 && shown - raw < 4)) return;
+    int rounded = ((raw + 2) / 5) * 5;
+    if (rounded > 100) rounded = 100;
+    if (rounded == shown) return;
+    battery_percent = rounded;
+    ESP_LOGI(kTag, "Battery now %d%% (%d mV)", rounded, sorted[n / 2]);
+    send_sync_status();
 }
 
 void sync_ui_tick();
@@ -1425,6 +1489,7 @@ void status_icon_task(void *) {
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(900));
         ++status_icon_frame;
+        battery_tick();
         refresh_status_icons();
         sync_ui_tick();
     }
@@ -1949,6 +2014,14 @@ void dev_console_task(void *) {
                 gpio_get_level(kLowerKeyPin), gpio_get_level(kPowerLatchPin),
                 static_cast<unsigned>(lower_key_presses.load()), static_cast<unsigned>(lower_key_longest_ms.load()),
                 0);
+        } else if (strcmp(line, "battery") == 0) {
+            int raw = 0;
+            const int mv = circuit_battery::read_mv(&raw);
+            if (mv > 0) {
+                ESP_LOGW(kTag, "DEV battery: %d mV, about %d%% (raw %d)", mv, circuit_battery::percent_from_mv(mv), raw);
+            } else {
+                ESP_LOGW(kTag, "DEV battery: not readable");
+            }
         } else if (strcmp(line, "status") == 0) {
             circuit_sync::log_heap("dev status");
             if (Lvgl_lock(1000)) {
@@ -2760,6 +2833,34 @@ void init_display() {
         icon_storage_obj = lv_img_create(lv_screen_active());
         for (lv_obj_t *icon : {icon_wifi_obj, icon_phone_obj, icon_storage_obj}) lv_obj_add_flag(icon, LV_OBJ_FLAG_HIDDEN);
 
+        // Battery: drawn with plain shapes (no artwork needed), placed by refresh_status_icons().
+        battery_body = lv_obj_create(lv_screen_active());
+        lv_obj_remove_style_all(battery_body);
+        lv_obj_set_size(battery_body, 16, 10);
+        lv_obj_set_style_border_width(battery_body, 1, 0);
+        lv_obj_set_style_border_color(battery_body, lv_color_black(), 0);
+        lv_obj_set_style_radius(battery_body, 2, 0);
+        lv_obj_set_style_bg_color(battery_body, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(battery_body, LV_OPA_COVER, 0);
+        lv_obj_clear_flag(battery_body, LV_OBJ_FLAG_SCROLLABLE);
+        battery_fill = lv_obj_create(battery_body);
+        lv_obj_remove_style_all(battery_fill);
+        lv_obj_set_pos(battery_fill, 1, 1);
+        lv_obj_set_size(battery_fill, 12, 6);
+        lv_obj_set_style_bg_color(battery_fill, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(battery_fill, LV_OPA_COVER, 0);
+        battery_nub = lv_obj_create(lv_screen_active());
+        lv_obj_remove_style_all(battery_nub);
+        lv_obj_set_size(battery_nub, 2, 4);
+        lv_obj_set_style_bg_color(battery_nub, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(battery_nub, LV_OPA_COVER, 0);
+        battery_label = lv_label_create(lv_screen_active());
+        lv_obj_set_style_text_font(battery_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(battery_label, lv_color_black(), 0);
+        lv_obj_set_style_bg_color(battery_label, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(battery_label, LV_OPA_COVER, 0);
+        for (lv_obj_t *part : {battery_body, battery_nub, battery_label}) lv_obj_add_flag(part, LV_OBJ_FLAG_HIDDEN);
+
         // Positions follow prototypes/circuit-epaper-states on the 200x200 panel.
         const auto make_label = [](const lv_font_t *font, lv_coord_t width, lv_text_align_t align) {
             lv_obj_t *label = lv_label_create(lv_screen_active());
@@ -2870,7 +2971,7 @@ extern "C" void app_main(void) {
     // 5 KB: the command handler runs deep, through file listing and the Wi-Fi sync start, and
     // 4 KB overflowed once note listing grew by one nested call. Its real use is logged below.
     xTaskCreate(text_display_task, "text_display", 5120, nullptr, 4, nullptr);
-    xTaskCreate(status_icon_task, "status_icons", 3072, nullptr, 2, nullptr);
+    xTaskCreate(status_icon_task, "status_icons", 4096, nullptr, 2, nullptr);
     xTaskCreate(sync_supervisor_task, "sync_supervisor", 10240, nullptr, 3, nullptr);
     xTaskCreate(local_clock_task, "local_clock", 3072, nullptr, 2, nullptr);
     start_wifi();
@@ -2900,6 +3001,20 @@ extern "C" void app_main(void) {
         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     circuit_sync::log_heap("start-up done");
+    {
+        int battery_raw = 0;
+        const int battery_mv = circuit_battery::read_mv(&battery_raw);
+        if (battery_mv > 0) {
+            ESP_LOGI(kTag, "Battery: %d mV, about %d%% (raw %d)", battery_mv,
+                circuit_battery::percent_from_mv(battery_mv), battery_raw);
+            if (battery_percent < 0) {
+                const int first = ((circuit_battery::percent_from_mv(battery_mv) + 2) / 5) * 5;
+                battery_percent = first > 100 ? 100 : first;
+            }
+        } else {
+            ESP_LOGI(kTag, "Battery: not readable");
+        }
+    }
 #ifdef CIRCUIT_DEV_CONSOLE
     xTaskCreate(dev_console_task, "dev_console", 6144, nullptr, 3, nullptr);
 #endif

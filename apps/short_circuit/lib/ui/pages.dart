@@ -17,6 +17,15 @@ const _months = [
 
 String _two(int value) => value.toString().padLeft(2, '0');
 
+/// The battery icon that best matches [percent].
+IconData batteryIconFor(int percent) => percent >= 85
+    ? LucideIcons.batteryFull
+    : percent >= 50
+    ? LucideIcons.batteryMedium
+    : percent >= 20
+    ? LucideIcons.batteryLow
+    : LucideIcons.batteryWarning;
+
 String _dayLabel(DateTime value) {
   final local = value.toLocal();
   final now = DateTime.now();
@@ -1401,6 +1410,29 @@ extension _ScPages on _CircuitHomePageState {
 
   /// The Circuit tab. One status card says whether it is connected and what is waiting; below it only
   /// what can be done right now (connect, or record and manage), and the technical details are folded away.
+  /// "Battery 85%" with an icon that follows the charge; red when it is nearly flat.
+  Widget _batteryLine(int percent) {
+    final low = percent <= 15;
+    final color = low ? context.sc.danger : context.sc.muted;
+    return Semantics(
+      label: 'Circuit battery $percent percent${low ? ', low' : ''}',
+      excludeSemantics: true,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(batteryIconFor(percent), size: 16, color: color),
+          const SizedBox(width: ScSpace.xs),
+          Flexible(
+            child: Text(
+              'Battery $percent%${low ? ' · charge soon' : ''}',
+              style: ScType.caption.copyWith(color: color),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   List<Widget> _circuitPage() {
     final available = _circuitAvailable;
     final waiting = _waitingCount;
@@ -1479,6 +1511,10 @@ extension _ScPages on _CircuitHomePageState {
                       detail,
                       style: ScType.caption.copyWith(color: context.sc.muted),
                     ),
+                    if (available && _boardBattery != null) ...[
+                      const SizedBox(height: ScSpace.xs),
+                      _batteryLine(_boardBattery!),
+                    ],
                   ],
                 ),
               ),

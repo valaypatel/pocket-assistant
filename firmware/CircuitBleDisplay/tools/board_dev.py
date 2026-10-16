@@ -8,6 +8,7 @@
   board_dev.py drop-next-link [MS]  cut the next Bluetooth link MS ms after it connects (tests that the pairing survives)
   board_dev.py drop-now         cut the current Bluetooth link at once (the phone reconnects by itself)
   board_dev.py copy-sync [N]    both: copy N notes, then sync them
+  board_dev.py battery          the battery voltage and a rough percentage (read from the board's sense line)
   board_dev.py status           internal RAM, notes waiting, and whether it is recording / playing / syncing
   board_dev.py rec [SECONDS]    start recording (default: until rec-stop)
   board_dev.py rec-pause        pause or resume the recording
@@ -153,6 +154,8 @@ def main():
         return send("status", "DEV status", 10)
     if cmd == "copy-sync":
         return send(f"copy-sync {n}", ("SYNCSTAT", "0 file(s)"), 600)
+    if cmd == "battery":
+        return send("battery", "DEV battery", 25)
     if cmd == "status":
         return send("status", "DEV status", 10)
     if cmd == "rec":
