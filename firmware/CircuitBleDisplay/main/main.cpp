@@ -88,6 +88,13 @@ constexpr gpio_num_t kRecordButtonPin = GPIO_NUM_0;
 constexpr gpio_num_t kLowerKeyPin = GPIO_NUM_18;
 #endif
 constexpr uint32_t kLowerTapMaxMs = 600;
+// GPIO17 holds the battery connected. On USB the board runs without it, but on the battery it would
+// switch off as soon as the power key is let go. Pressing the lower key this long (not while recording
+// or syncing) turns the board off.
+constexpr gpio_num_t kBatteryLatchPin = GPIO_NUM_17;
+constexpr uint32_t kPowerOffHoldMs = 3000;
+// The cell is flat below about this voltage; switching off here protects it.
+constexpr int kBatteryEmptyMv = 3250;
 constexpr TickType_t kButtonPollInterval = pdMS_TO_TICKS(20);
 constexpr TickType_t kButtonDebounceDelay = pdMS_TO_TICKS(50);
 constexpr TickType_t kForceSyncHoldTime = pdMS_TO_TICKS(2000);
@@ -1390,6 +1397,8 @@ void set_wifi_ui(WifiUi state, const char *detail = "") {
 // Redraws the header icons when what they show has changed. Icons only appear
 // for things that are available: Wi-Fi once configured (animated while it is
 // connecting, crossed out if it failed), the phone while bonded, the SD card.
+void power_off(const char *message);
+
 void refresh_status_icons() {
     if (boot_splash) return;
     static const lv_image_dsc_t *const connecting[] = {
@@ -1471,6 +1480,14 @@ void battery_tick() {
             sorted[j] = sorted[j - 1];
             sorted[j - 1] = t;
         }
+    }
+    // Flat on three readings in a row (and so not on USB, which holds the voltage up): switch off to
+    // protect the cell, while there is still enough charge to do it cleanly.
+    static int flat = 0;
+    flat = sorted[n / 2] < kBatteryEmptyMv ? flat + 1 : 0;
+    if (flat >= 3) {
+        power_off("Battery empty");
+        return;
     }
     const int raw = circuit_battery::percent_from_mv(sorted[n / 2]);
     const int shown = battery_percent;
@@ -2131,6 +2148,22 @@ void IRAM_ATTR lower_key_isr(void *) {
     }
 }
 
+// Switches the board off when it runs on the battery. On USB the board stays powered, so it restarts
+// instead of being left stuck on a message.
+void power_off(const char *message) {
+    ESP_LOGW(kTag, "Powering off: %s", message);
+    if (Lvgl_lock(1000)) {
+        lv_label_set_text(message_label, message);
+        lv_obj_clear_flag(message_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(message_label);
+        Lvgl_unlock();
+    }
+    vTaskDelay(pdMS_TO_TICKS(2500));  // the e-paper needs a moment to draw it
+    gpio_set_level(kBatteryLatchPin, 0);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();  // still alive: USB is powering the board
+}
+
 // What a finished press of the lower key means. The development console calls it with a length of
 // its own, so the same rules run for a test as for a finger.
 void lower_key_released(uint32_t held_ms) {
@@ -2139,6 +2172,11 @@ void lower_key_released(uint32_t held_ms) {
     if (held_ms > lower_key_longest_ms.load()) lower_key_longest_ms = held_ms;
     ESP_LOGW(kTag, "DEV lower key pressed for %u ms", static_cast<unsigned>(held_ms));
 #endif
+    if (held_ms >= kPowerOffHoldMs && !recording_active && active_screen != DeviceScreen::Syncing &&
+        !playback_active.load()) {
+        power_off("Powering off");
+        return;
+    }
     if (held_ms <= kLowerTapMaxMs && recording_active && !recording_paused) {
         moment_requests++;
         const uint32_t taken = recording_moments.fetch_add(1) + 1;
@@ -2787,6 +2825,7 @@ void start_wifi() {
 
 void init_display() {
     BoardPower_Init();
+    BoardPower_VBAT_ON();  // BoardPower_Init sets the pins up again; keep the battery latched
     BoardPower_EPD_ON();
     BoardPower_Audio_ON();
     PortLvgl_Start_Init();
@@ -2930,6 +2969,14 @@ void init_display() {
 }  // namespace
 
 extern "C" void app_main(void) {
+    // First of all: keep the battery connected (see kBatteryLatchPin).
+    {
+        gpio_config_t latch = {};
+        latch.pin_bit_mask = 1ULL << kBatteryLatchPin;
+        latch.mode = GPIO_MODE_OUTPUT;
+        gpio_config(&latch);
+        gpio_set_level(kBatteryLatchPin, 1);
+    }
     circuit_sdlog::install();  // lines are kept in memory until the card is up, then written to it
     boot_reset_reason = static_cast<int>(esp_reset_reason());
     ESP_LOGW(kTag, "Circuit firmware %s", esp_app_get_description()->version);
