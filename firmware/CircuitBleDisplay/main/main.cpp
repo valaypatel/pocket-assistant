@@ -2826,6 +2826,11 @@ void start_wifi() {
 void init_display() {
     BoardPower_Init();
     BoardPower_VBAT_ON();  // BoardPower_Init sets the pins up again; keep the battery latched
+    // Input and output, so the real level of the latch pin can be read back and logged.
+    gpio_set_direction(kBatteryLatchPin, GPIO_MODE_INPUT_OUTPUT);
+    gpio_set_level(kBatteryLatchPin, 1);
+    ESP_LOGI(kTag, "Battery latch (GPIO17) reads %d, key (GPIO18) reads %d", gpio_get_level(kBatteryLatchPin),
+        gpio_get_level(GPIO_NUM_18));
     BoardPower_EPD_ON();
     BoardPower_Audio_ON();
     PortLvgl_Start_Init();
