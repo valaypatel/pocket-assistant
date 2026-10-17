@@ -1665,6 +1665,18 @@ extension _ScPages on _CircuitHomePageState {
           ),
         ),
         ScRow(
+          title: 'Broadcast a message',
+          caption: 'Type it and Circuit says it out loud',
+          onTap: idle && !_broadcasting ? _broadcastToCircuit : null,
+          trailing: _broadcasting
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Icon(LucideIcons.megaphone, size: 18, color: context.sc.muted),
+        ),
+        ScRow(
           title: 'Free up space',
           caption: 'Remove notes already saved on your phone',
           onTap: idle ? _cleanCircuitNotes : null,

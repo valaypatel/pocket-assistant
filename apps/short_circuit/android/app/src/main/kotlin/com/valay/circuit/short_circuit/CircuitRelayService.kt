@@ -92,6 +92,12 @@ class CircuitRelayService : Service() {
         }
 
         fun writeToCircuit(value: String): Boolean = activeService?.writeCommand(value) ?: false
+
+        /** Sends a spoken message for Circuit to play. Null when Circuit took it, else why not. */
+        fun speakToBoard(wav: ByteArray): String? {
+            val service = activeService ?: return "Circuit is not connected"
+            return service.speak(wav)
+        }
         // Playback does not need the relay to be running; see NotePlayer.
         fun playSyncedRecording(path: String): Boolean = NotePlayer.playFile(path)
         fun playWavBytes(bytes: ByteArray): Boolean = NotePlayer.playBytes(bytes)
@@ -508,8 +514,16 @@ class CircuitRelayService : Service() {
             handleSyncOffer(request)
             return
         }
+        if (request.startsWith("@speak-offer\n")) {
+            speakOffer?.complete(request)
+            return
+        }
         if (request.startsWith("@audio-status\n")) {
-            publishAudioStatus(request.substringAfter("@audio-status\n"))
+            val status = request.substringAfter("@audio-status\n")
+            if (status.startsWith("Broadcast failed") || status.startsWith("Broadcast needs")) {
+                speakOffer?.completeExceptionally(IOException(status.substringAfter(": ", status)))
+            }
+            publishAudioStatus(status)
             return
         }
         if (request != "@relay\nCHECK") return
@@ -565,6 +579,52 @@ class CircuitRelayService : Service() {
         val fingerprint = parts.getOrNull(4) ?: return
         val generation = ++syncGeneration
         syncExecutor.execute { runWifiSync(host, port, token, fingerprint, generation) }
+    }
+
+    @Volatile private var speakOffer: java.util.concurrent.CompletableFuture<String>? = null
+
+    /**
+     * Asks Circuit for a broadcast session over Bluetooth, then uploads the clip over Wi-Fi to the pinned
+     * certificate. Runs on a worker thread. Null means Circuit accepted the message.
+     */
+    private fun speak(wav: ByteArray): String? {
+        val offer = java.util.concurrent.CompletableFuture<String>()
+        speakOffer = offer
+        try {
+            if (!writeCommand("@speak-prepare")) return "Circuit is not connected"
+            val request = try {
+                offer.get(12, java.util.concurrent.TimeUnit.SECONDS)
+            } catch (error: java.util.concurrent.ExecutionException) {
+                return error.cause?.message ?: "Circuit refused"
+            } catch (_: java.util.concurrent.TimeoutException) {
+                return "Circuit did not answer"
+            }
+            val parts = request.lines()
+            val host = parts.getOrNull(1) ?: return "Circuit sent an incomplete offer"
+            val port = parts.getOrNull(2)?.toIntOrNull() ?: return "Circuit sent an incomplete offer"
+            val token = parts.getOrNull(3) ?: return "Circuit sent an incomplete offer"
+            val fingerprint = parts.getOrNull(4) ?: return "Circuit sent an incomplete offer"
+            val network = waitForWifi(4000) ?: return "Connect your phone to the same Wi-Fi as Circuit"
+            val connection = (network.openConnection(URL("https://$host:$port/speak")) as HttpsURLConnection).apply {
+                sslSocketFactory = pinnedSocketFactory(fingerprint)
+                hostnameVerifier = HostnameVerifier { _, _ -> true }  // identity is the pinned fingerprint
+                requestMethod = "PUT"
+                doOutput = true
+                setFixedLengthStreamingMode(wav.size)
+                connectTimeout = 6000
+                readTimeout = 15000
+                setRequestProperty("X-Circuit-Token", token)
+            }
+            connection.outputStream.use { it.write(wav) }
+            val code = connection.responseCode
+            connection.disconnect()
+            return if (code == 200) null else "Circuit refused the message (HTTP $code)"
+        } catch (error: Exception) {
+            Log.w("CircuitSpeak", "Broadcast failed: ${error.message}")
+            return "Could not reach Circuit over Wi-Fi"
+        } finally {
+            speakOffer = null
+        }
     }
 
     private fun wifiNetwork(): Network? {

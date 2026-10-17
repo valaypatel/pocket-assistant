@@ -1264,6 +1264,63 @@ void play_audio_task(void *) {
     finish_audio_task();
 }
 
+// Plays the message the phone sent (circuit_sync::kSpeakPath, already checked) and deletes it. It is
+// not a note: nothing about it is kept, listed or synced.
+void speak_audio_task(void *) {
+    show_device_screen(DeviceScreen::Playback);
+    update_storage_status("Message from phone");
+    report_audio_status("Playing message from phone");
+    FILE *file = fopen(circuit_sync::kSpeakPath, "rb");
+    auto *buffer = static_cast<uint8_t *>(heap_caps_malloc(kAudioBufferBytes, MALLOC_CAP_SPIRAM));
+    auto *stereo_buffer = static_cast<uint8_t *>(heap_caps_malloc(kAudioBufferBytes * 2, MALLOC_CAP_SPIRAM));
+    bool played = false;
+    bool failed = file == nullptr || buffer == nullptr || stereo_buffer == nullptr;
+    if (!failed && fseek(file, circuit_sync::kSpeakHeaderBytes, SEEK_SET) == 0) {
+        size_t bytes = 0;
+        while (!playback_stop_requested.load() && (bytes = fread(buffer, 1, kAudioBufferBytes, file)) > 0) {
+            if (!play_mono_chunk(buffer, bytes, stereo_buffer)) { failed = true; break; }
+            played = true;
+            playback_audio_ms.fetch_add(static_cast<uint32_t>(bytes * 1000 / (kAudioSampleRate * 2)));
+        }
+    }
+    if (file != nullptr) fclose(file);
+    if (buffer != nullptr) heap_caps_free(buffer);
+    if (stereo_buffer != nullptr) heap_caps_free(stereo_buffer);
+    remove(circuit_sync::kSpeakPath);
+    if (playback_stop_requested.load()) {
+        report_audio_status("Playback stopped");
+    } else if (failed || !played) {
+        update_storage_status("Playback failed\nCould not play message");
+        report_audio_status("Broadcast failed: could not play the message");
+    } else {
+        report_audio_status("Broadcast played");
+    }
+    if (Lvgl_lock(-1)) {
+        lv_obj_add_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
+        Lvgl_unlock();
+    }
+    return_to_idle_after(DeviceScreen::Playback, 2500);
+    finish_audio_task();
+}
+
+// Starts playing the message that just arrived. If the speaker is taken, the message is dropped.
+void start_speak_playback() {
+    if (!claim_audio()) {
+        remove(circuit_sync::kSpeakPath);
+        report_audio_status("Broadcast failed: Circuit is busy");
+        return;
+    }
+    playback_stop_requested = false;
+    playback_audio_ms = 0;
+    playback_active = true;
+    if (xTaskCreate(speak_audio_task, "audio_speak", 6144, nullptr, 5, nullptr) != pdPASS) {
+        playback_active = false;
+        audio_busy = false;
+        remove(circuit_sync::kSpeakPath);
+        report_audio_status("Broadcast failed: could not start playback");
+    }
+}
+
 void start_recording(char *command) {
     uint32_t seconds = 5;
     char *duration = strchr(command, '\n');
@@ -1571,6 +1628,34 @@ bool offer_wifi_sync(uint32_t only_recording = 0) {
     return true;
 }
 
+// Opens a session that takes one spoken message from the phone. The phone asks for it over the bonded
+// BLE link (@speak-prepare) and gets the same kind of offer as a sync, under its own name.
+void offer_speak() {
+    char ip[16];
+    uint16_t port = 0;
+    char token[33];
+    const char *fingerprint = nullptr;
+    uint32_t count = 0, bytes = 0;
+    if (recording_active || audio_busy || circuit_sync::is_open()) {
+        report_audio_status("Broadcast failed: Circuit is busy");
+        return;
+    }
+    if (!can_offer_wifi_sync() || !circuit_sync::wifi_ip(ip, sizeof(ip))) {
+        report_audio_status("Broadcast needs Wi-Fi: connect Circuit and your phone to the same network");
+        return;
+    }
+    if (!circuit_sync::open_session(&port, token, sizeof(token), &fingerprint, &count, &bytes, 0, true)) {
+        report_audio_status("Broadcast failed: could not open a session");
+        return;
+    }
+    char offer[kMaxTextBytes + 40];
+    snprintf(offer, sizeof(offer), "@speak-offer\n%s\n%u\n%s\n%s", ip, static_cast<unsigned>(port), token, fingerprint);
+    snprintf(last_offer, sizeof(last_offer), "%s", offer);
+    last_offer_sent_ms = circuit_sync::now_ms();
+    send_relay_request(offer);
+    ESP_LOGI(kTag, "Broadcast session offered");
+}
+
 // Shows the sync screen briefly with `text`, then returns to idle. Used so a
 // button hold always gets a visible answer.
 void flash_sync_result(const char *text) {
@@ -1654,8 +1739,26 @@ void end_wifi_sync() {
 void sync_supervisor_task(void *) {
     // Create (or load) the sync certificate now so a failure shows up at boot.
     ESP_LOGI(kTag, "Sync identity %s", circuit_sync::ensure_identity() ? "ready" : "FAILED");
+    int64_t last_slow_check_ms = 0;
     while (true) {
-        vTaskDelay(kSyncSupervisorInterval);
+        vTaskDelay(pdMS_TO_TICKS(500));  // a broadcast message is played as soon as it arrives
+        if (circuit_sync::is_open() && circuit_sync::state.speak) {
+            // A broadcast session is not a sync: it ends when the message arrives or the phone gives up.
+            if (circuit_sync::state.speak_ready) {
+                circuit_sync::close_session();
+                start_speak_playback();
+            } else if (circuit_sync::expired() || connection_id == UINT16_MAX) {
+                circuit_sync::close_session();
+                report_audio_status("Broadcast failed: the phone did not send the message");
+            } else if (circuit_sync::state.client_ip == 0 && ble_encrypted &&
+                       circuit_sync::now_ms() - last_offer_sent_ms > kOfferResendMs) {
+                last_offer_sent_ms = circuit_sync::now_ms();
+                send_relay_request(last_offer);
+            }
+            continue;
+        }
+        if (circuit_sync::now_ms() - last_slow_check_ms < pdTICKS_TO_MS(kSyncSupervisorInterval)) continue;
+        last_slow_check_ms = circuit_sync::now_ms();
         // After giving up, try again now and then (sooner if it was not a password problem).
         if (wifi_ui == WifiUi::Failed && wifi_ssid[0] != '\0' &&
             circuit_sync::now_ms() - wifi_failed_at_ms > (wifi_auth_failure ? 300000 : 60000)) {
@@ -1885,6 +1988,12 @@ void dev_console_task(void *) {
             if (sscanf(line + 14, "%d", &ms) != 1) ms = 100;
             dev_drop_link_ms = ms;
             ESP_LOGW(kTag, "DEV drop-next-link armed: %d ms after the next connect", ms);
+        } else if (strcmp(line, "speak-open") == 0) {
+            offer_speak();
+            char offer[sizeof(last_offer)];
+            snprintf(offer, sizeof(offer), "%s", last_offer);
+            for (char *c = offer; *c != '\0'; ++c) if (*c == '\n') *c = ' ';
+            ESP_LOGW(kTag, "DEV speak-open: %s", offer);
         } else if (strcmp(line, "drop-now") == 0) {
             ESP_LOGW(kTag, "DEV drop-now: cutting the current link");
             esp_ble_gap_disconnect(peer_bda);
@@ -2492,6 +2601,8 @@ void text_display_task(void *) {
                     snprintf(result, sizeof(result), "Notes cleaned: %u removed from Circuit", static_cast<unsigned>(removed));
                     report_audio_status(result);
                 }
+            } else if (strcmp(message.value, "@speak-prepare") == 0) {
+                offer_speak();
             } else if (strncmp(message.value, "@sec-hello\n", 11) == 0) {
                 send_note_key_to_phone(message.value);
             } else if (strcmp(message.value, "@wifi-status") == 0) {

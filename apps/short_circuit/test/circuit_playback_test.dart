@@ -52,6 +52,10 @@ void main() {
     );
   });
   Future<void> open(WidgetTester tester) async {
+    // Tall enough to show the playback status line and every row under it at once.
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
     await tester.pumpWidget(const ShortCircuitApp());
     await tester.pump(const Duration(seconds: 4));
     await tester.tap(find.text('Settings').last);

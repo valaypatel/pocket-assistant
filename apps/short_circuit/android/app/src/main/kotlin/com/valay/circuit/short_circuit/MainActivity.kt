@@ -227,6 +227,20 @@ class MainActivity : FlutterActivity() {
                         result.success(Reminders.exactAllowed(this))
                     }
                     "takeReminderEvents" -> result.success(Reminders.takeEvents(this))
+                    "talkStart" -> result.success(TalkRecorder.start())
+                    "talkStop" -> result.success(TalkRecorder.stop())
+                    "speakOnBoard" -> {
+                        val bytes = call.argument<ByteArray>("bytes")
+                        if (bytes == null) {
+                            result.error("missing_bytes", "No audio to send", null)
+                        } else {
+                            // Blocks while Circuit opens its session and takes the upload.
+                            Thread {
+                                val problem = CircuitRelayService.speakToBoard(bytes)
+                                runOnUiThread { result.success(problem) }
+                            }.start()
+                        }
+                    }
                     "openExactAlarmSettings" -> {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                             startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:$packageName")))

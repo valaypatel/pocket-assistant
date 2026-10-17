@@ -15,6 +15,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+
+import 'broadcast_audio.dart';
+
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -37,6 +40,7 @@ part 'phone_recording.dart';
 part 'secure_notes.dart';
 part 'ui/backup_page.dart';
 part 'ui/capture_dock.dart';
+part 'ui/broadcast_dialog.dart';
 part 'ui/chat_page.dart';
 part 'ui/detail_pages.dart';
 part 'ui/onboarding.dart';
@@ -59,6 +63,9 @@ const _notesKey = 'circuit_notes';
 const _geminiApiKey = 'gemini_api_key';
 const _geminiModelKey = 'gemini_model';
 const _defaultGeminiModel = 'gemini-3.5-flash-lite';
+
+/// The model that turns text into speech for Broadcast (separate from the one that reads notes).
+const _speechModel = 'gemini-2.5-flash-preview-tts';
 const _aiApiKey = 'hermes_api_key';
 const _aiBaseUrlKey = 'hermes_base_url';
 const _aiModelKey = 'hermes_model';
@@ -223,6 +230,45 @@ class GeminiClient {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('Gemini ${response.statusCode}: ${response.body}');
     }
+  }
+
+  /// Speaks [text] with Gemini and returns a clip Circuit can play (see broadcast_audio.dart).
+  Future<Uint8List> speakWav(String text) async {
+    final key = await apiKey();
+    if (key == null || key.trim().isEmpty) {
+      throw Exception('Add a Gemini API key in Settings first.');
+    }
+    final uri = Uri.parse(
+      'https://generativelanguage.googleapis.com/v1beta/models/'
+      '$_speechModel:generateContent?key=${Uri.encodeQueryComponent(key)}',
+    );
+    final response = await http
+        .post(
+          uri,
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'contents': [
+              {
+                'parts': [
+                  {'text': text},
+                ],
+              },
+            ],
+            'generationConfig': {
+              'responseModalities': ['AUDIO'],
+              'speechConfig': {
+                'voiceConfig': {
+                  'prebuiltVoiceConfig': {'voiceName': 'Charon'},
+                },
+              },
+            },
+          }),
+        )
+        .timeout(const Duration(seconds: 60));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Gemini ${response.statusCode}: ${response.body}');
+    }
+    return broadcastWavFromGeminiReply(response.body);
   }
 
   Future<GeminiTranscription> transcribeWav(
@@ -1324,6 +1370,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   String? _lastAudioStatus;
   String? _syncingNoteId;
   String? _transcribingNoteId;
+  bool _broadcasting = false;
   int? _syncProgress;
   String _status = 'Tap Scan to find your Circuit.';
 
@@ -3348,6 +3395,42 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       }
     } finally {
       _identifyingSongs.remove(id);
+    }
+  }
+
+  /// Broadcasts a message out of Circuit's speaker: typed text that Gemini speaks, or your own voice held
+  /// to talk. Nothing is saved: Circuit plays the clip and deletes it.
+  Future<void> _broadcastToCircuit() async {
+    final choice = await showDialog<_BroadcastChoice>(
+      context: context,
+      builder: (context) => const _BroadcastDialog(),
+    );
+    if (choice == null || !mounted) return;
+    setState(() => _broadcasting = true);
+    try {
+      final Uint8List wav;
+      if (choice.speech != null) {
+        wav = broadcastWav(choice.speech!, sourceRate: 16000);
+      } else {
+        _setStatus('Making the voice message…');
+        wav = await _gemini.speakWav(choice.text!);
+      }
+      _setStatus('Sending it to Circuit…');
+      await _relayChannel.invokeMethod<bool>('requestLocalNetwork');
+      final problem = await _relayChannel.invokeMethod<String>('speakOnBoard', {
+        'bytes': wav,
+      });
+      _setStatus(
+        problem == null
+            ? 'Circuit is playing your message'
+            : 'Broadcast failed: $problem',
+      );
+    } catch (error) {
+      _setStatus(
+        'Broadcast failed: ${error.toString().replaceFirst('Exception: ', '').replaceFirst('Bad state: ', '')}',
+      );
+    } finally {
+      if (mounted) setState(() => _broadcasting = false);
     }
   }
 
