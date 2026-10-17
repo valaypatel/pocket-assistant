@@ -11,6 +11,7 @@
 #include "driver/usb_serial_jtag.h"
 #endif
 #include "esp_app_desc.h"
+#include "esp_ota_ops.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_event.h"
@@ -48,6 +49,7 @@
 #include "port_codec.h"
 #include "circuit_demo_screens.h"
 #include "circuit_moment_icon.h"
+#include "circuit_update_icon.h"
 #include "circuit_recording_icon.h"
 #include "circuit_battery.h"
 #include "circuit_crypto.h"
@@ -95,6 +97,13 @@ constexpr gpio_num_t kBatteryLatchPin = GPIO_NUM_17;
 constexpr uint32_t kPowerOffHoldMs = 3000;
 // The cell is flat below about this voltage; switching off here protects it.
 constexpr int kBatteryEmptyMv = 3250;
+// At or below this charge the header says LOW instead of a number (the phone is told as well).
+constexpr int kBatteryLowPercent = 15;
+// Below this the cell is in danger, whatever Circuit is doing.
+constexpr int kBatteryHardFloorMv = 3000;
+// A cell being charged climbs; one being used only falls. A rise of this much between two readings means
+// USB is charging it, which is the only way to tell, as the board has no USB-power sense line.
+constexpr int kBatteryRisingMv = 5;
 constexpr TickType_t kButtonPollInterval = pdMS_TO_TICKS(20);
 constexpr TickType_t kButtonDebounceDelay = pdMS_TO_TICKS(50);
 constexpr TickType_t kForceSyncHoldTime = pdMS_TO_TICKS(2000);
@@ -118,6 +127,9 @@ std::atomic<int64_t> moment_cue_until_ms{0};  // the cue is shown until then (es
 constexpr int64_t kMomentCueMs = 3000;
 lv_obj_t *recording_icon;  // the animated device icon on the recording screen (64x64)
 lv_obj_t *sync_progress_label;
+lv_obj_t *update_cog_obj;  // the turning cog of a firmware update (circuit_update_icon.h), with the percentage below
+bool update_screen_active = false;
+int update_frame = 0;
 lv_obj_t *busy_icon_obj;  // "cannot record now" (a microphone crossed out), drawn where the sync figure is
 lv_obj_t *idle_date_label;
 lv_obj_t *idle_time_label;
@@ -194,6 +206,12 @@ constexpr time_t kMinValidEpoch = 1704067200;  // 2024-01-01
 void send_relay_request(const char *request);
 void show_busy_notice();
 bool claim_audio() { return !audio_busy.exchange(true); }
+
+// A firmware update is under way: from when Circuit offers the phone an update session until the new
+// firmware is in place (set once the image has arrived, while it is written). While it is, nothing that
+// would interrupt it is allowed: recording, playing, syncing, a broadcast, and switching off.
+std::atomic<bool> firmware_installing{false};
+bool update_busy() { return firmware_installing.load() || (circuit_sync::is_open() && circuit_sync::state.firmware); }
 
 // What may interrupt what: a sync comes first, then recording a note; playback comes last and
 // gives way to either. A sync is never cut short by a recording, and a recording is never cut
@@ -287,13 +305,27 @@ void show_device_screen(DeviceScreen screen, bool only_if_showing = false, Devic
 // prototypes/circuit-epaper-states). They only appear once the phone has
 // supplied real values; until then they show dashes. The pairing screen
 // keeps its baked "PAIR CODE" header in place of the date.
+int persistent_applied = -1;  // the screen these labels were last arranged for; -1 forces a fresh arrangement
+
+// The e-paper is redrawn with quick partial refreshes, which leave faint traces of what was there before (the
+// clock, behind the update cog). A full refresh wipes them, at the cost of a flash lasting a second or two, so
+// it is done only when the screen changes a lot, from the status task once the new picture has been drawn.
+volatile bool ghost_clear_pending = false;
+
+void epaper_full_refresh() {
+    if (!Lvgl_lock(-1)) return;
+    EPD_Init();                  // the full-refresh waveform
+    EPD_DisplayPartBaseImage();  // the picture just drawn, shown in full, and kept as the base for partial updates
+    EPD_Init_Partial();          // back to quick updates
+    Lvgl_unlock();
+}
+
 void apply_persistent_labels(DeviceScreen screen) {
     if (boot_splash) return;
     // Moving objects to the foreground redraws the screen, so only do it when the
     // screen actually changed.
-    static int applied = -1;
-    if (applied == static_cast<int>(screen)) return;
-    applied = static_cast<int>(screen);
+    if (persistent_applied == static_cast<int>(screen)) return;
+    persistent_applied = static_cast<int>(screen);
     const bool show = true;
     const auto set_visible = [](lv_obj_t *label, bool visible) {
         if (visible) lv_obj_clear_flag(label, LV_OBJ_FLAG_HIDDEN);
@@ -576,6 +608,16 @@ void show_device_screen(DeviceScreen screen, bool only_if_showing, DeviceScreen 
     lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(update_cog_obj, LV_OBJ_FLAG_HIDDEN);
+    if (update_screen_active) {  // the sync figure goes back to its own size and place
+        update_screen_active = false;
+        persistent_applied = -1;  // and the clock and counts, hidden for the update, come back
+        ghost_clear_pending = true;  // and the cog's traces are wiped
+        lv_obj_set_style_text_font(sync_progress_label, &lv_font_montserrat_24, 0);
+        lv_obj_set_width(sync_progress_label, 84);
+        lv_obj_set_style_text_align(sync_progress_label, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_align(sync_progress_label, LV_ALIGN_TOP_LEFT, 116, 129);
+    }
     lv_img_set_src(wordmark_image, kScreens[static_cast<size_t>(screen)]);
     lv_obj_center(wordmark_image);
     apply_persistent_labels(screen);
@@ -706,6 +748,7 @@ void show_pairing_code() {
     lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(update_cog_obj, LV_OBJ_FLAG_HIDDEN);
     apply_persistent_labels(DeviceScreen::Pairing);
     lv_obj_clear_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
     Lvgl_unlock();
@@ -1305,7 +1348,7 @@ void speak_audio_task(void *) {
 
 // Starts playing the message that just arrived. If the speaker is taken, the message is dropped.
 void start_speak_playback() {
-    if (!claim_audio()) {
+    if (update_busy() || !claim_audio()) {
         remove(circuit_sync::kSpeakPath);
         report_audio_status("Broadcast failed: Circuit is busy");
         return;
@@ -1322,6 +1365,10 @@ void start_speak_playback() {
 }
 
 void start_recording(char *command) {
+    if (update_busy()) {  // a recording would be lost to the restart, or cut the update short
+        report_audio_status("Cannot record while Circuit is updating");
+        return;
+    }
     uint32_t seconds = 5;
     char *duration = strchr(command, '\n');
     if (duration != nullptr) {
@@ -1423,6 +1470,8 @@ void send_wifi_status() {
 // Tells the app how many recordings are waiting (a long one made of parts counts once) and why
 // the board last restarted, so the app can show a sync that is stuck, and a crash, instead of
 // guessing.
+bool previous_firmware(char *version, size_t version_size, char *build, size_t build_size);
+
 void send_sync_status() {
     char message[kMaxTextBytes + 1];
     // The first three lines are what the app has always read; the rest is board health,
@@ -1441,6 +1490,27 @@ void send_sync_status() {
         playback_active.load() ? "playing" : "idle",
         static_cast<unsigned long>(playback_active.load() ? playback_audio_ms.load() : 0),
         recording_active ? (recording_paused ? "paused" : "recording") : "idle");
+    send_relay_request(message);
+    // And a third, about what is installed and what is stored:
+    //   fw   the firmware that is running: its version, then the first eight hex digits of its build
+    //        fingerprint (the app reads the same digits from a firmware file; no two builds share them)
+    //   prev the firmware that "go back" would switch to (empty when there is none)
+    //   sd   the card's space in use, then its total size, in KB (absent without a card)
+    char build_id[9] = "";
+    esp_app_get_elf_sha256(build_id, sizeof(build_id));
+    char previous_version[32] = "", previous_build[9] = "";
+    char previous[48] = "";
+    if (previous_firmware(previous_version, sizeof(previous_version), previous_build, sizeof(previous_build))) {
+        snprintf(previous, sizeof(previous), "%s|%s", previous_version, previous_build);
+    }
+    char card[40] = "";
+    uint64_t card_total = 0, card_free = 0;
+    if (esp_vfs_fat_info(kSdMountPath, &card_total, &card_free) == ESP_OK && card_total > 0) {
+        snprintf(card, sizeof(card), "%llu|%llu", static_cast<unsigned long long>((card_total - card_free) / 1024),
+            static_cast<unsigned long long>(card_total / 1024));
+    }
+    snprintf(message, sizeof(message), "@sync-status\nfw=%s|%s\nprev=%s\nsd=%s",
+        esp_app_get_description()->version, build_id, previous, card);
     send_relay_request(message);
 }
 
@@ -1505,11 +1575,16 @@ void refresh_status_icons() {
         lv_obj_set_size(battery_fill, fill, 6);
         lv_obj_set_style_bg_opa(battery_fill, fill > 0 ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
         char text[16];
-        snprintf(text, sizeof(text), "%d", battery);
+        if (battery <= kBatteryLowPercent) {
+            snprintf(text, sizeof(text), "LOW");
+        } else {
+            snprintf(text, sizeof(text), "%d", battery);
+        }
         lv_label_set_text(battery_label, text);
         lv_obj_update_layout(battery_label);
         lv_obj_set_pos(battery_label, body_x - 3 - lv_obj_get_width(battery_label), 5);
         for (lv_obj_t *part : {battery_body, battery_nub, battery_label}) lv_obj_clear_flag(part, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(battery_label);  // never under the date
     }
     Lvgl_unlock();
 }
@@ -1528,6 +1603,15 @@ void battery_tick() {
     if (mv <= 0) return;
     samples[count % 5] = mv;
     count++;
+    // A line every ten readings (about five minutes) in the log on the card, with what the board is doing, so
+    // a fast-draining battery can be read back from the card later: how fast, and with what running.
+    static int logged = 0;
+    if (logged++ % 10 == 0) {
+        ESP_LOGI(kTag, "Battery log: %d mV, uptime %lld s, phone %s, wifi %s%s", mv,
+            static_cast<long long>(circuit_sync::now_ms() / 1000), connection_id != UINT16_MAX ? "connected" : "no",
+            wifi_ui == WifiUi::Connected ? "connected" : (wifi_ui == WifiUi::None ? "off" : "trying"),
+            update_busy() ? ", updating" : "");
+    }
     int sorted[5];
     const int n = count < 5 ? count : 5;
     for (int i = 0; i < n; i++) sorted[i] = samples[i];
@@ -1538,10 +1622,18 @@ void battery_tick() {
             sorted[j - 1] = t;
         }
     }
-    // Flat on three readings in a row (and so not on USB, which holds the voltage up): switch off to
-    // protect the cell, while there is still enough charge to do it cleanly.
+    // Flat on three readings in a row, and not being charged (a charging cell's voltage keeps climbing, a
+    // flat cell on its own only falls): switch off to protect the cell, while there is still enough charge
+    // to do it cleanly.
     static int flat = 0;
-    flat = sorted[n / 2] < kBatteryEmptyMv ? flat + 1 : 0;
+    static int previous_mv = 0;
+    const int median_mv = sorted[n / 2];
+    const bool charging = previous_mv > 0 && median_mv >= previous_mv + kBatteryRisingMv;
+    previous_mv = median_mv;
+    // An update is never cut short by the empty-battery switch-off (a power loss mid-update is safe anyway:
+    // the old firmware stays valid until the last step), unless the cell is close to damage.
+    const bool defer = update_busy() && median_mv >= kBatteryHardFloorMv;
+    flat = (median_mv < kBatteryEmptyMv && !charging && !defer) ? flat + 1 : 0;
     if (flat >= 3) {
         power_off("Battery empty\nCharge it, then hold\nthe power key");
         return;
@@ -1579,9 +1671,53 @@ int32_t sync_ui_shown = -1;
 
 void wifi_sync_progress(uint32_t percent) { sync_ui_percent = static_cast<int32_t>(percent); }
 
+// The firmware update screen: a turning cog with the percentage under it. It borrows the sync screen (so
+// the usual rules about what may interrupt what still hold) and swaps the artwork for the cog.
+void show_update_screen() {
+    show_device_screen(DeviceScreen::Syncing);
+    if (!Lvgl_lock(-1)) return;
+    lv_obj_add_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
+    // The cog needs the middle of the screen: hide the clock and the note counts (the date and the status
+    // icons stay). They come back with the next screen (see show_device_screen).
+    for (lv_obj_t *label : {idle_time_label, idle_ampm_label, idle_pending_label, idle_done_label, idle_clock_icon,
+                            idle_check_icon}) {
+        lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+    }
+    update_frame = 0;
+    lv_img_set_src(update_cog_obj, circuit_update_frames[0]);
+    lv_obj_clear_flag(update_cog_obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_text_font(sync_progress_label, &lv_font_montserrat_36, 0);
+    lv_obj_set_width(sync_progress_label, 150);
+    lv_obj_set_style_text_align(sync_progress_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(sync_progress_label, LV_ALIGN_TOP_MID, 0, 122);
+    lv_label_set_text(sync_progress_label, "0%");
+    lv_obj_clear_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
+    update_screen_active = true;
+    ghost_clear_pending = true;  // wipe the traces of the clock once the cog screen has been drawn
+    Lvgl_unlock();
+}
+
 // Runs in the status icon task, at most once per tick.
 void sync_ui_tick() {
+    if (ghost_clear_pending) {
+        ghost_clear_pending = false;
+        epaper_full_refresh();
+        return;  // the next tick carries on with the cog
+    }
     const int32_t percent = sync_ui_percent;
+    if (update_screen_active && percent >= 0 && active_screen == DeviceScreen::Syncing) {
+        // The cog turns one step on every redraw, even when the figure has not moved.
+        if (Lvgl_lock(-1)) {
+            update_frame = (update_frame + 1) % circuit_update_frame_count;
+            lv_img_set_src(update_cog_obj, circuit_update_frames[update_frame]);
+            char text[16];
+            snprintf(text, sizeof(text), "%d%%", static_cast<int>(percent));
+            lv_label_set_text(sync_progress_label, text);
+            Lvgl_unlock();
+        }
+        sync_ui_shown = percent;
+        return;
+    }
     if (percent < 0 || percent == sync_ui_shown) return;
     // Never take the screen from a recording.
     if (recording_active || active_screen == DeviceScreen::Recording) return;
@@ -1628,32 +1764,169 @@ bool offer_wifi_sync(uint32_t only_recording = 0) {
     return true;
 }
 
-// Opens a session that takes one spoken message from the phone. The phone asks for it over the bonded
-// BLE link (@speak-prepare) and gets the same kind of offer as a sync, under its own name.
-void offer_speak() {
+// Opens a session that takes one upload from the phone: a spoken message (@speak-prepare) or a firmware
+// image (@firmware-prepare). The phone asks over the bonded BLE link and gets the same kind of offer as a
+// sync, under its own name.
+void offer_upload(bool firmware) {
     char ip[16];
     uint16_t port = 0;
     char token[33];
     const char *fingerprint = nullptr;
     uint32_t count = 0, bytes = 0;
+    const char *what = firmware ? "Update" : "Broadcast";
+    char problem[96];
     if (recording_active || audio_busy || circuit_sync::is_open()) {
-        report_audio_status("Broadcast failed: Circuit is busy");
+        snprintf(problem, sizeof(problem), "%s failed: Circuit is busy", what);
+        report_audio_status(problem);
         return;
     }
     if (!can_offer_wifi_sync() || !circuit_sync::wifi_ip(ip, sizeof(ip))) {
-        report_audio_status("Broadcast needs Wi-Fi: connect Circuit and your phone to the same network");
+        snprintf(problem, sizeof(problem), "%s needs Wi-Fi: connect Circuit and your phone to the same network", what);
+        report_audio_status(problem);
         return;
     }
-    if (!circuit_sync::open_session(&port, token, sizeof(token), &fingerprint, &count, &bytes, 0, true)) {
-        report_audio_status("Broadcast failed: could not open a session");
+    if (!circuit_sync::open_session(&port, token, sizeof(token), &fingerprint, &count, &bytes, 0, !firmware, firmware)) {
+        snprintf(problem, sizeof(problem), "%s failed: could not open a session", what);
+        report_audio_status(problem);
         return;
+    }
+    if (firmware) {  // an update shows its progress on the sync screen
+        circuit_sync::state.on_progress = wifi_sync_progress;
+        show_update_screen();
+        sync_ui_percent = 0;
+        sync_ui_shown = -1;
     }
     char offer[kMaxTextBytes + 40];
-    snprintf(offer, sizeof(offer), "@speak-offer\n%s\n%u\n%s\n%s", ip, static_cast<unsigned>(port), token, fingerprint);
+    snprintf(offer, sizeof(offer), "%s\n%s\n%u\n%s\n%s", firmware ? "@firmware-offer" : "@speak-offer", ip,
+        static_cast<unsigned>(port), token, fingerprint);
     snprintf(last_offer, sizeof(last_offer), "%s", offer);
     last_offer_sent_ms = circuit_sync::now_ms();
     send_relay_request(offer);
-    ESP_LOGI(kTag, "Broadcast session offered");
+    ESP_LOGI(kTag, "%s session offered", what);
+}
+
+void offer_speak() { offer_upload(false); }
+
+void flash_sync_result(const char *text);
+
+// Installs the firmware image the phone left on the card (circuit_sync::kFirmwarePath): into the other app
+// slot, checked, then booted. The old image stays valid until the very last step, and the bootloader goes
+// back to it if the new one does not confirm itself (see mark_firmware_good). Runs on the supervisor task,
+// whose stack is in internal RAM, as flash cannot be written from the HTTP server's. Restarts on success.
+void install_firmware() {
+    firmware_installing = true;
+    const char *failure = nullptr;
+    FILE *file = fopen(circuit_sync::kFirmwarePath, "rb");
+    const esp_partition_t *slot = esp_ota_get_next_update_partition(nullptr);
+    auto *buffer = static_cast<uint8_t *>(heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    esp_ota_handle_t handle = 0;
+    size_t size = 0;
+    if (file != nullptr) {
+        fseek(file, 0, SEEK_END);
+        size = static_cast<size_t>(ftell(file));
+        fseek(file, 0, SEEK_SET);
+    }
+    if (file == nullptr || slot == nullptr || buffer == nullptr) {
+        failure = "Update failed: could not read the new firmware";
+    } else if (esp_ota_begin(slot, size, &handle) != ESP_OK) {
+        failure = "Update failed: could not prepare the update slot";
+    } else {
+        size_t done = 0, got = 0;
+        int shown = -1;
+        while ((got = fread(buffer, 1, 4096, file)) > 0) {
+            if (esp_ota_write(handle, buffer, got) != ESP_OK) {
+                failure = "Update failed: could not write the new firmware";
+                break;
+            }
+            done += got;
+            const int percent = 50 + static_cast<int>(done * 49 / size);  // 100 only once it is in place
+            if (percent != shown) {
+                shown = percent;
+                sync_ui_percent = percent;
+            }
+        }
+        if (failure != nullptr || done != size) {
+            if (failure == nullptr) failure = "Update failed: the file was cut short";
+            esp_ota_abort(handle);
+        } else if (esp_ota_end(handle) != ESP_OK) {
+            failure = "Update failed: the new firmware did not check out";
+        } else {
+            esp_app_desc_t incoming = {};
+            const esp_app_desc_t *running = esp_app_get_description();
+            if (esp_ota_get_partition_description(slot, &incoming) != ESP_OK ||
+                strncmp(incoming.project_name, running->project_name, sizeof(incoming.project_name)) != 0) {
+                failure = "Update failed: that file is not Circuit firmware";
+            } else if (esp_ota_set_boot_partition(slot) != ESP_OK) {
+                failure = "Update failed: could not switch to the new firmware";
+            } else {
+                ESP_LOGW(kTag, "Firmware %s installed, restarting", incoming.version);
+            }
+        }
+    }
+    if (file != nullptr) fclose(file);
+    if (buffer != nullptr) heap_caps_free(buffer);
+    remove(circuit_sync::kFirmwarePath);
+    if (failure != nullptr) {
+        firmware_installing = false;
+        ESP_LOGW(kTag, "%s", failure);
+        sync_ui_percent = -1;
+        flash_sync_result("ERR");
+        report_audio_status(failure);
+        return;
+    }
+    sync_ui_percent = 100;
+    report_audio_status("Update installed: Circuit is restarting");
+    vTaskDelay(pdMS_TO_TICKS(1500));  // let the phone hear the answer before the link drops
+    esp_restart();
+}
+
+// The firmware in the other app slot (the one before the last update), if it is a working Circuit image.
+// Fills `version` and the first eight hex digits of its build fingerprint.
+bool previous_firmware(char *version, size_t version_size, char *build, size_t build_size) {
+    const esp_partition_t *other = esp_ota_get_next_update_partition(nullptr);
+    esp_app_desc_t desc = {};
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    if (other == nullptr || esp_ota_get_partition_description(other, &desc) != ESP_OK ||
+        strncmp(desc.project_name, esp_app_get_description()->project_name, sizeof(desc.project_name)) != 0) {
+        return false;
+    }
+    if (esp_ota_get_state_partition(other, &state) == ESP_OK &&
+        (state == ESP_OTA_IMG_INVALID || state == ESP_OTA_IMG_ABORTED)) {
+        return false;  // the bootloader already found that one failing
+    }
+    snprintf(version, version_size, "%.31s", desc.version);
+    snprintf(build, build_size, "%02x%02x%02x%02x", desc.app_elf_sha256[0], desc.app_elf_sha256[1],
+        desc.app_elf_sha256[2], desc.app_elf_sha256[3]);
+    return true;
+}
+
+// Switches back to the previous firmware: no upload, just the boot choice and a restart.
+void revert_firmware_task(void *) {
+    char version[32], build[9];
+    if (update_busy() || audio_busy || recording_active || circuit_sync::is_open()) {
+        report_audio_status("Update failed: Circuit is busy");
+    } else if (!previous_firmware(version, sizeof(version), build, sizeof(build))) {
+        report_audio_status("Update failed: there is no previous firmware on Circuit");
+    } else if (esp_ota_set_boot_partition(esp_ota_get_next_update_partition(nullptr)) != ESP_OK) {
+        report_audio_status("Update failed: could not switch to the previous firmware");
+    } else {
+        ESP_LOGW(kTag, "Going back to firmware %s (%s), restarting", version, build);
+        firmware_installing = true;  // nothing else starts in the next moments
+        report_audio_status("Update installed: Circuit is restarting on its previous firmware");
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        esp_restart();
+    }
+    vTaskDelete(nullptr);
+}
+
+// After an update, the bootloader keeps the new image on probation: it reverts to the old one if the board
+// resets before this is called. Called once the board has been up long enough to be trusted.
+void mark_firmware_good() {
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    if (esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGW(kTag, "New firmware confirmed");
+    }
 }
 
 // Shows the sync screen briefly with `text`, then returns to idle. Used so a
@@ -1740,16 +2013,30 @@ void sync_supervisor_task(void *) {
     // Create (or load) the sync certificate now so a failure shows up at boot.
     ESP_LOGI(kTag, "Sync identity %s", circuit_sync::ensure_identity() ? "ready" : "FAILED");
     int64_t last_slow_check_ms = 0;
+    bool firmware_confirmed = false;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(500));  // a broadcast message is played as soon as it arrives
+        if (!firmware_confirmed && esp_timer_get_time() > 40LL * 1000000) {
+            mark_firmware_good();
+            firmware_confirmed = true;
+        }
         if (circuit_sync::is_open() && circuit_sync::state.speak) {
             // A broadcast session is not a sync: it ends when the message arrives or the phone gives up.
-            if (circuit_sync::state.speak_ready) {
+            if (circuit_sync::state.firmware_ready) {
+                circuit_sync::close_session();
+                install_firmware();
+            } else if (circuit_sync::state.speak_ready) {
                 circuit_sync::close_session();
                 start_speak_playback();
             } else if (circuit_sync::expired() || connection_id == UINT16_MAX) {
+                const bool update = circuit_sync::state.firmware;
                 circuit_sync::close_session();
-                report_audio_status("Broadcast failed: the phone did not send the message");
+                if (update) {
+                    sync_ui_percent = -1;
+                    flash_sync_result("ERR");
+                }
+                report_audio_status(update ? "Update failed: the phone did not send the firmware"
+                                           : "Broadcast failed: the phone did not send the message");
             } else if (circuit_sync::state.client_ip == 0 && ble_encrypted &&
                        circuit_sync::now_ms() - last_offer_sent_ms > kOfferResendMs) {
                 last_offer_sent_ms = circuit_sync::now_ms();
@@ -1789,6 +2076,10 @@ void sync_supervisor_task(void *) {
 // on the device's own screen; the app is told in a status message.
 // `only_recording` (the app's "sync this note") limits the sync to that recording; 0 syncs everything.
 void start_audio_sync(bool forced, uint32_t only_recording = 0) {
+    if (update_busy()) {
+        report_audio_status("Cannot sync while Circuit is updating");
+        return;
+    }
     if (!free_audio_from_playback()) {  // playing a note gives way; a recording does not
         report_audio_status("Audio is busy");
         return;
@@ -1988,6 +2279,26 @@ void dev_console_task(void *) {
             if (sscanf(line + 14, "%d", &ms) != 1) ms = 100;
             dev_drop_link_ms = ms;
             ESP_LOGW(kTag, "DEV drop-next-link armed: %d ms after the next connect", ms);
+        } else if (strncmp(line, "battery-set ", 12) == 0) {
+            // Pretends the charge is N% until the next real reading (about a minute): for checking the LOW
+            // header and the phone's low-battery alert without draining the cell.
+            battery_percent = atoi(line + 12);
+            refresh_status_icons();
+            send_sync_status();
+            ESP_LOGW(kTag, "DEV battery-set: showing %d%%", static_cast<int>(battery_percent));
+        } else if (strncmp(line, "update-screen", 13) == 0) {
+            // Shows the update screen at N% for a minute, without updating anything.
+            show_update_screen();
+            sync_ui_percent = line[13] == ' ' ? atoi(line + 14) : 50;
+            sync_ui_shown = -1;
+            return_to_idle_after(DeviceScreen::Syncing, 60000);
+            ESP_LOGW(kTag, "DEV update-screen: shown at %d%% for a minute", static_cast<int>(sync_ui_percent));
+        } else if (strcmp(line, "firmware-open") == 0) {
+            offer_upload(true);
+            char offer[sizeof(last_offer)];
+            snprintf(offer, sizeof(offer), "%s", last_offer);
+            for (char *c = offer; *c != '\0'; ++c) if (*c == '\n') *c = ' ';
+            ESP_LOGW(kTag, "DEV firmware-open: %s", offer);
         } else if (strcmp(line, "speak-open") == 0) {
             offer_speak();
             char offer[sizeof(last_offer)];
@@ -2288,7 +2599,7 @@ void lower_key_released(uint32_t held_ms) {
     ESP_LOGW(kTag, "DEV lower key pressed for %u ms", static_cast<unsigned>(held_ms));
 #endif
     if (held_ms >= kPowerOffHoldMs && !recording_active && active_screen != DeviceScreen::Syncing &&
-        !playback_active.load()) {
+        !playback_active.load() && !update_busy()) {
         power_off("Off\nHold the power key\nto turn on");
         return;
     }
@@ -2329,6 +2640,10 @@ void init_record_button() {
 }
 
 void start_playback() {
+    if (update_busy()) {
+        report_audio_status("Cannot play while Circuit is updating");
+        return;
+    }
     if (audio_busy) {
         update_storage_status("Audio is busy\nPlease wait");
         report_audio_status("Audio is busy");
@@ -2603,6 +2918,12 @@ void text_display_task(void *) {
                 }
             } else if (strcmp(message.value, "@speak-prepare") == 0) {
                 offer_speak();
+            } else if (strcmp(message.value, "@firmware-prepare") == 0) {
+                offer_upload(true);
+            } else if (strcmp(message.value, "@firmware-revert") == 0) {
+                if (xTaskCreate(revert_firmware_task, "fw_revert", 4096, nullptr, 4, nullptr) != pdPASS) {
+                    report_audio_status("Update failed: could not start");
+                }
             } else if (strncmp(message.value, "@sec-hello\n", 11) == 0) {
                 send_note_key_to_phone(message.value);
             } else if (strcmp(message.value, "@wifi-status") == 0) {
@@ -2987,6 +3308,10 @@ void init_display() {
         lv_img_set_src(busy_icon_obj, &circuit_icon_mic_off);
         lv_obj_align(busy_icon_obj, LV_ALIGN_TOP_LEFT, 116, 124);
         lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
+        update_cog_obj = lv_img_create(lv_screen_active());
+        lv_img_set_src(update_cog_obj, circuit_update_frames[0]);
+        lv_obj_align(update_cog_obj, LV_ALIGN_TOP_MID, 0, 38);
+        lv_obj_add_flag(update_cog_obj, LV_OBJ_FLAG_HIDDEN);
 
         // Header icons: positioned and shown by refresh_status_icons().
         icon_wifi_obj = lv_img_create(lv_screen_active());
@@ -3058,6 +3383,8 @@ void init_display() {
 
         idle_date_label = make_label(&lv_font_montserrat_12, 100, LV_TEXT_ALIGN_LEFT);
         lv_obj_set_style_text_letter_space(idle_date_label, 1, 0);
+        // Only as wide as the date: a wider box has a white background that would hide the battery number.
+        lv_obj_set_width(idle_date_label, LV_SIZE_CONTENT);
         lv_obj_align(idle_date_label, LV_ALIGN_TOP_LEFT, 8, 7);
 
         idle_time_label = make_label(&lv_font_montserrat_36, LV_SIZE_CONTENT, LV_TEXT_ALIGN_LEFT);

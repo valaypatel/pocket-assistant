@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Development helper for the Circuit board: test sync without recording by hand.
 
-  board_dev.py build            build the development firmware (adds a USB command console)
+  board_dev.py build            build the development firmware (adds a USB command console); each build gets the next number, 2.0.0-dev.N
   board_dev.py flash            stop the logger, flash the development firmware, restart the logger
   board_dev.py copy [N]         copy the N newest synced notes (default 3) as new, unsynced notes
   board_dev.py sync             offer a Wi-Fi sync to the phone now and wait for it to end
@@ -9,6 +9,9 @@
   board_dev.py drop-now         cut the current Bluetooth link at once (the phone reconnects by itself)
   board_dev.py copy-sync [N]    both: copy N notes, then sync them
   board_dev.py speak-open       open a broadcast session and print its address, port, token and fingerprint
+  board_dev.py firmware-open    open an update session and print its address, port, token and fingerprint (then PUT the .bin to /firmware)
+  board_dev.py update-screen [N]  show the firmware-update screen at N% for a minute (no update happens)
+  board_dev.py battery-set N    pretend the charge is N% for about a minute (checks the LOW header and the phone's alert)
   board_dev.py battery          the battery voltage and a rough percentage (read from the board's sense line)
   board_dev.py status           internal RAM, notes waiting, and whether it is recording / playing / syncing
   board_dev.py rec [SECONDS]    start recording (default: until rec-stop)
@@ -59,8 +62,26 @@ def idf_shell(command, cwd):
     return subprocess.call(["bash", "-c", script], cwd=cwd)
 
 
+BUILD_NUMBER_FILE = os.path.join(PROJECT, ".build-number")  # not committed: it counts builds on this machine
+VERSION_BASE = "2.0.0-dev"
+
+
+def next_version():
+    """2.0.0-dev.N, with N one higher than the last development build, so a newer build is always a bigger number."""
+    try:
+        with open(BUILD_NUMBER_FILE) as f:
+            number = int(f.read().strip()) + 1
+    except (OSError, ValueError):
+        number = 2  # the first numbered build; the old unnumbered ones were "2.0.0-dev1"
+    with open(BUILD_NUMBER_FILE, "w") as f:
+        f.write(str(number))
+    return f"{VERSION_BASE}.{number}"
+
+
 def build():
-    return idf_shell(f'idf.py -B "{BUILD_DIR}" -DCIRCUIT_DEV_CONSOLE=1 build', PROJECT)
+    version = next_version()
+    print(f"Building firmware {version}")
+    return idf_shell(f'idf.py -B "{BUILD_DIR}" -DCIRCUIT_DEV_CONSOLE=1 -DCIRCUIT_VERSION={version} build', PROJECT)
 
 
 def logger_pid_file():
@@ -155,8 +176,14 @@ def main():
         return send("status", "DEV status", 10)
     if cmd == "copy-sync":
         return send(f"copy-sync {n}", ("SYNCSTAT", "0 file(s)"), 600)
+    if cmd == "update-screen":
+        return send("update-screen" + (" " + args[1] if len(args) > 1 else ""), "DEV update-screen", 15)
+    if cmd == "firmware-open":
+        return send("firmware-open", ("DEV firmware-open", "Update failed", "Update needs"), 15)
     if cmd == "speak-open":
         return send("speak-open", ("DEV speak-open", "Broadcast failed", "Broadcast needs"), 15)
+    if cmd == "battery-set" and len(args) > 1:
+        return send("battery-set " + args[1], "DEV battery-set", 15)
     if cmd == "battery":
         return send("battery", "DEV battery", 25)
     if cmd == "status":

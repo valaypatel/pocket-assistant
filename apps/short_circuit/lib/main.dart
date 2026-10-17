@@ -17,6 +17,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
 import 'broadcast_audio.dart';
+import 'firmware_image.dart';
 
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:path_provider/path_provider.dart';
@@ -1335,6 +1336,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
 
   /// Circuit's battery, 0 to 100, from its last status; null until it has reported one.
   int? _boardBattery;
+  ({String version, String built})? _boardFirmware;
+  ({String version, String built})? _boardPrevious;
+  ({int usedKb, int totalKb})? _boardStorage;
   bool _resetNoticeShown = false;
   // What Circuit reports about its own Wi-Fi: none, connecting, connected, failed.
   String _wifiState = 'none';
@@ -1371,12 +1375,20 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   String? _syncingNoteId;
   String? _transcribingNoteId;
   bool _broadcasting = false;
+  bool _updatingFirmware = false;
+  FirmwareImage?
+  _bundledFirmwareImage; // the firmware that came with this app, once read
   int? _syncProgress;
   String _status = 'Tap Scan to find your Circuit.';
 
   @override
   void initState() {
     super.initState();
+    unawaited(
+      _bundledFirmware().then((image) {
+        if (mounted) setState(() => _bundledFirmwareImage = image);
+      }),
+    );
     WidgetsBinding.instance.addObserver(this);
     _scanSubscription = FlutterBluePlus.onScanResults.listen(
       _onScanResults,
@@ -2472,6 +2484,14 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     final battery = field('bat');
     setState(() {
       if (battery != null) _boardBattery = battery >= 0 ? battery : null;
+      _boardFirmware = FirmwareImage.runningFrom(message) ?? _boardFirmware;
+      // These two arrive together in one packet; an empty one means "none" (no earlier firmware, no card).
+      if (message.contains('\nprev=')) {
+        _boardPrevious = BoardReport.previousFrom(message);
+      }
+      if (message.contains('\nsd=')) {
+        _boardStorage = BoardReport.storageFrom(message);
+      }
       if (waiting != null) {
         if (waiting > 0 && (_boardWaiting ?? 0) == 0)
           _waitingSince = DateTime.now();
@@ -3431,6 +3451,168 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       );
     } finally {
       if (mounted) setState(() => _broadcasting = false);
+    }
+  }
+
+  /// The firmware this app was built with (assets/firmware/circuit.bin, see tool/bundle_firmware.py), or null
+  /// when the app was built without one.
+  Future<FirmwareImage?> _bundledFirmware() async {
+    try {
+      final data = await rootBundle.load('assets/firmware/circuit.bin');
+      return FirmwareImage.parse(
+        data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// "Update Circuit": installs the firmware that came with this app, after one confirmation. Circuit keeps
+  /// its old firmware until the new one is written and checked, and goes back to it by itself if the new one
+  /// fails to start.
+  Future<void> _updateCircuitFirmware() async {
+    final bundled = _bundledFirmwareImage ?? await _bundledFirmware();
+    if (!mounted) return;
+    if (bundled == null) {
+      _setStatus(
+        'This app has no firmware to install. Use "Reset Circuit firmware" to pick a file.',
+      );
+      return;
+    }
+    await _installCircuitFirmware(bundled);
+  }
+
+  /// "Reset Circuit firmware": the two other ways to change firmware, a file of your own, or the firmware
+  /// Circuit had before its last update.
+  Future<void> _resetCircuitFirmware() async {
+    final previous = _boardPrevious;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(LucideIcons.fileUp),
+              title: const Text('Choose a firmware file…'),
+              subtitle: const Text('A .bin built for Circuit'),
+              onTap: () => Navigator.pop(context, 'file'),
+            ),
+            ListTile(
+              enabled: previous != null,
+              leading: const Icon(LucideIcons.undo2),
+              title: const Text('Go back to the previous firmware'),
+              subtitle: Text(
+                previous == null
+                    ? 'Circuit has no earlier firmware stored'
+                    : previous.version,
+              ),
+              onTap: previous == null
+                  ? null
+                  : () => Navigator.pop(context, 'previous'),
+            ),
+          ],
+        ),
+      ),
+    );
+    switch (choice) {
+      case 'file':
+        final picked = await FilePicker.platform.pickFiles(withData: true);
+        final bytes = picked?.files.single.bytes;
+        if (bytes == null || !mounted) return;
+        try {
+          await _installCircuitFirmware(FirmwareImage.parse(bytes));
+        } on FormatException catch (error) {
+          _setStatus(error.message);
+        }
+      case 'previous':
+        await _revertCircuitFirmware();
+    }
+  }
+
+  /// Confirms, then sends [image] to Circuit, which installs it and restarts.
+  Future<void> _installCircuitFirmware(FirmwareImage image) async {
+    if (!mounted) return;
+    final running = _boardFirmware;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Install firmware ${image.version}?'),
+        content: Text(
+          '${running == null ? '' : 'On Circuit now: ${running.version}\n'}'
+          'This file: ${image.version}\n'
+          '${running == null ? '' : '\nThis is ${FirmwareImage.relation(image.version, running.version)} what is on Circuit.${image.version == running.version && !image.sameBuildAs(running) ? ' (A different build of it.)' : ''}\n'}\n'
+          'Circuit restarts when it is done, about a minute. It cannot record or switch off while it updates, '
+          'so keep it powered and on the same Wi-Fi as this phone. If the new firmware does not start, Circuit '
+          'goes back to the old one.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Install'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _updatingFirmware = true);
+    try {
+      _setStatus('Sending the update to Circuit…');
+      await _relayChannel.invokeMethod<bool>('requestLocalNetwork');
+      final problem = await _relayChannel.invokeMethod<String>('updateBoard', {
+        'bytes': image.bytes,
+      });
+      _setStatus(
+        problem == null
+            ? 'Circuit is installing the update and will restart'
+            : 'Update failed: $problem',
+      );
+    } catch (error) {
+      _setStatus(
+        'Update failed: ${error.toString().replaceFirst('Exception: ', '')}',
+      );
+    } finally {
+      if (mounted) setState(() => _updatingFirmware = false);
+    }
+  }
+
+  /// Asks Circuit to switch to the firmware it had before the last update. Nothing is sent: the old
+  /// firmware is still in its other slot.
+  Future<void> _revertCircuitFirmware() async {
+    final previous = _boardPrevious;
+    if (previous == null || !mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Go back to the previous firmware?'),
+        content: Text(
+          'Circuit switches to ${FirmwareImage.describe(previous.version, previous.built)} and restarts, '
+          'about 10 seconds. Your notes and settings stay as they are.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Go back'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await _writeCircuit('@firmware-revert');
+      _setStatus('Asking Circuit to go back to its previous firmware…');
+    } catch (error) {
+      _setStatus('Could not ask Circuit: $error');
     }
   }
 

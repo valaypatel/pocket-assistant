@@ -49,3 +49,6 @@ app.*.map.json
 
 # Firebase config comes from the console (or CI secret); never committed.
 android/app/google-services.json
+
+# Firmware copied in for "Update Circuit" by tool/bundle_firmware.py
+/assets/firmware/*.bin

@@ -22,6 +22,9 @@
 //   POST /ack/<id>     marks the note synced (the file stays on the card)
 //   PUT  /speak        (speak sessions only, which serve nothing else) a short 16 kHz mono 16-bit WAV
 //                      the phone wants played on the board; it is kept just long enough to play
+//   PUT  /firmware     (firmware sessions only, which serve nothing else) a new firmware image. It is
+//                      kept on the card until the supervisor task installs it (flash is never written
+//                      from the server task, whose stack is in PSRAM)
 
 #include <arpa/inet.h>
 #include <cstdint>
@@ -74,6 +77,9 @@ constexpr size_t kMaxListed = 48;
 constexpr char kSpeakPath[] = "/sdcard/SPEAK.WAV";
 constexpr size_t kSpeakHeaderBytes = 44;
 constexpr size_t kMaxSpeakBytes = kSpeakHeaderBytes + 16000 * 2 * 30;  // 30 seconds
+constexpr char kFirmwarePath[] = "/sdcard/FIRMWARE.BIN";
+constexpr size_t kMinFirmwareBytes = 256 * 1024;
+constexpr size_t kMaxFirmwareBytes = 0x320000 - 0x1000;  // an app slot (partitions.csv), less a sector
 constexpr char kTokenHeader[] = "X-Circuit-Token";
 constexpr char kNvsNamespace[] = "circuit_tls";
 
@@ -95,8 +101,10 @@ struct State {
     uint32_t only_recording = 0;  // sync just this recording (its board number); 0 = everything waiting
     uint32_t served_bytes = 0;
     uint32_t acked = 0;
-    bool speak = false;                 // a session that only takes one spoken message from the phone
+    bool speak = false;                 // a session that only takes one upload from the phone (a message or firmware)
+    bool firmware = false;              // ... and that upload is a firmware image
     volatile bool speak_ready = false;  // the message has arrived whole at kSpeakPath
+    volatile bool firmware_ready = false;  // the image has arrived whole at kFirmwarePath
     // Set by the application. Called from the HTTP server task.
     void (*on_progress)(uint32_t percent) = nullptr;
 };
@@ -431,6 +439,40 @@ inline esp_err_t speak_handler(httpd_req_t *req) {
     return httpd_resp_send(req, "ok", 2);
 }
 
+// Takes a firmware image: written to the card as it arrives. The caller (a task with its stack in internal
+// RAM) installs it after the session closes.
+inline esp_err_t firmware_handler(httpd_req_t *req) {
+    if (!authorize(req)) return ESP_FAIL;
+    State &s = state;
+    const size_t total = req->content_len;
+    if (!s.firmware || s.firmware_ready || total < kMinFirmwareBytes || total > kMaxFirmwareBytes) return ESP_FAIL;
+    auto *buffer = static_cast<uint8_t *>(heap_caps_malloc(kChunkBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    FILE *file = buffer != nullptr ? fopen(kFirmwarePath, "wb") : nullptr;
+    bool ok = file != nullptr;
+    size_t left = total;
+    int timeouts = 0;
+    bool first = true;
+    while (ok && left > 0) {
+        const int got = httpd_req_recv(req, reinterpret_cast<char *>(buffer), left < kChunkBytes ? left : kChunkBytes);
+        if (got == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 3) continue;
+        if (got <= 0 || fwrite(buffer, 1, got, file) != static_cast<size_t>(got)) { ok = false; break; }
+        if (first && buffer[0] != 0xE9) { ok = false; break; }  // not an ESP image
+        first = false;
+        left -= got;
+        s.last_activity_ms = now_ms();
+        // The first half of the progress figure: the image arriving (the second half is it being installed).
+        if (s.on_progress != nullptr) s.on_progress(static_cast<uint32_t>((total - left) * 50 / total));
+    }
+    if (file != nullptr && fclose(file) != 0) ok = false;
+    if (buffer != nullptr) heap_caps_free(buffer);
+    if (!ok) {
+        remove(kFirmwarePath);
+        return ESP_FAIL;
+    }
+    s.firmware_ready = true;
+    return httpd_resp_send(req, "ok", 2);
+}
+
 inline esp_err_t not_found_handler(httpd_req_t *, httpd_err_code_t) {
     note_bad_attempt();
     return ESP_FAIL;  // close the connection with no response
@@ -461,6 +503,7 @@ inline void close_session() {
     state.client_ip = 0;
     state.only_recording = 0;
     state.speak = false;
+    state.firmware = false;
 }
 
 // Files still waiting that this session is for: one recording's, or everything's.
@@ -469,17 +512,21 @@ inline size_t waiting_in_session() { return circuit_notes::count_unsynced_of(sta
 // Starts a session. On success fills the port, token and fingerprint the app
 // needs, and the number and size of notes waiting.
 inline bool open_session(uint16_t *port, char *token, size_t token_size, const char **fingerprint,
-                         uint32_t *note_count, uint32_t *total_bytes, uint32_t only_recording = 0, bool speak = false) {
+                         uint32_t *note_count, uint32_t *total_bytes, uint32_t only_recording = 0, bool speak = false,
+                         bool firmware = false) {
     State &s = state;
     log_heap("sync: before session");
     if (is_open() || locked_out() || token_size < sizeof(s.token) || !ensure_identity()) return false;
     log_heap("sync: identity ready");
 
     circuit_notes::Note notes[kMaxListed];
-    const size_t count = speak ? 0 : circuit_notes::list_unsynced_of(notes, kMaxListed, only_recording);
-    if (count == 0 && !speak) return false;
-    s.speak = speak;
+    const bool upload = speak || firmware;
+    const size_t count = upload ? 0 : circuit_notes::list_unsynced_of(notes, kMaxListed, only_recording);
+    if (count == 0 && !upload) return false;
+    s.speak = upload;
+    s.firmware = firmware;
     s.speak_ready = false;
+    s.firmware_ready = false;
     s.only_recording = only_recording;
     s.total_bytes = 0;
     for (size_t i = 0; i < count; ++i) s.total_bytes += notes[i].bytes;
@@ -514,12 +561,15 @@ inline bool open_session(uint16_t *port, char *token, size_t token_size, const c
         return false;
     }
     log_heap("sync: server up");
+    static const httpd_uri_t firmware_uri = {.uri = "/firmware", .method = HTTP_PUT, .handler = firmware_handler, .user_ctx = nullptr};
     static const httpd_uri_t speak_uri = {.uri = "/speak", .method = HTTP_PUT, .handler = speak_handler, .user_ctx = nullptr};
     static const httpd_uri_t list = {.uri = "/notes", .method = HTTP_GET, .handler = list_handler, .user_ctx = nullptr};
     static const httpd_uri_t note = {.uri = "/notes/*", .method = HTTP_GET, .handler = note_handler, .user_ctx = nullptr};
     static const httpd_uri_t ack = {.uri = "/ack/*", .method = HTTP_POST, .handler = ack_handler, .user_ctx = nullptr};
     static const httpd_uri_t moments = {.uri = "/moments/*", .method = HTTP_GET, .handler = moments_handler, .user_ctx = nullptr};
-    if (speak) {
+    if (firmware) {
+        httpd_register_uri_handler(s.server, &firmware_uri);
+    } else if (speak) {
         httpd_register_uri_handler(s.server, &speak_uri);
     } else {
         httpd_register_uri_handler(s.server, &list);

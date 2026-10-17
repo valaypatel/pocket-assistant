@@ -229,6 +229,17 @@ class MainActivity : FlutterActivity() {
                     "takeReminderEvents" -> result.success(Reminders.takeEvents(this))
                     "talkStart" -> result.success(TalkRecorder.start())
                     "talkStop" -> result.success(TalkRecorder.stop())
+                    "updateBoard" -> {
+                        val bytes = call.argument<ByteArray>("bytes")
+                        if (bytes == null) {
+                            result.error("missing_bytes", "No firmware to send", null)
+                        } else {
+                            Thread {
+                                val problem = CircuitRelayService.updateBoard(bytes)
+                                runOnUiThread { result.success(problem) }
+                            }.start()
+                        }
+                    }
                     "speakOnBoard" -> {
                         val bytes = call.argument<ByteArray>("bytes")
                         if (bytes == null) {
