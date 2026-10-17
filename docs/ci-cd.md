@@ -211,6 +211,32 @@ touched by that. This was checked by reading the `nvs` region before and after: 
 The flash script also writes `--flash_size 8MB`, so a board that really has only 4 MB of flash is
 not supported.
 
+## Firmware versions, and updating over Wi-Fi
+
+The firmware reports its version to the phone, and the app's **Update Circuit** installs the firmware that came
+inside the app, over Wi-Fi, with no cable. The version is decided in one place per kind of build:
+
+| Build | Version | Where |
+|---|---|---|
+| Made by hand (`tools/board_dev.py build`) | `2.0.0-dev.N`, one higher every build | counted in `firmware/CircuitBleDisplay/.build-number`, not committed |
+| CI, a push or pull request | `2.0.<run number>`, which only goes up | `firmware.yml` |
+| CI, a tag `firmware-vX.Y.Z` | `X.Y.Z` | `firmware.yml` |
+
+The app compares versions as numbers, and a `-dev` build is older than the release with the same numbers, so it
+can say whether a file is newer or older than what is on the board. The board also reports the first eight
+digits of its build fingerprint, which tells two builds of one version apart.
+
+`app.yml` bundles the newest firmware build that the Firmware workflow made on the same branch (or on
+`development`, then `main`) into the app, using `apps/short_circuit/tool/bundle_firmware.py`, without
+rebuilding it. If there is none, the app is built without one and still works. That is why `firmware.yml` also
+runs on pushes to `development` and keeps its artifact for 30 days. A build on your own machine does the same
+with `tool/bundle_firmware.py <path to the .bin>` before `flutter build`.
+
+An update needs the board to start, so a board with no working firmware still needs the USB cable. The first
+USB flash of a board that has never been updated this way must include the bootloader (the build's `flash_args`
+lists everything), because the bootloader now has rollback switched on: a new image that does not confirm itself
+within 40 seconds is replaced by the old one.
+
 ## Flashing a build from GitHub
 
 `firmware/CircuitBleDisplay/tools/flash-release.sh` downloads a firmware build and flashes the

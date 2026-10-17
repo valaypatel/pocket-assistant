@@ -68,6 +68,9 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read # to fetch the newest firmware build
     defaults:
       run:
         working-directory: apps/short_circuit
@@ -90,6 +93,28 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - run: flutter pub get
+
+      - name: Bundle the newest firmware
+        # "Update Circuit" in the app installs the firmware that came with it. This takes the newest build the
+        # Firmware workflow made on this branch (or on development, then main), without rebuilding it. If there
+        # is none, the app is built without one and still works; it just offers only the other choices.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          for branch in "$BRANCH" development main; do
+            run_id=$(gh run list --workflow firmware.yml --branch "$branch" --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
+            [[ -n "$run_id" ]] || continue
+            rm -rf "$RUNNER_TEMP/firmware"
+            if gh run download "$run_id" --name circuit-firmware --dir "$RUNNER_TEMP/firmware" 2>/dev/null; then
+              if python3 tool/bundle_firmware.py "$RUNNER_TEMP/firmware/circuit-app.bin"; then
+                echo "Bundled the firmware from the $branch build (run $run_id)."
+                exit 0
+              fi
+            fi
+          done
+          echo "::notice::No firmware build to bundle: the app is built without one."
 
       - name: Add the Firebase config
         # Not a secret as such, but kept out of the repository. Without it the build
