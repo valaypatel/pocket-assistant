@@ -25,11 +25,16 @@ inline adc_cali_handle_t cali = nullptr;
 /// Charge left in a single lithium-polymer cell, 0 to 100, from its resting voltage in millivolts. The curve
 /// is the usual rough one (a cell spends most of its life between 3.7 and 4.0 V); it is a guide, not a gauge:
 /// voltage sags under load and rises while charging.
+///
+/// The top of the curve is this board's, not the textbook 4.2 V: its charger stops when the cell rests at about
+/// 4.12 V (some of the 4.2 V it regulates to is lost in the wiring and the cell's protection circuit), so that
+/// is what "fully charged" reads. Otherwise a full board would show 95 and look as though it was losing charge
+/// the moment USB came out.
 inline int percent_from_mv(int mv) {
     struct Point { int mv; int percent; };
     static constexpr Point curve[] = {
         {3300, 0}, {3500, 5}, {3600, 15}, {3700, 35}, {3800, 55},
-        {3900, 70}, {4000, 83}, {4100, 94}, {4200, 100},
+        {3900, 70}, {4000, 85}, {4100, 98}, {4120, 100},
     };
     if (mv <= curve[0].mv) return 0;
     for (size_t i = 1; i < sizeof(curve) / sizeof(curve[0]); i++) {
