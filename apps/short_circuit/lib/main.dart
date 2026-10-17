@@ -15,6 +15,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+
+import 'broadcast_audio.dart';
+import 'firmware_image.dart';
+
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -37,6 +41,7 @@ part 'phone_recording.dart';
 part 'secure_notes.dart';
 part 'ui/backup_page.dart';
 part 'ui/capture_dock.dart';
+part 'ui/broadcast_dialog.dart';
 part 'ui/chat_page.dart';
 part 'ui/detail_pages.dart';
 part 'ui/onboarding.dart';
@@ -59,6 +64,9 @@ const _notesKey = 'circuit_notes';
 const _geminiApiKey = 'gemini_api_key';
 const _geminiModelKey = 'gemini_model';
 const _defaultGeminiModel = 'gemini-3.5-flash-lite';
+
+/// The model that turns text into speech for Broadcast (separate from the one that reads notes).
+const _speechModel = 'gemini-2.5-flash-preview-tts';
 const _aiApiKey = 'hermes_api_key';
 const _aiBaseUrlKey = 'hermes_base_url';
 const _aiModelKey = 'hermes_model';
@@ -223,6 +231,45 @@ class GeminiClient {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('Gemini ${response.statusCode}: ${response.body}');
     }
+  }
+
+  /// Speaks [text] with Gemini and returns a clip Circuit can play (see broadcast_audio.dart).
+  Future<Uint8List> speakWav(String text) async {
+    final key = await apiKey();
+    if (key == null || key.trim().isEmpty) {
+      throw Exception('Add a Gemini API key in Settings first.');
+    }
+    final uri = Uri.parse(
+      'https://generativelanguage.googleapis.com/v1beta/models/'
+      '$_speechModel:generateContent?key=${Uri.encodeQueryComponent(key)}',
+    );
+    final response = await http
+        .post(
+          uri,
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'contents': [
+              {
+                'parts': [
+                  {'text': text},
+                ],
+              },
+            ],
+            'generationConfig': {
+              'responseModalities': ['AUDIO'],
+              'speechConfig': {
+                'voiceConfig': {
+                  'prebuiltVoiceConfig': {'voiceName': 'Charon'},
+                },
+              },
+            },
+          }),
+        )
+        .timeout(const Duration(seconds: 60));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Gemini ${response.statusCode}: ${response.body}');
+    }
+    return broadcastWavFromGeminiReply(response.body);
   }
 
   Future<GeminiTranscription> transcribeWav(
@@ -1286,6 +1333,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   DateTime? _waitingSince;
   int? _boardReset; // esp_reset_reason of Circuit's last start
   int _boardUptime = 0;
+
+  /// Circuit's battery, 0 to 100, from its last status; null until it has reported one.
+  int? _boardBattery;
+  ({String version, String built})? _boardFirmware;
+  ({String version, String built})? _boardPrevious;
+  ({int usedKb, int totalKb})? _boardStorage;
   bool _resetNoticeShown = false;
   // What Circuit reports about its own Wi-Fi: none, connecting, connected, failed.
   String _wifiState = 'none';
@@ -1321,12 +1374,21 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   String? _lastAudioStatus;
   String? _syncingNoteId;
   String? _transcribingNoteId;
+  bool _broadcasting = false;
+  bool _updatingFirmware = false;
+  FirmwareImage?
+  _bundledFirmwareImage; // the firmware that came with this app, once read
   int? _syncProgress;
   String _status = 'Tap Scan to find your Circuit.';
 
   @override
   void initState() {
     super.initState();
+    unawaited(
+      _bundledFirmware().then((image) {
+        if (mounted) setState(() => _bundledFirmwareImage = image);
+      }),
+    );
     WidgetsBinding.instance.addObserver(this);
     _scanSubscription = FlutterBluePlus.onScanResults.listen(
       _onScanResults,
@@ -2419,7 +2481,17 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     final waiting = field('waiting');
     final reset = field('reset');
     final uptime = field('uptime');
+    final battery = field('bat');
     setState(() {
+      if (battery != null) _boardBattery = battery >= 0 ? battery : null;
+      _boardFirmware = FirmwareImage.runningFrom(message) ?? _boardFirmware;
+      // These two arrive together in one packet; an empty one means "none" (no earlier firmware, no card).
+      if (message.contains('\nprev=')) {
+        _boardPrevious = BoardReport.previousFrom(message);
+      }
+      if (message.contains('\nsd=')) {
+        _boardStorage = BoardReport.storageFrom(message);
+      }
       if (waiting != null) {
         if (waiting > 0 && (_boardWaiting ?? 0) == 0)
           _waitingSince = DateTime.now();
@@ -3343,6 +3415,204 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       }
     } finally {
       _identifyingSongs.remove(id);
+    }
+  }
+
+  /// Broadcasts a message out of Circuit's speaker: typed text that Gemini speaks, or your own voice held
+  /// to talk. Nothing is saved: Circuit plays the clip and deletes it.
+  Future<void> _broadcastToCircuit() async {
+    final choice = await showDialog<_BroadcastChoice>(
+      context: context,
+      builder: (context) => const _BroadcastDialog(),
+    );
+    if (choice == null || !mounted) return;
+    setState(() => _broadcasting = true);
+    try {
+      final Uint8List wav;
+      if (choice.speech != null) {
+        wav = broadcastWav(choice.speech!, sourceRate: 16000);
+      } else {
+        _setStatus('Making the voice message…');
+        wav = await _gemini.speakWav(choice.text!);
+      }
+      _setStatus('Sending it to Circuit…');
+      await _relayChannel.invokeMethod<bool>('requestLocalNetwork');
+      final problem = await _relayChannel.invokeMethod<String>('speakOnBoard', {
+        'bytes': wav,
+      });
+      _setStatus(
+        problem == null
+            ? 'Circuit is playing your message'
+            : 'Broadcast failed: $problem',
+      );
+    } catch (error) {
+      _setStatus(
+        'Broadcast failed: ${error.toString().replaceFirst('Exception: ', '').replaceFirst('Bad state: ', '')}',
+      );
+    } finally {
+      if (mounted) setState(() => _broadcasting = false);
+    }
+  }
+
+  /// The firmware this app was built with (assets/firmware/circuit.bin, see tool/bundle_firmware.py), or null
+  /// when the app was built without one.
+  Future<FirmwareImage?> _bundledFirmware() async {
+    try {
+      final data = await rootBundle.load('assets/firmware/circuit.bin');
+      return FirmwareImage.parse(
+        data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// "Update Circuit": installs the firmware that came with this app, after one confirmation. Circuit keeps
+  /// its old firmware until the new one is written and checked, and goes back to it by itself if the new one
+  /// fails to start.
+  Future<void> _updateCircuitFirmware() async {
+    final bundled = _bundledFirmwareImage ?? await _bundledFirmware();
+    if (!mounted) return;
+    if (bundled == null) {
+      _setStatus(
+        'This app has no firmware to install. Use "Reset Circuit firmware" to pick a file.',
+      );
+      return;
+    }
+    await _installCircuitFirmware(bundled);
+  }
+
+  /// "Reset Circuit firmware": the two other ways to change firmware, a file of your own, or the firmware
+  /// Circuit had before its last update.
+  Future<void> _resetCircuitFirmware() async {
+    final previous = _boardPrevious;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(LucideIcons.fileUp),
+              title: const Text('Choose a firmware file…'),
+              subtitle: const Text('A .bin built for Circuit'),
+              onTap: () => Navigator.pop(context, 'file'),
+            ),
+            ListTile(
+              enabled: previous != null,
+              leading: const Icon(LucideIcons.undo2),
+              title: const Text('Go back to the previous firmware'),
+              subtitle: Text(
+                previous == null
+                    ? 'Circuit has no earlier firmware stored'
+                    : previous.version,
+              ),
+              onTap: previous == null
+                  ? null
+                  : () => Navigator.pop(context, 'previous'),
+            ),
+          ],
+        ),
+      ),
+    );
+    switch (choice) {
+      case 'file':
+        final picked = await FilePicker.platform.pickFiles(withData: true);
+        final bytes = picked?.files.single.bytes;
+        if (bytes == null || !mounted) return;
+        try {
+          await _installCircuitFirmware(FirmwareImage.parse(bytes));
+        } on FormatException catch (error) {
+          _setStatus(error.message);
+        }
+      case 'previous':
+        await _revertCircuitFirmware();
+    }
+  }
+
+  /// Confirms, then sends [image] to Circuit, which installs it and restarts.
+  Future<void> _installCircuitFirmware(FirmwareImage image) async {
+    if (!mounted) return;
+    final running = _boardFirmware;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Install firmware ${image.version}?'),
+        content: Text(
+          '${running == null ? '' : 'On Circuit now: ${running.version}\n'}'
+          'This file: ${image.version}\n'
+          '${running == null ? '' : '\nThis is ${FirmwareImage.relation(image.version, running.version)} what is on Circuit.${image.version == running.version && !image.sameBuildAs(running) ? ' (A different build of it.)' : ''}\n'}\n'
+          'Circuit restarts when it is done, about a minute. It cannot record or switch off while it updates, '
+          'so keep it powered and on the same Wi-Fi as this phone. If the new firmware does not start, Circuit '
+          'goes back to the old one.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Install'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _updatingFirmware = true);
+    try {
+      _setStatus('Sending the update to Circuit…');
+      await _relayChannel.invokeMethod<bool>('requestLocalNetwork');
+      final problem = await _relayChannel.invokeMethod<String>('updateBoard', {
+        'bytes': image.bytes,
+      });
+      _setStatus(
+        problem == null
+            ? 'Circuit is installing the update and will restart'
+            : 'Update failed: $problem',
+      );
+    } catch (error) {
+      _setStatus(
+        'Update failed: ${error.toString().replaceFirst('Exception: ', '')}',
+      );
+    } finally {
+      if (mounted) setState(() => _updatingFirmware = false);
+    }
+  }
+
+  /// Asks Circuit to switch to the firmware it had before the last update. Nothing is sent: the old
+  /// firmware is still in its other slot.
+  Future<void> _revertCircuitFirmware() async {
+    final previous = _boardPrevious;
+    if (previous == null || !mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Go back to the previous firmware?'),
+        content: Text(
+          'Circuit switches to ${FirmwareImage.describe(previous.version, previous.built)} and restarts, '
+          'about 10 seconds. Your notes and settings stay as they are.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Go back'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await _writeCircuit('@firmware-revert');
+      _setStatus('Asking Circuit to go back to its previous firmware…');
+    } catch (error) {
+      _setStatus('Could not ask Circuit: $error');
     }
   }
 

@@ -8,7 +8,7 @@ on:
       - "docs/security/reference/**"
       - ".github/workflows/firmware.yml"
   push:
-    branches: [main]
+    branches: [main, development]  # development too: the app bundles the newest build from here
     paths:
       - "firmware/**"
       - "docs/security/test-vectors.json" # the vectors both sides check against; the README alone does not rebuild
@@ -60,20 +60,34 @@ jobs:
           idf.py reconfigure
           ls managed_components
 
+      - name: Work out the version
+        id: version
+        # The firmware's own version, shown on the board and in the app. A release is the tag's number; any
+        # other build is 2.0.<run number>, which only ever goes up, so the app can tell which of two builds is
+        # newer. (A build made by hand on a machine is 2.0.0-dev.N, see tools/board_dev.py.)
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/firmware-v* ]]; then
+            version="${GITHUB_REF_NAME#firmware-v}"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::The tag must look like firmware-v1.2.3"; exit 1; }
+          else
+            version="2.0.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "name=$version" >> "$GITHUB_OUTPUT"
+
       - name: Build
         working-directory: firmware/CircuitBleDisplay
         run: |
           . "$IDF_PATH/export.sh" > /dev/null
-          idf.py build
+          idf.py -DCIRCUIT_VERSION="${{ steps.version.outputs.name }}" build
 
       - name: Report size and versions
         working-directory: firmware/CircuitBleDisplay
         run: |
           . "$IDF_PATH/export.sh" > /dev/null
           app_bytes=$(stat -c %s build/circuit_ble_display.bin)
-          part_bytes=$((0x3f0000))
+          part_bytes=$((0x320000))  # an app slot (partitions.csv has two, for updates over Wi-Fi)
           {
-            echo "### Firmware build"
+            echo "### Firmware build ${{ steps.version.outputs.name }}"
             echo "- App: $((app_bytes / 1024)) KiB of $((part_bytes / 1024)) KiB ($((100 * app_bytes / part_bytes))%)"
             echo "- ESP-IDF: \`$(idf.py --version 2>/dev/null | tail -1)\`"
             echo "- LVGL: \`$(grep -m1 '^version' "../../$WAVESHARE_PROJECT/managed_components/lvgl__lvgl/idf_component.yml" | cut -d' ' -f2)\`"
@@ -100,7 +114,7 @@ jobs:
         with:
           name: circuit-firmware
           path: dist/
-          retention-days: 7
+          retention-days: 30  # the app build bundles the newest one
           if-no-files-found: error
 
   release:

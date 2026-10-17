@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:short_circuit/main.dart';
 
@@ -94,6 +95,30 @@ void main() {
     expect(find.text('Bluetooth address'), findsNothing);
     expect(find.text('Wi-Fi MAC address'), findsNothing);
     await close(tester);
+  });
+
+  testWidgets('the Circuit page shows the battery Circuit reports', (
+    tester,
+  ) async {
+    await open(tester);
+    await status(
+      tester,
+      '@sync-status\nwaiting=0\nreset=1\nuptime=500\nbat=85',
+    );
+    expect(find.text('Battery 85%'), findsOneWidget);
+    await status(
+      tester,
+      '@sync-status\nwaiting=0\nreset=1\nuptime=600\nbat=10',
+    );
+    expect(find.text('Battery 10% · charge soon'), findsOneWidget);
+    await close(tester);
+  });
+
+  test('the battery icon follows the charge', () {
+    expect(batteryIconFor(100), LucideIcons.batteryFull);
+    expect(batteryIconFor(60), LucideIcons.batteryMedium);
+    expect(batteryIconFor(30), LucideIcons.batteryLow);
+    expect(batteryIconFor(5), LucideIcons.batteryWarning);
   });
 
   testWidgets('a note still waiting for its audio is never called synced', (

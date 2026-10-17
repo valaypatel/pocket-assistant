@@ -29,6 +29,12 @@ if(CIRCUIT_BOND_PATCHED EQUAL -1)
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-# Shown in the boot log and, later, to the app. Bump it for each firmware release.
-set(PROJECT_VER "2.0.0-dev1")
+# Shown in the boot log and in the app. A release build keeps this number (bump it for each release); a
+# development build gets "2.0.0-dev.N", with N one higher for every build, from tools/board_dev.py, so the
+# phone can say which of two builds is newer.
+if(CIRCUIT_VERSION)
+    set(PROJECT_VER "${CIRCUIT_VERSION}")
+else()
+    set(PROJECT_VER "2.0.0-dev1")
+endif()
 project(circuit_ble_display)

@@ -17,6 +17,15 @@ const _months = [
 
 String _two(int value) => value.toString().padLeft(2, '0');
 
+/// The battery icon that best matches [percent].
+IconData batteryIconFor(int percent) => percent >= 85
+    ? LucideIcons.batteryFull
+    : percent >= 50
+    ? LucideIcons.batteryMedium
+    : percent >= 20
+    ? LucideIcons.batteryLow
+    : LucideIcons.batteryWarning;
+
 String _dayLabel(DateTime value) {
   final local = value.toLocal();
   final now = DateTime.now();
@@ -1401,6 +1410,71 @@ extension _ScPages on _CircuitHomePageState {
 
   /// The Circuit tab. One status card says whether it is connected and what is waiting; below it only
   /// what can be done right now (connect, or record and manage), and the technical details are folded away.
+  /// "Battery 85%" with an icon that follows the charge; red when it is nearly flat.
+  Widget _batteryLine(int percent) {
+    final low = percent <= 15;
+    final color = low ? context.sc.danger : context.sc.muted;
+    return Semantics(
+      label: 'Circuit battery $percent percent${low ? ', low' : ''}',
+      excludeSemantics: true,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(batteryIconFor(percent), size: 16, color: color),
+          const SizedBox(width: ScSpace.xs),
+          Flexible(
+            child: Text(
+              'Battery $percent%${low ? ' · charge soon' : ''}',
+              style: ScType.caption.copyWith(color: color),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// What Circuit runs, and whether the app has something newer for it.
+  String _firmwareCaption() {
+    final running = _boardFirmware;
+    final bundled = _bundledFirmwareImage;
+    if (running == null) return 'Install the firmware that came with this app';
+    if (bundled == null) return 'Firmware ${running.version}';
+    final relation = FirmwareImage.compareVersions(
+      bundled.version,
+      running.version,
+    );
+    if (relation > 0) {
+      return 'Firmware ${running.version} · ${bundled.version} is available';
+    }
+    return relation == 0 && bundled.sameBuildAs(running)
+        ? 'Firmware ${running.version} · up to date'
+        : 'Firmware ${running.version}';
+  }
+
+  /// "Card 3.1 GB of 29.7 GB used", red when it is nearly full.
+  Widget _storageLine(({int usedKb, int totalKb}) card) {
+    final full = card.usedKb / card.totalKb > 0.9;
+    final color = full ? context.sc.danger : context.sc.muted;
+    final text = 'Card ${BoardReport.describeStorage(card)}';
+    return Semantics(
+      label: text,
+      excludeSemantics: true,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(LucideIcons.hardDrive, size: 16, color: color),
+          const SizedBox(width: ScSpace.xs),
+          Flexible(
+            child: Text(
+              '$text${full ? ' · free up space' : ''}',
+              style: ScType.caption.copyWith(color: color),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   List<Widget> _circuitPage() {
     final available = _circuitAvailable;
     final waiting = _waitingCount;
@@ -1479,6 +1553,14 @@ extension _ScPages on _CircuitHomePageState {
                       detail,
                       style: ScType.caption.copyWith(color: context.sc.muted),
                     ),
+                    if (available && _boardBattery != null) ...[
+                      const SizedBox(height: ScSpace.xs),
+                      _batteryLine(_boardBattery!),
+                    ],
+                    if (available && _boardStorage != null) ...[
+                      const SizedBox(height: ScSpace.xs),
+                      _storageLine(_boardStorage!),
+                    ],
                   ],
                 ),
               ),
@@ -1626,6 +1708,40 @@ extension _ScPages on _CircuitHomePageState {
                     size: 18,
                     color: context.sc.muted,
                   ),
+          ),
+        ),
+        ScRow(
+          title: 'Broadcast a message',
+          caption: 'Type it and Circuit says it out loud',
+          onTap: idle && !_broadcasting ? _broadcastToCircuit : null,
+          trailing: _broadcasting
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Icon(LucideIcons.megaphone, size: 18, color: context.sc.muted),
+        ),
+        ScRow(
+          title: 'Update Circuit',
+          caption: _firmwareCaption(),
+          onTap: idle && !_updatingFirmware ? _updateCircuitFirmware : null,
+          trailing: _updatingFirmware
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Icon(LucideIcons.download, size: 18, color: context.sc.muted),
+        ),
+        ScRow(
+          title: 'Reset Circuit firmware',
+          caption: 'Choose a file, or go back to the previous firmware',
+          onTap: idle && !_updatingFirmware ? _resetCircuitFirmware : null,
+          trailing: Icon(
+            LucideIcons.rotateCcw,
+            size: 18,
+            color: context.sc.muted,
           ),
         ),
         ScRow(

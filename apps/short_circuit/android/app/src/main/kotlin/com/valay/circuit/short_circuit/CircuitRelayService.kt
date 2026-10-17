@@ -92,6 +92,18 @@ class CircuitRelayService : Service() {
         }
 
         fun writeToCircuit(value: String): Boolean = activeService?.writeCommand(value) ?: false
+
+        /** Sends a spoken message for Circuit to play. Null when Circuit took it, else why not. */
+        fun speakToBoard(wav: ByteArray): String? {
+            val service = activeService ?: return "Circuit is not connected"
+            return service.upload("speak", wav)
+        }
+
+        /** Sends a firmware image for Circuit to install and restart into. Null when Circuit took it, else why not. */
+        fun updateBoard(image: ByteArray): String? {
+            val service = activeService ?: return "Circuit is not connected"
+            return service.upload("firmware", image)
+        }
         // Playback does not need the relay to be running; see NotePlayer.
         fun playSyncedRecording(path: String): Boolean = NotePlayer.playFile(path)
         fun playWavBytes(bytes: ByteArray): Boolean = NotePlayer.playBytes(bytes)
@@ -486,6 +498,7 @@ class CircuitRelayService : Service() {
         }
         if (request.startsWith("@sync-status\n")) {
             Diagnostics.boardHealth(this, request)
+            BoardBattery.onStatus(this, request)
             // Board health and playback snapshots belong to Dart as well as diagnostics.
             // Keep them separate from the last audio event, which is replayed on reopening.
             audioStatusListener?.invoke(request)
@@ -508,8 +521,18 @@ class CircuitRelayService : Service() {
             handleSyncOffer(request)
             return
         }
+        if (request.startsWith("@speak-offer\n") || request.startsWith("@firmware-offer\n")) {
+            speakOffer?.complete(request)
+            return
+        }
         if (request.startsWith("@audio-status\n")) {
-            publishAudioStatus(request.substringAfter("@audio-status\n"))
+            val status = request.substringAfter("@audio-status\n")
+            if (status.startsWith("Broadcast failed") || status.startsWith("Broadcast needs") ||
+                status.startsWith("Update failed") || status.startsWith("Update needs")
+            ) {
+                speakOffer?.completeExceptionally(IOException(status.substringAfter(": ", status)))
+            }
+            publishAudioStatus(status)
             return
         }
         if (request != "@relay\nCHECK") return
@@ -565,6 +588,53 @@ class CircuitRelayService : Service() {
         val fingerprint = parts.getOrNull(4) ?: return
         val generation = ++syncGeneration
         syncExecutor.execute { runWifiSync(host, port, token, fingerprint, generation) }
+    }
+
+    @Volatile private var speakOffer: java.util.concurrent.CompletableFuture<String>? = null
+
+    /**
+     * Asks Circuit for a one-upload session over Bluetooth ([kind]: "speak" for a spoken message, "firmware"
+     * for an update), then uploads [bytes] over Wi-Fi to the pinned certificate. Runs on a worker thread.
+     * Null means Circuit accepted it.
+     */
+    private fun upload(kind: String, bytes: ByteArray): String? {
+        val offer = java.util.concurrent.CompletableFuture<String>()
+        speakOffer = offer
+        try {
+            if (!writeCommand("@$kind-prepare")) return "Circuit is not connected"
+            val request = try {
+                offer.get(12, java.util.concurrent.TimeUnit.SECONDS)
+            } catch (error: java.util.concurrent.ExecutionException) {
+                return error.cause?.message ?: "Circuit refused"
+            } catch (_: java.util.concurrent.TimeoutException) {
+                return "Circuit did not answer"
+            }
+            val parts = request.lines()
+            val host = parts.getOrNull(1) ?: return "Circuit sent an incomplete offer"
+            val port = parts.getOrNull(2)?.toIntOrNull() ?: return "Circuit sent an incomplete offer"
+            val token = parts.getOrNull(3) ?: return "Circuit sent an incomplete offer"
+            val fingerprint = parts.getOrNull(4) ?: return "Circuit sent an incomplete offer"
+            val network = waitForWifi(4000) ?: return "Connect your phone to the same Wi-Fi as Circuit"
+            val connection = (network.openConnection(URL("https://$host:$port/$kind")) as HttpsURLConnection).apply {
+                sslSocketFactory = pinnedSocketFactory(fingerprint)
+                hostnameVerifier = HostnameVerifier { _, _ -> true }  // identity is the pinned fingerprint
+                requestMethod = "PUT"
+                doOutput = true
+                setFixedLengthStreamingMode(bytes.size)
+                connectTimeout = 6000
+                readTimeout = 30000  // the board saves a firmware image to its card before it answers
+                setRequestProperty("X-Circuit-Token", token)
+            }
+            connection.outputStream.use { it.write(bytes) }
+            val code = connection.responseCode
+            connection.disconnect()
+            return if (code == 200) null else "Circuit refused it (HTTP $code)"
+        } catch (error: Exception) {
+            Log.w("CircuitUpload", "Upload of $kind failed: ${error.message}")
+            return "Could not reach Circuit over Wi-Fi"
+        } finally {
+            speakOffer = null
+        }
     }
 
     private fun wifiNetwork(): Network? {
