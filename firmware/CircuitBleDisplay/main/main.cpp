@@ -1486,7 +1486,7 @@ void battery_tick() {
     static int flat = 0;
     flat = sorted[n / 2] < kBatteryEmptyMv ? flat + 1 : 0;
     if (flat >= 3) {
-        power_off("Battery empty");
+        power_off("Battery empty\nCharge it, then hold\nthe power key");
         return;
     }
     const int raw = circuit_battery::percent_from_mv(sorted[n / 2]);
@@ -2148,17 +2148,23 @@ void IRAM_ATTR lower_key_isr(void *) {
     }
 }
 
-// Switches the board off when it runs on the battery. On USB the board stays powered, so it restarts
+// Switches the board off when it runs on the battery. The e-paper keeps its picture without power, so
+// the message shown here stays on the screen and tells the person the board is off, not just stuck.
+//  On USB the board stays powered, so it restarts
 // instead of being left stuck on a message.
 void power_off(const char *message) {
     ESP_LOGW(kTag, "Powering off: %s", message);
     if (Lvgl_lock(1000)) {
+        // A clean screen with just the message, so it reads as "off" and not as a stuck home screen.
+        lv_obj_add_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(message_label, message);
+        lv_obj_set_style_text_align(message_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(message_label, LV_ALIGN_CENTER, 0, 20);
         lv_obj_clear_flag(message_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(message_label);
         Lvgl_unlock();
     }
-    vTaskDelay(pdMS_TO_TICKS(2500));  // the e-paper needs a moment to draw it
+    vTaskDelay(pdMS_TO_TICKS(3500));  // the e-paper needs a moment to draw it
     gpio_set_level(kBatteryLatchPin, 0);
     vTaskDelay(pdMS_TO_TICKS(2000));
     esp_restart();  // still alive: USB is powering the board
@@ -2174,7 +2180,7 @@ void lower_key_released(uint32_t held_ms) {
 #endif
     if (held_ms >= kPowerOffHoldMs && !recording_active && active_screen != DeviceScreen::Syncing &&
         !playback_active.load()) {
-        power_off("Powering off");
+        power_off("Off\nHold the power key\nto turn on");
         return;
     }
     if (held_ms <= kLowerTapMaxMs && recording_active && !recording_paused) {
