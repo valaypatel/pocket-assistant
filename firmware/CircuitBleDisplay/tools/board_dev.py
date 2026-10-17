@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Development helper for the Circuit board: test sync without recording by hand.
 
-  board_dev.py build            build the development firmware (adds a USB command console); each build gets the next number, 2.0.0-dev.N
+  board_dev.py build [--sleep]  build the development firmware (--sleep: light sleep on from the start; the USB console then drops out while it sleeps) (adds a USB command console); each build gets the next number, 2.0.0-dev.N
   board_dev.py flash            stop the logger, flash the development firmware, restart the logger
   board_dev.py copy [N]         copy the N newest synced notes (default 3) as new, unsynced notes
   board_dev.py sync             offer a Wi-Fi sync to the phone now and wait for it to end
@@ -10,6 +10,8 @@
   board_dev.py copy-sync [N]    both: copy N notes, then sync them
   board_dev.py speak-open       open a broadcast session and print its address, port, token and fingerprint
   board_dev.py firmware-open    open an update session and print its address, port, token and fingerprint (then PUT the .bin to /firmware)
+  board_dev.py sleep on|off     turn light sleep on or off now (the USB port drops out while it is on and the chip sleeps)
+  board_dev.py pm               log the power manager's table: time at each speed and asleep, and what holds the chip awake
   board_dev.py update-screen [N]  show the firmware-update screen at N% for a minute (no update happens)
   board_dev.py battery-set N    pretend the charge is N% for about a minute (checks the LOW header and the phone's alert)
   board_dev.py battery          the battery voltage and a rough percentage (read from the board's sense line)
@@ -78,10 +80,11 @@ def next_version():
     return f"{VERSION_BASE}.{number}"
 
 
-def build():
+def build(sleep=False):
     version = next_version()
-    print(f"Building firmware {version}")
-    return idf_shell(f'idf.py -B "{BUILD_DIR}" -DCIRCUIT_DEV_CONSOLE=1 -DCIRCUIT_VERSION={version} build', PROJECT)
+    print(f"Building firmware {version}" + (" (light sleep on from the start)" if sleep else ""))
+    flag = " -DCIRCUIT_LIGHT_SLEEP=1" if sleep else " -DCIRCUIT_LIGHT_SLEEP="
+    return idf_shell(f'idf.py -B "{BUILD_DIR}" -DCIRCUIT_DEV_CONSOLE=1 -DCIRCUIT_VERSION={version}{flag} build', PROJECT)
 
 
 def logger_pid_file():
@@ -131,9 +134,14 @@ def send(command, wait_for, timeout):
     link = serial.Serial()
     link.port = port()
     link.baudrate = 115200
-    link.dtr = False  # opening the port must not reset the board
-    link.rts = False
+    # Opening the port must not reset the board. On macOS, forcing DTR and RTS low *before* opening does reset it
+    # (USB_UART_CHIP_RESET), and a program that reopens the port in a loop then restarts the board in a loop.
+    # Open the quiet way, then lower RTS first and DTR second: no reset.
+    link.dtr = True
+    link.rts = True
     link.open()
+    link.rts = False
+    link.dtr = False
     link.write((command + "\n").encode())
     link.flush()
     link.close()
@@ -161,7 +169,7 @@ def main():
     cmd = args[0]
     n = args[1] if len(args) > 1 else "3"
     if cmd == "build":
-        return build()
+        return build(sleep="--sleep" in args)
     if cmd == "flash":
         return flash()
     if cmd == "copy":
@@ -176,6 +184,10 @@ def main():
         return send("status", "DEV status", 10)
     if cmd == "copy-sync":
         return send(f"copy-sync {n}", ("SYNCSTAT", "0 file(s)"), 600)
+    if cmd == "sleep" and len(args) > 1:
+        return send("sleep " + args[1], "DEV sleep", 15)
+    if cmd == "pm":
+        return send("pm", "DEV pm", 15)
     if cmd == "update-screen":
         return send("update-screen" + (" " + args[1] if len(args) > 1 else ""), "DEV update-screen", 15)
     if cmd == "firmware-open":

@@ -59,6 +59,9 @@ extension _TestControl on _CircuitHomePageState {
           }
           await _syncLatestRecording(first);
           await _testLog('sync-note $first requested');
+        case 'broadcast':
+          // The same steps as the Broadcast dialog: the voice, then the upload. The log line is the status text.
+          await _testLog('broadcast ${await _runBroadcast(text: args.trim())}');
         case 'play':
           await _playAudio();
           await _testLog('play requested');

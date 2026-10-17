@@ -11,7 +11,11 @@
 #include "driver/usb_serial_jtag.h"
 #endif
 #include "esp_app_desc.h"
+#include "codec_init.h"
+#include "esp_codec_dev.h"
 #include "esp_ota_ops.h"
+#include "esp_pm.h"
+#include "esp_sleep.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_event.h"
@@ -127,6 +131,8 @@ std::atomic<int64_t> moment_cue_until_ms{0};  // the cue is shown until then (es
 constexpr int64_t kMomentCueMs = 3000;
 lv_obj_t *recording_icon;  // the animated device icon on the recording screen (64x64)
 lv_obj_t *sync_progress_label;
+bool zzz_shown = false;
+lv_obj_t *sleep_zzz_label;  // "zzz" under the wordmark on the idle screen while light sleep is on (nothing is happening)
 lv_obj_t *update_cog_obj;  // the turning cog of a firmware update (circuit_update_icon.h), with the percentage below
 bool update_screen_active = false;
 int update_frame = 0;
@@ -200,16 +206,61 @@ char last_offer[kMaxTextBytes + 40] = "";   // kept so it can be re-sent until t
 int64_t last_offer_sent_ms = 0;
 constexpr int64_t kOfferResendMs = 15000;
 constexpr TickType_t kSyncSupervisorInterval = pdMS_TO_TICKS(8000);
+TaskHandle_t sync_supervisor_handle = nullptr;  // woken when a session opens, so it is not polled while none is
 bool sntp_started = false;
 constexpr time_t kMinValidEpoch = 1704067200;  // 2024-01-01
 
 void send_relay_request(const char *request);
 void show_busy_notice();
-bool claim_audio() { return !audio_busy.exchange(true); }
+// The audio chip's data link (I2S) is open only while something records or plays. Left open, it holds the
+// processor at full speed and awake all day (and keeps the codec and amplifier running), which blocks every kind
+// of power saving. Waveshare's init opens both directions and leaves them open: Codec_StartInit() is followed by
+// audio_devices_close(), and claim_audio() / release_audio() open and close them around each use.
+bool audio_devices_opened = false;
+
+void audio_devices_open() {
+    if (audio_devices_opened) return;
+    esp_codec_dev_sample_info_t format = {};
+    format.sample_rate = 16000;
+    format.channel = 2;
+    format.bits_per_sample = 16;
+    esp_codec_dev_handle_t speaker = get_playback_handle();
+    esp_codec_dev_handle_t microphone = get_record_handle();
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_open(speaker, &format));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_open(microphone, &format));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_out_vol(speaker, 100));  // the same as Codec_StartInit() sets
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_in_gain(microphone, 45.0));
+    audio_devices_opened = true;
+}
+
+void audio_devices_close() {
+    if (!audio_devices_opened) return;
+    esp_codec_dev_close(get_playback_handle());
+    esp_codec_dev_close(get_record_handle());
+    audio_devices_opened = false;
+}
+
+bool claim_audio() {
+    if (audio_busy.exchange(true)) return false;
+    audio_devices_open();
+    return true;
+}
+
+// Gives the audio back: closes the chip's data link, then lets the next request claim it.
+void release_audio() {
+    audio_devices_close();
+    audio_busy = false;
+}
 
 // A firmware update is under way: from when Circuit offers the phone an update session until the new
 // firmware is in place (set once the image has arrived, while it is written). While it is, nothing that
 // would interrupt it is allowed: recording, playing, syncing, a broadcast, and switching off.
+TaskHandle_t animation_task_handle = nullptr;  // woken when the screen changes, so it can sleep while nothing animates
+TaskHandle_t record_button_handle = nullptr;  // the record key's task; woken by its interrupt (and by the dev console)
+bool ble_seen_since_boot = false;  // a phone has connected and secured the link since the board started
+bool light_sleep_on = false;  // see "Light sleep" further down
+void set_light_sleep(bool on);
+void log_power_use();
 std::atomic<bool> firmware_installing{false};
 bool update_busy() { return firmware_installing.load() || (circuit_sync::is_open() && circuit_sync::state.firmware); }
 
@@ -250,8 +301,10 @@ struct WavHeader {
 #pragma pack(pop)
 
 esp_ble_adv_params_t adv_params = {
-    .adv_int_min = 0x20,
-    .adv_int_max = 0x40,
+    // 100 to 200 ms (units of 0.625 ms). The phone finds the board within a fraction of a second either way, and a
+    // board waiting for its phone no longer sends 25 to 50 advertisements a second.
+    .adv_int_min = 0xA0,
+    .adv_int_max = 0x140,
     .adv_type = ADV_TYPE_IND,
     .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
     .channel_map = ADV_CHNL_ALL,
@@ -262,8 +315,10 @@ esp_ble_adv_data_t adv_data = {
     .set_scan_rsp = false,
     .include_name = true,
     .include_txpower = false,
-    .min_interval = 0x0006,
-    .max_interval = 0x0010,
+    // The connection rhythm the board prefers (units of 1.25 ms): 100 to 200 ms. It carries short commands and
+    // status; files go over Wi-Fi. (The old 7.5 to 20 ms woke the board 50 to 130 times a second.)
+    .min_interval = 0x0050,
+    .max_interval = 0x00A0,
     .appearance = 0,
     .manufacturer_len = 0,
     .p_manufacturer_data = nullptr,
@@ -500,6 +555,12 @@ void restore_clock_from_rtc() {
     }
 }
 
+// What the count labels show now (-1: nothing drawn yet). The phone sends both numbers; the waiting one is also
+// kept right by the board itself, from its own card, so a recording shows at once and a finished sync clears it.
+int home_shown_pending = -1;
+int home_shown_done = -1;
+int card_pending = -1;  // recordings waiting, counted from the card (-1: not counted yet); it beats the phone's figure
+
 void update_home_status(const char *value) {
     char buffer[kMaxTextBytes + 1];
     strncpy(buffer, value, sizeof(buffer) - 1);
@@ -527,12 +588,13 @@ void update_home_status(const char *value) {
     int hour = 0, minute = 0, pending = 0, done = 0;
     const bool time_ok = sscanf(time, "%d:%d", &hour, &minute) == 2;
     const bool counts_ok = sscanf(counts, "%d %*[^0-9]%d", &pending, &done) == 2;
-    static int shown_pending = -1, shown_done = -1, shown_clock = -1;
+    if (counts_ok && card_pending >= 0) pending = card_pending;  // the phone's waiting count can be a step behind
+    static int shown_clock = -1;
     const int clock_key = hour * 60 + minute;
     if (counts_ok && offset != nullptr) {
         save_home_snapshot({pending, done, atoi(offset)});
     }
-    const bool same = home_status_received && counts_ok && pending == shown_pending && done == shown_done &&
+    const bool same = home_status_received && counts_ok && pending == home_shown_pending && done == home_shown_done &&
                       (clock_set || (time_ok && clock_key == shown_clock));
     if (same) return;
     if (!Lvgl_lock(-1)) return;
@@ -545,12 +607,28 @@ void update_home_status(const char *value) {
     // The phone sends "<pending> · <done>"; the separator is not drawn.
     if (counts_ok) {
         set_count_labels(pending, done);
-        shown_pending = pending;
-        shown_done = done;
+        home_shown_pending = pending;
+        home_shown_done = done;
     }
     ESP_LOGI(kTag, "Home status: counts=%d/%d clock_set=%d", pending, done, clock_set ? 1 : 0);
     apply_persistent_labels(active_screen);
     Lvgl_unlock();
+}
+
+// Puts the number of recordings waiting on the card on the home screen, without waiting for the phone to say so.
+// The synced count stays whatever the phone last said (it is the phone's own count of notes it holds).
+void show_pending_from_card() {
+    if (sd_card == nullptr) return;
+    const int pending = static_cast<int>(circuit_notes::count_unsynced_recordings());
+    card_pending = pending;
+    if (pending == home_shown_pending) return;
+    const int done = home_shown_done >= 0 ? home_shown_done : (saved_home.done >= 0 ? saved_home.done : 0);
+    if (!Lvgl_lock(-1)) return;
+    set_count_labels(pending, done);
+    home_shown_pending = pending;
+    home_shown_done = done;
+    Lvgl_unlock();
+    ESP_LOGI(kTag, "Home counts from the card: %d waiting", pending);
 }
 
 void screen_timeout_task(void *argument) {
@@ -596,6 +674,7 @@ void show_device_screen(DeviceScreen screen, bool only_if_showing, DeviceScreen 
     }
     active_screen = screen;
     boot_splash = false;
+    if (animation_task_handle != nullptr) xTaskNotifyGive(animation_task_handle);
     if (screen == DeviceScreen::Recording) {
         recording_started_at = xTaskGetTickCount();
     }
@@ -609,6 +688,8 @@ void show_device_screen(DeviceScreen screen, bool only_if_showing, DeviceScreen 
     lv_obj_add_flag(sync_progress_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(busy_icon_obj, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(update_cog_obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(sleep_zzz_label, LV_OBJ_FLAG_HIDDEN);  // refresh_status_icons() shows it again on the idle screen
+    zzz_shown = false;
     if (update_screen_active) {  // the sync figure goes back to its own size and place
         update_screen_active = false;
         persistent_applied = -1;  // and the clock and counts, hidden for the update, come back
@@ -726,7 +807,9 @@ void demo_animation_task(void *) {
             vTaskDelay(pdMS_TO_TICKS(1000));
         } else {
             sync_frame = 0;
-            vTaskDelay(pdMS_TO_TICKS(150));
+            // Nothing is animating: sleep until the screen changes (show_device_screen wakes this task), with a
+            // long timeout as a safety net. It used to wake seven times a second for nothing.
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
         }
     }
 }
@@ -844,7 +927,7 @@ void finish_audio_task() {
     recording_paused = false;
     recording_active = false;
     playback_active = false;
-    audio_busy = false;
+    release_audio();
     vTaskDelete(nullptr);
 }
 
@@ -1182,6 +1265,7 @@ void record_audio_task(void *argument) {
         static_cast<unsigned long>(first_id), static_cast<unsigned long>(saved_parts), note_path,
         static_cast<unsigned long>(recorded_bytes));
     const bool completed = recorded_bytes == target_bytes;
+    show_pending_from_card();
     show_device_screen(DeviceScreen::Saved);
     return_to_idle_after(DeviceScreen::Saved, 3000);
     update_storage_status(card_full ? "Card is full\nRecording saved"
@@ -1358,7 +1442,7 @@ void start_speak_playback() {
     playback_active = true;
     if (xTaskCreate(speak_audio_task, "audio_speak", 6144, nullptr, 5, nullptr) != pdPASS) {
         playback_active = false;
-        audio_busy = false;
+        release_audio();
         remove(circuit_sync::kSpeakPath);
         report_audio_status("Broadcast failed: could not start playback");
     }
@@ -1403,7 +1487,7 @@ void start_recording(char *command) {
         return;
     }
     if (circuit_sync::is_open()) {  // a sync opened between the check above and the claim
-        audio_busy = false;
+        release_audio();
         show_busy_notice();
         return;
     }
@@ -1474,11 +1558,35 @@ bool previous_firmware(char *version, size_t version_size, char *build, size_t b
 
 void send_sync_status() {
     char message[kMaxTextBytes + 1];
+    // What the card says is worked out at most once a minute, and the other firmware once: each of these reads
+    // the card or the flash, and the phone may ask several times.
+    static int64_t card_checked_ms = -1000000;
+    static char card[40] = "";
+    if (circuit_sync::now_ms() - card_checked_ms > 60000) {
+        card_checked_ms = circuit_sync::now_ms();
+        card[0] = '\0';
+        uint64_t card_total = 0, card_free = 0;
+        if (esp_vfs_fat_info(kSdMountPath, &card_total, &card_free) == ESP_OK && card_total > 0) {
+            snprintf(card, sizeof(card), "%llu|%llu", static_cast<unsigned long long>((card_total - card_free) / 1024),
+                static_cast<unsigned long long>(card_total / 1024));
+        }
+    }
+    static bool previous_known = false;
+    static char previous[48] = "";
+    if (!previous_known) {
+        previous_known = true;
+        char previous_version[32] = "", previous_build[9] = "";
+        if (previous_firmware(previous_version, sizeof(previous_version), previous_build, sizeof(previous_build))) {
+            snprintf(previous, sizeof(previous), "%s|%s", previous_version, previous_build);
+        }
+    }
+    const unsigned waiting = card_pending >= 0 ? static_cast<unsigned>(card_pending)
+                                               : static_cast<unsigned>(circuit_notes::count_unsynced_recordings());
     // The first three lines are what the app has always read; the rest is board health,
     // forwarded to the app's diagnostics (counts and sizes only).
     snprintf(message, sizeof(message),
         "@sync-status\nwaiting=%u\nreset=%d\nuptime=%lld\nfree_min=%u\nstack_min=%u\nstops=%u\nbat=%d",
-        static_cast<unsigned>(circuit_notes::count_unsynced_recordings()), boot_reset_reason,
+        waiting, boot_reset_reason,
         static_cast<long long>(circuit_sync::now_ms() / 1000),
         static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(text_stack_min_bytes == UINT32_MAX ? 0 : text_stack_min_bytes),
@@ -1498,17 +1606,6 @@ void send_sync_status() {
     //   sd   the card's space in use, then its total size, in KB (absent without a card)
     char build_id[9] = "";
     esp_app_get_elf_sha256(build_id, sizeof(build_id));
-    char previous_version[32] = "", previous_build[9] = "";
-    char previous[48] = "";
-    if (previous_firmware(previous_version, sizeof(previous_version), previous_build, sizeof(previous_build))) {
-        snprintf(previous, sizeof(previous), "%s|%s", previous_version, previous_build);
-    }
-    char card[40] = "";
-    uint64_t card_total = 0, card_free = 0;
-    if (esp_vfs_fat_info(kSdMountPath, &card_total, &card_free) == ESP_OK && card_total > 0) {
-        snprintf(card, sizeof(card), "%llu|%llu", static_cast<unsigned long long>((card_total - card_free) / 1024),
-            static_cast<unsigned long long>(card_total / 1024));
-    }
     snprintf(message, sizeof(message), "@sync-status\nfw=%s|%s\nprev=%s\nsd=%s",
         esp_app_get_description()->version, build_id, previous, card);
     send_relay_request(message);
@@ -1544,6 +1641,19 @@ void refresh_status_icons() {
     const int state = (phone ? 1 : 0) | (storage ? 2 : 0);
     static int shown_battery = -2;
     const int battery = battery_percent;
+    // "zzz" says the board is in its sleeping mode and idle: it goes as soon as something wakes it up to work
+    // (a recording, playback, a sync, an update), and comes back to the idle screen. Redrawn only when it flips.
+    const bool zzz = light_sleep_on && active_screen == DeviceScreen::Idle;
+    if (zzz != zzz_shown && Lvgl_lock(-1)) {
+        zzz_shown = zzz;
+        if (zzz) {
+            lv_obj_clear_flag(sleep_zzz_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(sleep_zzz_label);
+        } else {
+            lv_obj_add_flag(sleep_zzz_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        Lvgl_unlock();
+    }
     if (wifi_src == shown_wifi && state == shown_state && battery == shown_battery) return;
     if (!Lvgl_lock(-1)) return;
     shown_wifi = wifi_src;
@@ -1611,6 +1721,7 @@ void battery_tick() {
             static_cast<long long>(circuit_sync::now_ms() / 1000), connection_id != UINT16_MAX ? "connected" : "no",
             wifi_ui == WifiUi::Connected ? "connected" : (wifi_ui == WifiUi::None ? "off" : "trying"),
             update_busy() ? ", updating" : "");
+        log_power_use();
     }
     int sorted[5];
     const int n = count < 5 ? count : 5;
@@ -1674,8 +1785,10 @@ void wifi_sync_progress(uint32_t percent) { sync_ui_percent = static_cast<int32_
 // The firmware update screen: a turning cog with the percentage under it. It borrows the sync screen (so
 // the usual rules about what may interrupt what still hold) and swaps the artwork for the cog.
 void show_update_screen() {
-    show_device_screen(DeviceScreen::Syncing);
+    // One lock through the whole change: the sync picture that show_device_screen() puts up first must never
+    // reach the e-paper (it would show for a second before the cog).
     if (!Lvgl_lock(-1)) return;
+    show_device_screen(DeviceScreen::Syncing);
     lv_obj_add_flag(wordmark_image, LV_OBJ_FLAG_HIDDEN);
     // The cog needs the middle of the screen: hide the clock and the note counts (the date and the status
     // icons stay). They come back with the next screen (see show_device_screen).
@@ -1802,6 +1915,7 @@ void offer_upload(bool firmware) {
     snprintf(last_offer, sizeof(last_offer), "%s", offer);
     last_offer_sent_ms = circuit_sync::now_ms();
     send_relay_request(offer);
+    if (sync_supervisor_handle != nullptr) xTaskNotifyGive(sync_supervisor_handle);
     ESP_LOGI(kTag, "%s session offered", what);
 }
 
@@ -1993,6 +2107,7 @@ void end_wifi_sync() {
         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     const bool session_done = circuit_sync::waiting_in_session() == 0;  // before the session forgets which recording
     circuit_sync::close_session();
+    show_pending_from_card();
     sync_ui_percent = -1;
     if (served == 0) {  // the phone never connected: back off, and say so if the screen is showing sync
         if (active_screen == DeviceScreen::Syncing) flash_sync_result("ERR");
@@ -2015,8 +2130,13 @@ void sync_supervisor_task(void *) {
     int64_t last_slow_check_ms = 0;
     bool firmware_confirmed = false;
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(500));  // a broadcast message is played as soon as it arrives
-        if (!firmware_confirmed && esp_timer_get_time() > 40LL * 1000000) {
+        // A broadcast or update session is watched twice a second; with none open it sleeps, and offering one
+        // wakes it (so an idle board is not woken twice a second for nothing).
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(circuit_sync::is_open() ? 500 : 7500));
+        // A new firmware is kept only once it has run for 40 s AND a phone has connected to it (so one that cannot
+        // talk to a phone is not kept), or after ten minutes with no phone about, so it is not left on trial forever.
+        const int64_t up_s = esp_timer_get_time() / 1000000;
+        if (!firmware_confirmed && up_s > 40 && (ble_seen_since_boot || up_s > 600)) {
             mark_firmware_good();
             firmware_confirmed = true;
         }
@@ -2044,7 +2164,7 @@ void sync_supervisor_task(void *) {
             }
             continue;
         }
-        if (circuit_sync::now_ms() - last_slow_check_ms < pdTICKS_TO_MS(kSyncSupervisorInterval)) continue;
+        if (circuit_sync::now_ms() - last_slow_check_ms < pdTICKS_TO_MS(kSyncSupervisorInterval) - 600) continue;
         last_slow_check_ms = circuit_sync::now_ms();
         // After giving up, try again now and then (sooner if it was not a password problem).
         if (wifi_ui == WifiUi::Failed && wifi_ssid[0] != '\0' &&
@@ -2286,6 +2406,13 @@ void dev_console_task(void *) {
             refresh_status_icons();
             send_sync_status();
             ESP_LOGW(kTag, "DEV battery-set: showing %d%%", static_cast<int>(battery_percent));
+        } else if (strncmp(line, "sleep", 5) == 0) {
+            if (strcmp(line, "sleep on") == 0) set_light_sleep(true);
+            else if (strcmp(line, "sleep off") == 0) set_light_sleep(false);
+            ESP_LOGW(kTag, "DEV sleep: light sleep is %s", light_sleep_on ? "on" : "off");
+        } else if (strcmp(line, "pm") == 0) {
+            log_power_use();
+            ESP_LOGW(kTag, "DEV pm: light sleep is %s", light_sleep_on ? "on" : "off");
         } else if (strncmp(line, "update-screen", 13) == 0) {
             // Shows the update screen at N% for a minute, without updating anything.
             show_update_screen();
@@ -2335,8 +2462,10 @@ void dev_console_task(void *) {
             float seconds = 0.12f;
             if (strncmp(line + 4, "hold", 4) == 0 && sscanf(line + 8, "%f", &seconds) != 1) seconds = 1.2f;
             dev_key_down = true;
+            if (record_button_handle != nullptr) xTaskNotifyGive(record_button_handle);
             vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(seconds * 1000)));
             dev_key_down = false;
+            if (record_button_handle != nullptr) xTaskNotifyGive(record_button_handle);
             ESP_LOGW(kTag, "DEV key pressed for %.2f s", seconds);
         } else if (strncmp(line, "delete ", 7) == 0) {
             const unsigned long id = strtoul(line + 7, nullptr, 10);
@@ -2345,6 +2474,7 @@ void dev_console_task(void *) {
             } else {
                 ESP_LOGW(kTag, "DEV deleted note %lu: %s", id,
                     circuit_notes::remove_note(static_cast<uint32_t>(id)) ? "removed" : "was already gone");
+                show_pending_from_card();
             }
         } else if (strcmp(line, "list") == 0) {
             for (uint32_t id = circuit_notes::newest_id(); id > 0 && id + 12 > circuit_notes::newest_id(); --id) {
@@ -2491,6 +2621,14 @@ void force_sync_task(void *) {
 //   idle       tap: start a recording      hold 2 s: force a sync (Bluetooth if there is no Wi-Fi)
 //   recording  tap: stop and save          hold 1 s: pause, or carry on
 // The lower button is wired to power, so holding it switches the board off.
+// The record key's edges wake its task, which otherwise sleeps: polling it 50 times a second would keep the
+// processor from ever sleeping.
+void IRAM_ATTR record_button_isr(void *) {
+    BaseType_t woken = pdFALSE;
+    if (record_button_handle != nullptr) vTaskNotifyGiveFromISR(record_button_handle, &woken);
+    if (woken == pdTRUE) portYIELD_FROM_ISR();
+}
+
 void record_button_task(void *) {
     // GPIO0 is active-low. Waiting for a released state avoids treating a
     // button held during boot as an unintended request.
@@ -2538,7 +2676,11 @@ void record_button_task(void *) {
             }
         }
         was_pressed = is_pressed;
-        vTaskDelay(kButtonPollInterval);
+        if (is_pressed) {
+            vTaskDelay(kButtonPollInterval);  // held: keep timing it
+        } else {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // idle: sleep until the key changes
+        }
     }
 }
 
@@ -2624,10 +2766,10 @@ void init_record_button() {
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+        .intr_type = GPIO_INTR_ANYEDGE,
     };
     ESP_ERROR_CHECK(gpio_config(&config));
-    xTaskCreate(record_button_task, "record_button", 3072, nullptr, 3, nullptr);
+    xTaskCreate(record_button_task, "record_button", 3072, nullptr, 3, &record_button_handle);
     gpio_config_t lower_config = config;
     lower_config.pin_bit_mask = 1ULL << kLowerKeyPin;
     lower_config.intr_type = GPIO_INTR_ANYEDGE;
@@ -2637,6 +2779,78 @@ void init_record_button() {
     const esp_err_t isr_service = gpio_install_isr_service(0);  // another part may have installed it already
     if (isr_service != ESP_OK && isr_service != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(isr_service);
     ESP_ERROR_CHECK(gpio_isr_handler_add(kLowerKeyPin, lower_key_isr, nullptr));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(kRecordButtonPin, record_button_isr, nullptr));
+}
+
+// ---- Light sleep -----------------------------------------------------------
+// With power management on, the processor sleeps whenever every task is waiting and nothing is due soon, and
+// Wi-Fi and Bluetooth wake it only for their own events. A key press cannot wake a sleeping chip as an edge, so
+// just before each sleep the two keys are armed as wake-up sources (as levels), and just after it they go back
+// to their normal edge interrupts and a press that woke the chip is handed to the key code.
+#ifdef CIRCUIT_LIGHT_SLEEP
+constexpr bool kLightSleepDefault = true;
+#elif defined(CIRCUIT_DEV_CONSOLE)
+constexpr bool kLightSleepDefault = false;  // the USB console drops out whenever the chip sleeps
+#else
+constexpr bool kLightSleepDefault = true;
+#endif
+
+esp_err_t keys_enter_light_sleep(int64_t, void *) {
+    gpio_wakeup_enable(kRecordButtonPin, GPIO_INTR_LOW_LEVEL);
+    gpio_wakeup_enable(kLowerKeyPin, GPIO_INTR_LOW_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+    return ESP_OK;
+}
+
+esp_err_t keys_exit_light_sleep(int64_t, void *) {
+    for (const gpio_num_t pin : {kRecordButtonPin, kLowerKeyPin}) {
+        gpio_wakeup_disable(pin);
+        gpio_set_intr_type(pin, GPIO_INTR_ANYEDGE);
+        gpio_intr_enable(pin);
+    }
+    // The press that woke the chip was a level, not an edge, so the interrupts never saw it.
+    const int64_t now = esp_timer_get_time();
+    if (gpio_get_level(kLowerKeyPin) == 0 && lower_down_us == 0) {
+        lower_down_us = now;
+        lower_last_edge_us = now;
+    }
+    if (gpio_get_level(kRecordButtonPin) == 0 && record_button_handle != nullptr) xTaskNotifyGive(record_button_handle);
+    return ESP_OK;
+}
+
+void set_light_sleep(bool on) {
+    esp_pm_config_t config = {};
+    config.max_freq_mhz = 160;
+    config.min_freq_mhz = 80;  // the octal PSRAM and the Wi-Fi/Bluetooth radios are happy down to here
+    config.light_sleep_enable = on;
+    const esp_err_t result = esp_pm_configure(&config);
+    if (result == ESP_OK) light_sleep_on = on;
+    ESP_LOGW(kTag, "Light sleep %s: %s", on ? "on" : "off", esp_err_to_name(result));
+}
+
+void init_light_sleep() {
+    esp_pm_sleep_cbs_register_config_t callbacks = {};
+    callbacks.enter_cb = keys_enter_light_sleep;
+    callbacks.exit_cb = keys_exit_light_sleep;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_pm_light_sleep_register_cbs(&callbacks));
+    set_light_sleep(kLightSleepDefault);
+}
+
+// The power manager's table (time spent at each speed and asleep, and what is holding the chip awake), to the
+// log on the card, so a day on the battery can be read back afterwards.
+void log_power_use() {
+    char *text = nullptr;
+    size_t size = 0;
+    FILE *stream = open_memstream(&text, &size);
+    if (stream == nullptr) return;
+    esp_pm_dump_locks(stream);
+    fclose(stream);
+    if (text != nullptr) {
+        for (char *line = strtok(text, "\n"); line != nullptr; line = strtok(nullptr, "\n")) {
+            ESP_LOGI(kTag, "PM| %s", line);
+        }
+        free(text);
+    }
 }
 
 void start_playback() {
@@ -2658,7 +2872,7 @@ void start_playback() {
     playback_active = true;
     if (xTaskCreate(play_audio_task, "audio_play", 6144, nullptr, 5, nullptr) != pdPASS) {
         playback_active = false;
-        audio_busy = false;
+        release_audio();
         report_audio_status("Playback failed: could not start playback");
     }
 }
@@ -2895,6 +3109,7 @@ void text_display_task(void *) {
                 } else {
                     const bool removed = circuit_notes::remove_note(static_cast<uint32_t>(id));
                     ESP_LOGI(kTag, "Deleted note %lu from the card: %s", id, removed ? "removed" : "was already gone");
+                    show_pending_from_card();  // it may have been one of the waiting ones
                     snprintf(result, sizeof(result), "Note deleted #%lu", id);
                 }
                 report_audio_status(result);
@@ -2904,6 +3119,7 @@ void text_display_task(void *) {
                 } else {
                     const size_t marked = circuit_notes::mark_all_unsynced();
                     ESP_LOGI(kTag, "Marked %u note(s) to be sent again", static_cast<unsigned>(marked));
+                    show_pending_from_card();
                     start_audio_sync(false);
                 }
             } else if (strcmp(message.value, "@notes-clean") == 0) {
@@ -2911,6 +3127,7 @@ void text_display_task(void *) {
                     report_audio_status("Cannot clean notes while recording or syncing");
                 } else {
                     const size_t removed = circuit_notes::clean_synced();
+                    show_pending_from_card();
                     ESP_LOGI(kTag, "Cleaned %u synced note(s)", static_cast<unsigned>(removed));
                     char result[64];
                     snprintf(result, sizeof(result), "Notes cleaned: %u removed from Circuit", static_cast<unsigned>(removed));
@@ -3039,6 +3256,7 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             ESP_LOGI(kTag, "BLE link secured with %02x:..:%02x (address type %d, new keys %s, auth mode 0x%x)",
                 a[0], a[5], auth.addr_type, auth.key_present ? "yes" : "no", auth.auth_mode);
             ble_encrypted = true;
+            ble_seen_since_boot = true;
             ensure_note_key();
             if (active_screen == DeviceScreen::Pairing) show_device_screen(DeviceScreen::Idle);
         } else {
@@ -3150,6 +3368,17 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
     }
     case ESP_GATTS_CONNECT_EVT:
         connection_id = param->connect.conn_id;
+    {
+        // Ask the phone to keep the link relaxed: an event every 100 to 200 ms, and up to two skipped when there
+        // is nothing to say. A message from the phone still arrives within about half a second.
+        esp_ble_conn_update_params_t relaxed = {};
+        memcpy(relaxed.bda, param->connect.remote_bda, sizeof(relaxed.bda));
+        relaxed.min_int = 0x50;
+        relaxed.max_int = 0xA0;
+        relaxed.latency = 2;
+        relaxed.timeout = 400;  // 4 s, comfortably above (1 + latency) x interval x 2
+        esp_ble_gap_update_conn_params(&relaxed);
+    }
     {
         const uint8_t *a = param->connect.remote_bda;
         int bonded_count = esp_ble_get_bond_device_num();
@@ -3340,6 +3569,15 @@ void init_display() {
         lv_obj_set_size(battery_nub, 2, 4);
         lv_obj_set_style_bg_color(battery_nub, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(battery_nub, LV_OPA_COVER, 0);
+        sleep_zzz_label = lv_label_create(lv_screen_active());
+        lv_label_set_text(sleep_zzz_label, "zzz");
+        lv_obj_set_style_text_font(sleep_zzz_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_letter_space(sleep_zzz_label, 1, 0);
+        lv_obj_set_style_text_color(sleep_zzz_label, lv_color_black(), 0);
+        lv_obj_set_style_bg_color(sleep_zzz_label, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(sleep_zzz_label, LV_OPA_COVER, 0);
+        lv_obj_align(sleep_zzz_label, LV_ALIGN_TOP_LEFT, 143, 165);  // under the end of the wordmark's underline
+        lv_obj_add_flag(sleep_zzz_label, LV_OBJ_FLAG_HIDDEN);
         battery_label = lv_label_create(lv_screen_active());
         lv_obj_set_style_text_font(battery_label, &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(battery_label, lv_color_black(), 0);
@@ -3459,16 +3697,23 @@ extern "C" void app_main(void) {
     // is complete the moment it replaces the splash.
     restore_home_screen();
     init_sd_card();
+    // A broadcast message or firmware image left on the card by a restart or a cut session is never wanted again.
+    remove(circuit_sync::kSpeakPath);
+    remove(circuit_sync::kFirmwarePath);
+    show_pending_from_card();
     Codec_StartInit();
+    audio_devices_opened = true;  // Codec_StartInit() opened both directions
+    audio_devices_close();        // they are opened for use only (see audio_devices_open)
     restore_clock_from_rtc();
     audio_ready = true;
     init_record_button();
-    xTaskCreate(demo_animation_task, "demo_animation", 3072, nullptr, 2, nullptr);
+    init_light_sleep();
+    xTaskCreate(demo_animation_task, "demo_animation", 3072, nullptr, 2, &animation_task_handle);
     // 5 KB: the command handler runs deep, through file listing and the Wi-Fi sync start, and
     // 4 KB overflowed once note listing grew by one nested call. Its real use is logged below.
     xTaskCreate(text_display_task, "text_display", 5120, nullptr, 4, nullptr);
     xTaskCreate(status_icon_task, "status_icons", 4096, nullptr, 2, nullptr);
-    xTaskCreate(sync_supervisor_task, "sync_supervisor", 10240, nullptr, 3, nullptr);
+    xTaskCreate(sync_supervisor_task, "sync_supervisor", 10240, nullptr, 3, &sync_supervisor_handle);
     xTaskCreate(local_clock_task, "local_clock", 3072, nullptr, 2, nullptr);
     start_wifi();
     start_ble();

@@ -1433,22 +1433,12 @@ extension _ScPages on _CircuitHomePageState {
     );
   }
 
-  /// What Circuit runs, and whether the app has something newer for it.
+  /// What Circuit runs now, for the Update row.
   String _firmwareCaption() {
     final running = _boardFirmware;
-    final bundled = _bundledFirmwareImage;
-    if (running == null) return 'Install the firmware that came with this app';
-    if (bundled == null) return 'Firmware ${running.version}';
-    final relation = FirmwareImage.compareVersions(
-      bundled.version,
-      running.version,
-    );
-    if (relation > 0) {
-      return 'Firmware ${running.version} · ${bundled.version} is available';
-    }
-    return relation == 0 && bundled.sameBuildAs(running)
-        ? 'Firmware ${running.version} · up to date'
-        : 'Firmware ${running.version}';
+    return running == null
+        ? 'Choose a firmware file to install'
+        : 'Firmware ${running.version} · choose a file to install';
   }
 
   /// "Card 3.1 GB of 29.7 GB used", red when it is nearly full.
@@ -1736,7 +1726,7 @@ extension _ScPages on _CircuitHomePageState {
         ),
         ScRow(
           title: 'Reset Circuit firmware',
-          caption: 'Choose a file, or go back to the previous firmware',
+          caption: 'Go back to the previous firmware, or the stable one',
           onTap: idle && !_updatingFirmware ? _resetCircuitFirmware : null,
           trailing: Icon(
             LucideIcons.rotateCcw,
