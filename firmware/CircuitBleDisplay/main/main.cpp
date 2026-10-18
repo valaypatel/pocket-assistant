@@ -800,6 +800,8 @@ void show_device_screen(DeviceScreen screen, bool only_if_showing, DeviceScreen 
         lv_obj_clear_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(recording_timer_label);
     } else {
+        lv_obj_set_width(message_label, 176);
+        lv_obj_set_style_text_align(message_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(message_label, LV_ALIGN_BOTTOM_MID, 0, -12);
         lv_obj_set_width(recording_timer_label, 84);
         lv_obj_set_style_text_align(recording_timer_label, LV_TEXT_ALIGN_LEFT, 0);
@@ -2872,12 +2874,16 @@ void dev_console_task(void *) {
 // ---- Sync mode ---------------------------------------------------------------
 lv_obj_t *hold_arc = nullptr;  // the ring that fills while the record key is held for sync mode
 
-// Draws the ring at `percent` (0 hides it). Only the idle screen shows it.
+// The key-hold ring was dropped (no ring is created, so this does nothing); the hold just opens sync mode at 5 s.
 void show_hold_ring(int percent) {
+    static bool drawn = false;
     if (hold_arc == nullptr || !Lvgl_lock(-1)) return;
     if (percent <= 0 || active_screen != DeviceScreen::Idle) {
+        if (drawn) ghost_clear_pending = true;  // the e-paper keeps a faint trace of the ring: wipe it with the next refresh
+        drawn = false;
         lv_obj_add_flag(hold_arc, LV_OBJ_FLAG_HIDDEN);
     } else {
+        drawn = true;
         lv_arc_set_value(hold_arc, percent > 100 ? 100 : percent);
         lv_obj_clear_flag(hold_arc, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(hold_arc);
@@ -2894,6 +2900,10 @@ void show_sync_mode_screen(const char *line) {
     show_device_screen(DeviceScreen::SyncMode);
     if (Lvgl_lock(-1)) {
         lv_label_set_text(message_label, line);
+        // To the right of the sync picture (it sits at the lower left), left-aligned, so the two never overlap.
+        lv_obj_set_width(message_label, 94);
+        lv_obj_set_style_text_align(message_label, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_align(message_label, LV_ALIGN_TOP_LEFT, 104, 122);
         lv_obj_clear_flag(message_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(message_label);
         Lvgl_unlock();
@@ -4160,24 +4170,6 @@ void init_display() {
         lv_obj_set_size(battery_nub, 2, 4);
         lv_obj_set_style_bg_color(battery_nub, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(battery_nub, LV_OPA_COVER, 0);
-        hold_arc = lv_arc_create(lv_screen_active());
-        lv_obj_set_size(hold_arc, 64, 64);
-        lv_obj_align(hold_arc, LV_ALIGN_CENTER, 0, -10);
-        lv_arc_set_rotation(hold_arc, 270);
-        lv_arc_set_bg_angles(hold_arc, 0, 360);
-        lv_arc_set_range(hold_arc, 0, 100);
-        lv_arc_set_value(hold_arc, 0);
-        lv_obj_remove_style(hold_arc, nullptr, LV_PART_KNOB);
-        lv_obj_clear_flag(hold_arc, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_arc_width(hold_arc, 6, LV_PART_MAIN);
-        lv_obj_set_style_arc_width(hold_arc, 6, LV_PART_INDICATOR);
-        lv_obj_set_style_arc_color(hold_arc, lv_color_black(), LV_PART_MAIN);
-        lv_obj_set_style_arc_opa(hold_arc, LV_OPA_30, LV_PART_MAIN);
-        lv_obj_set_style_arc_color(hold_arc, lv_color_black(), LV_PART_INDICATOR);
-        lv_obj_set_style_bg_color(hold_arc, lv_color_white(), 0);
-        lv_obj_set_style_bg_opa(hold_arc, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(hold_arc, 32, 0);
-        lv_obj_add_flag(hold_arc, LV_OBJ_FLAG_HIDDEN);
         sleep_zzz_label = lv_label_create(lv_screen_active());
         lv_label_set_text(sleep_zzz_label, "zzz");
         lv_obj_set_style_text_font(sleep_zzz_label, &lv_font_montserrat_12, 0);

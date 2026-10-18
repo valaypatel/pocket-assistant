@@ -114,4 +114,21 @@ void main() {
     expect(find.text('Needs 30% battery · Circuit has 20%'), findsOneWidget);
     await close(tester);
   });
+
+  testWidgets('Update and Reset grey out while a sync is running', (
+    tester,
+  ) async {
+    await open(
+      tester,
+      '@sync-status\nfw=3.0.1|aaaaaaaa\npm=saver|auto\nmode=sync\nbat=80',
+    );
+    expect(find.text('Sync running · update when it finishes'), findsNothing);
+    await status(tester, 'Sync started\n1000 bytes');
+    expect(find.text('Sync running · update when it finishes'), findsOneWidget);
+    expect(find.text('Sync running · try when it finishes'), findsOneWidget);
+    await status(tester, 'Sync complete: all notes saved');
+    await tester.pump();
+    expect(find.text('Sync running · update when it finishes'), findsNothing);
+    await close(tester);
+  });
 }

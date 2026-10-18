@@ -1485,7 +1485,11 @@ extension _ScPages on _CircuitHomePageState {
     ].join(' · ');
   }
 
+  /// A sync is running: the board refuses an update (and the reverse) while the other is under way.
+  bool get _syncRunning => _syncActive || _syncingNoteId != null;
+
   String _firmwareCaption() {
+    if (_syncRunning) return 'Sync running · update when it finishes';
     if (!_updateBatteryOk) {
       return 'Needs ${BoardReport.minUpdatePercent}% battery · Circuit has $_boardBattery%';
     }
@@ -1859,6 +1863,7 @@ extension _ScPages on _CircuitHomePageState {
               idle &&
                   !_updatingFirmware &&
                   _boardPower?.mode != 'rec' &&
+                  !_syncRunning &&
                   _updateBatteryOk
               ? _updateCircuitFirmware
               : null,
@@ -1872,8 +1877,14 @@ extension _ScPages on _CircuitHomePageState {
         ),
         ScRow(
           title: 'Reset Circuit firmware',
-          caption: 'Go back to the previous firmware, or the stable one',
-          onTap: idle && !_updatingFirmware && _boardPower?.mode != 'rec'
+          caption: _syncRunning
+              ? 'Sync running · try when it finishes'
+              : 'Go back to the previous firmware, or the stable one',
+          onTap:
+              idle &&
+                  !_updatingFirmware &&
+                  _boardPower?.mode != 'rec' &&
+                  !_syncRunning
               ? _resetCircuitFirmware
               : null,
           trailing: Icon(

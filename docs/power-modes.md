@@ -14,7 +14,7 @@ between jobs. The phone is only involved during a **sync mode** that the person 
 ## Sync mode
 
 1. Hold the record key for **5 seconds** while idle. A tap (under 1.2 s) still records; a hold between the two does
-   nothing. The ring fills while the key is held.
+   nothing.
 2. The board advertises and shows the sync picture with "Sync mode / Open the app".
 3. Open the app. It connects (the phone does not look for the board in the background) and the board starts the sync
    by itself. The phone also brings the clock and time zone, the Wi-Fi network, deletes of notes removed on the phone,
