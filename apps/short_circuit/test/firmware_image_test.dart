@@ -21,6 +21,19 @@ Uint8List image({
 }
 
 void main() {
+  test('reads the power mode Circuit reports', () {
+    expect(
+      BoardReport.powerFrom('@sync-status\nfw=2.0.0|aaaaaaaa\npm=deep|auto'),
+      (mode: 'deep', choice: 'auto'),
+    );
+    expect(BoardReport.powerFrom('@sync-status\npm=rec|saver'), (
+      mode: 'rec',
+      choice: 'saver',
+    ));
+    expect(BoardReport.powerFrom('@sync-status\nfw=2.0.0|aaaaaaaa'), isNull);
+    expect(BoardReport.powerFrom('@sync-status\npm=weird|auto'), isNull);
+  });
+
   test(
     'compares firmware versions as numbers, with dev builds below the release',
     () {

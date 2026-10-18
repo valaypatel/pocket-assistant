@@ -163,6 +163,8 @@ extension _ScPages on _CircuitHomePageState {
     'connected' => _wifiSsid.isEmpty ? 'Connected' : _wifiSsid,
     'connecting' => 'Connecting…',
     'failed' => 'Failed',
+    // Circuit switched Wi-Fi off to save power (battery below 35%); it comes back for a sync, broadcast or update.
+    'resting' => _wifiSsid.isEmpty ? 'Resting' : '$_wifiSsid · resting',
     _ => 'Not set up',
   };
 
@@ -1441,6 +1443,38 @@ extension _ScPages on _CircuitHomePageState {
         : 'Firmware ${running.version} · choose a file to install';
   }
 
+  /// "Power: Deep (battery below 35%)", red when Circuit only records.
+  Widget _powerLine(({String mode, String choice}) power) {
+    final recordOnly = power.mode == 'rec';
+    final color = recordOnly ? context.sc.danger : context.sc.muted;
+    final text = switch (power.mode) {
+      'rec' => 'Battery very low · Circuit only records, charge it to sync',
+      'deep' =>
+        power.choice == 'deep'
+            ? 'Power: Deep (your choice)'
+            : 'Power: Deep (battery below 35%)',
+      _ => 'Power: Saver',
+    };
+    return Semantics(
+      label: text,
+      excludeSemantics: true,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            recordOnly ? LucideIcons.batteryWarning : LucideIcons.leaf,
+            size: 16,
+            color: color,
+          ),
+          const SizedBox(width: ScSpace.xs),
+          Flexible(
+            child: Text(text, style: ScType.caption.copyWith(color: color)),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// "Card 3.1 GB of 29.7 GB used", red when it is nearly full.
   Widget _storageLine(({int usedKb, int totalKb}) card) {
     final full = card.usedKb / card.totalKb > 0.9;
@@ -1550,6 +1584,10 @@ extension _ScPages on _CircuitHomePageState {
                     if (available && _boardStorage != null) ...[
                       const SizedBox(height: ScSpace.xs),
                       _storageLine(_boardStorage!),
+                    ],
+                    if (available && _boardPower != null) ...[
+                      const SizedBox(height: ScSpace.xs),
+                      _powerLine(_boardPower!),
                     ],
                   ],
                 ),
@@ -1703,7 +1741,9 @@ extension _ScPages on _CircuitHomePageState {
         ScRow(
           title: 'Broadcast a message',
           caption: 'Type it and Circuit says it out loud',
-          onTap: idle && !_broadcasting ? _broadcastToCircuit : null,
+          onTap: idle && !_broadcasting && _boardPower?.mode != 'rec'
+              ? _broadcastToCircuit
+              : null,
           trailing: _broadcasting
               ? const SizedBox(
                   width: 18,
@@ -1715,7 +1755,9 @@ extension _ScPages on _CircuitHomePageState {
         ScRow(
           title: 'Update Circuit',
           caption: _firmwareCaption(),
-          onTap: idle && !_updatingFirmware ? _updateCircuitFirmware : null,
+          onTap: idle && !_updatingFirmware && _boardPower?.mode != 'rec'
+              ? _updateCircuitFirmware
+              : null,
           trailing: _updatingFirmware
               ? const SizedBox(
                   width: 18,
@@ -1727,12 +1769,24 @@ extension _ScPages on _CircuitHomePageState {
         ScRow(
           title: 'Reset Circuit firmware',
           caption: 'Go back to the previous firmware, or the stable one',
-          onTap: idle && !_updatingFirmware ? _resetCircuitFirmware : null,
+          onTap: idle && !_updatingFirmware && _boardPower?.mode != 'rec'
+              ? _resetCircuitFirmware
+              : null,
           trailing: Icon(
             LucideIcons.rotateCcw,
             size: 18,
             color: context.sc.muted,
           ),
+        ),
+        ScRow(
+          title: 'Power mode',
+          caption: switch (_boardPower?.choice) {
+            'saver' => 'Saver (your choice)',
+            'deep' => 'Deep (your choice)',
+            _ => 'Auto: Circuit decides from its battery',
+          },
+          onTap: available ? _choosePowerMode : null,
+          trailing: Icon(LucideIcons.leaf, size: 18, color: context.sc.muted),
         ),
         ScRow(
           title: 'Free up space',

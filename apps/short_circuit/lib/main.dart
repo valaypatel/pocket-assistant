@@ -1339,6 +1339,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   ({String version, String built})? _boardFirmware;
   ({String version, String built})? _boardPrevious;
   ({int usedKb, int totalKb})? _boardStorage;
+  ({String mode, String choice})? _boardPower;
   bool _resetNoticeShown = false;
   // What Circuit reports about its own Wi-Fi: none, connecting, connected, failed.
   String _wifiState = 'none';
@@ -2501,6 +2502,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       if (message.contains('\nsd=')) {
         _boardStorage = BoardReport.storageFrom(message);
       }
+      _boardPower = BoardReport.powerFrom(message) ?? _boardPower;
       if (waiting != null) {
         if (waiting > 0 && (_boardWaiting ?? 0) == 0)
           _waitingSince = DateTime.now();
@@ -3491,6 +3493,55 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       await _installCircuitFirmware(FirmwareImage.parse(bytes));
     } on FormatException catch (error) {
       _setStatus(error.message);
+    }
+  }
+
+  /// "Power mode": Circuit chooses by itself from its battery (Saver above 35%, Deep from 35% down to 10%, and
+  /// recording only at 10% or below). This lets the phone ask it to save more: it can never ask for less than the
+  /// battery allows.
+  Future<void> _choosePowerMode() async {
+    final current = _boardPower?.choice ?? 'auto';
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final (value, title, detail) in const [
+              (
+                'auto',
+                'Auto',
+                'Circuit decides from its battery: Saver above 35%, Deep below',
+              ),
+              (
+                'saver',
+                'Saver',
+                'Light sleep, everything works (Deep and recording-only still apply when the battery is low)',
+              ),
+              (
+                'deep',
+                'Deep',
+                'Use less power now: the radios are used sparingly, notes reach the phone in the next check-in',
+              ),
+            ])
+              ListTile(
+                leading: Icon(
+                  current == value ? LucideIcons.circleDot : LucideIcons.circle,
+                ),
+                title: Text(title),
+                subtitle: Text(detail),
+                onTap: () => Navigator.pop(context, value),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || choice == current || !mounted) return;
+    try {
+      await _writeCircuit('@power-mode\n$choice');
+      _setStatus('Asked Circuit to use $choice power mode');
+    } catch (error) {
+      _setStatus('Could not ask Circuit: $error');
     }
   }
 

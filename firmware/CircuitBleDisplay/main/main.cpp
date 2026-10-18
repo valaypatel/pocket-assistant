@@ -15,6 +15,7 @@
 #include "esp_codec_dev.h"
 #include "esp_ota_ops.h"
 #include "esp_pm.h"
+#include "driver/usb_serial_jtag.h"
 #include "esp_sleep.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
@@ -108,6 +109,11 @@ constexpr int kBatteryHardFloorMv = 3000;
 // A cell being charged climbs; one being used only falls. A rise of this much between two readings means
 // USB is charging it, which is the only way to tell, as the board has no USB-power sense line.
 constexpr int kBatteryRisingMv = 5;
+// Plugging a charger in lifts the terminal voltage at once (about 160 mV at 3.7 V), long before the cell has
+// taken any charge; unplugging drops it again. A step this big between two readings is that, not chemistry.
+constexpr int kBatteryChargeStepMv = 60;
+// Under the highest reading of a charge by this much: the charger has stopped (cell full), the voltage is resting.
+constexpr int kBatteryChargeEndMv = 30;
 constexpr TickType_t kButtonPollInterval = pdMS_TO_TICKS(20);
 constexpr TickType_t kButtonDebounceDelay = pdMS_TO_TICKS(50);
 constexpr TickType_t kForceSyncHoldTime = pdMS_TO_TICKS(2000);
@@ -172,7 +178,7 @@ volatile TickType_t recording_started_at = 0;
 uint32_t pairing_passkey = 0;
 bool wifi_connected = false;
 // What the header icon and the app's Wi-Fi setup screen show.
-enum class WifiUi : uint8_t { None, Connecting, Connected, Failed };
+enum class WifiUi : uint8_t { None, Connecting, Connected, Failed, Resting };  // Resting: switched off to save power
 volatile WifiUi wifi_ui = WifiUi::None;
 char wifi_ssid[33] = "";
 char wifi_detail[48] = "";  // IP address when connected, reason when failed
@@ -186,9 +192,11 @@ lv_obj_t *icon_wifi_obj;
 lv_obj_t *battery_body;
 lv_obj_t *battery_fill;
 lv_obj_t *battery_nub;
+lv_obj_t *battery_bolt;  // inside the battery body while USB is charging
 lv_obj_t *battery_label;
 // The charge shown, 0 to 100 in steps of 5; -1 until the first reading.
 volatile int battery_percent = -1;
+volatile bool battery_charging = false;  // USB is pushing current in: the voltage reads high (see battery_tick)
 lv_obj_t *icon_phone_obj;
 lv_obj_t *icon_storage_obj;
 uint8_t status_icon_frame = 0;
@@ -257,7 +265,50 @@ void release_audio() {
 // would interrupt it is allowed: recording, playing, syncing, a broadcast, and switching off.
 TaskHandle_t animation_task_handle = nullptr;  // woken when the screen changes, so it can sleep while nothing animates
 TaskHandle_t record_button_handle = nullptr;  // the record key's task; woken by its interrupt (and by the dev console)
+// ---- Power modes ----------------------------------------------------------
+// The battery decides how much the board does (the phone can only ask for more saving, never less):
+//   Saver       above 35%: light sleep, everything works.
+//   Deep        35% down to 10%: the radios are used sparingly (see the stages in docs/power-modes.md).
+//   RecordOnly  10% or below: it records, and nothing else: no sync, no broadcast, no update, no playback.
+// A tier is entered at its threshold and left 5 points higher, so a reading that wobbles with load does not flip it.
+enum class PowerMode : uint8_t { Saver = 0, Deep = 1, RecordOnly = 2 };
+enum class PowerChoice : uint8_t { Auto = 0, Saver = 1, Deep = 2 };  // what the phone asks for
+constexpr int kDeepBelowPercent = 35;       // at or below: Deep
+constexpr int kRecordOnlyBelowPercent = 10;  // at or below: RecordOnly
+constexpr int kTierMarginPercent = 5;
+PowerMode power_auto_mode = PowerMode::Saver;       // from the battery
+PowerChoice power_choice = PowerChoice::Auto;       // from the phone, kept across restarts
+PowerMode effective_power_mode() {
+    // The phone can ask for Deep early; it can never lift the board out of a tier the battery has put it in.
+    PowerMode wanted = power_choice == PowerChoice::Deep ? PowerMode::Deep : PowerMode::Saver;
+    return static_cast<uint8_t>(power_auto_mode) > static_cast<uint8_t>(wanted) ? power_auto_mode : wanted;
+}
+bool recording_only() { return effective_power_mode() == PowerMode::RecordOnly; }
+const char *power_mode_name(PowerMode mode) {
+    return mode == PowerMode::RecordOnly ? "rec" : mode == PowerMode::Deep ? "deep" : "saver";
+}
+
+// ---- Radios in Deep ---------------------------------------------------------
+// Below the Saver tier the board keeps the phone's Bluetooth link but slows it right down (an event about once a
+// second, so a message from the phone still arrives within a few seconds), and rests Wi-Fi, the big cost, until a
+// sync, a broadcast or an update needs it: then it is switched on, the board waits for it, and does the job.
+bool wifi_resting = false;
+int64_t wifi_last_needed_ms = 0;  // when something last used Wi-Fi or asked for it
+constexpr int64_t kWifiIdleBeforeRestMs = 60000;
+enum class AfterWifi : uint8_t { Nothing, Sync, Broadcast, Update };
+volatile AfterWifi after_wifi = AfterWifi::Nothing;  // what to do once Wi-Fi is up again
+bool after_wifi_forced = false;
+void request_after_wifi(AfterWifi action, bool forced);
+void wifi_wake();
+void wifi_rest();
+void apply_ble_rhythm();
+void apply_power_policy();
+uint8_t connected_bda[6] = {};
+bool adv_restart_pending = false;
 bool ble_seen_since_boot = false;  // a phone has connected and secured the link since the board started
+bool light_sleep_pinned_off = false;  // the development console asked for it off: stay off
+bool usb_host_connected = false;      // a computer is on the USB cable: the board stays awake (see update_usb_awake)
+esp_pm_lock_handle_t usb_awake_lock = nullptr;
 bool light_sleep_on = false;  // see "Light sleep" further down
 void set_light_sleep(bool on);
 void log_power_use();
@@ -1432,7 +1483,7 @@ void speak_audio_task(void *) {
 
 // Starts playing the message that just arrived. If the speaker is taken, the message is dropped.
 void start_speak_playback() {
-    if (update_busy() || !claim_audio()) {
+    if (recording_only() || update_busy() || !claim_audio()) {
         remove(circuit_sync::kSpeakPath);
         report_audio_status("Broadcast failed: Circuit is busy");
         return;
@@ -1540,7 +1591,7 @@ const char *wifi_reason_text(uint8_t reason) {
 }
 
 void send_wifi_status() {
-    static const char *const names[] = {"none", "connecting", "connected", "failed"};
+    static const char *const names[] = {"none", "connecting", "connected", "failed", "resting"};
     char message[kMaxTextBytes + 1];
     // The Wi-Fi MAC address goes last as "mac=..." so older apps, which read everything after the
     // third line as the detail, just show it there and newer ones pick it out.
@@ -1606,8 +1657,9 @@ void send_sync_status() {
     //   sd   the card's space in use, then its total size, in KB (absent without a card)
     char build_id[9] = "";
     esp_app_get_elf_sha256(build_id, sizeof(build_id));
-    snprintf(message, sizeof(message), "@sync-status\nfw=%s|%s\nprev=%s\nsd=%s",
-        esp_app_get_description()->version, build_id, previous, card);
+    snprintf(message, sizeof(message), "@sync-status\nfw=%.20s|%s\nprev=%.40s\nsd=%.30s\npm=%s|%s",
+        esp_app_get_description()->version, build_id, previous, card, power_mode_name(effective_power_mode()),
+        power_choice == PowerChoice::Deep ? "deep" : power_choice == PowerChoice::Saver ? "saver" : "auto");
     send_relay_request(message);
 }
 
@@ -1640,10 +1692,10 @@ void refresh_status_icons() {
     const bool storage = sd_card != nullptr;
     const int state = (phone ? 1 : 0) | (storage ? 2 : 0);
     static int shown_battery = -2;
-    const int battery = battery_percent;
+    const int battery = battery_percent < 0 ? battery_percent : battery_percent + (battery_charging ? 1000 : 0);
     // "zzz" says the board is in its sleeping mode and idle: it goes as soon as something wakes it up to work
     // (a recording, playback, a sync, an update), and comes back to the idle screen. Redrawn only when it flips.
-    const bool zzz = light_sleep_on && active_screen == DeviceScreen::Idle;
+    const bool zzz = light_sleep_on && !usb_host_connected && active_screen == DeviceScreen::Idle;
     if (zzz != zzz_shown && Lvgl_lock(-1)) {
         zzz_shown = zzz;
         if (zzz) {
@@ -1674,22 +1726,26 @@ void refresh_status_icons() {
     place(icon_phone_obj, phone ? &circuit_icon_phone : nullptr, 5);
     place(icon_wifi_obj, wifi_src, 3);
     // Battery, to the left of the other icons: [number][body][tip].
+    const bool charging = battery >= 1000;
+    const int level = charging ? battery - 1000 : battery;
     if (battery < 0) {
         for (lv_obj_t *part : {battery_body, battery_nub, battery_label}) lv_obj_add_flag(part, LV_OBJ_FLAG_HIDDEN);
     } else {
         const int body_x = x_right - 18;
         lv_obj_set_pos(battery_body, body_x, 6);
         lv_obj_set_pos(battery_nub, body_x + 16, 8);
-        int fill = (battery * 12 + 50) / 100;
-        if (battery > 0 && fill < 1) fill = 1;
+        int fill = (level * 12 + 50) / 100;
+        if (level > 0 && fill < 1) fill = 1;
         lv_obj_set_size(battery_fill, fill, 6);
         lv_obj_set_style_bg_opa(battery_fill, fill > 0 ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
         char text[16];
-        if (battery <= kBatteryLowPercent) {
+        if (level <= kBatteryLowPercent) {
             snprintf(text, sizeof(text), "LOW");
         } else {
-            snprintf(text, sizeof(text), "%d", battery);
+            snprintf(text, sizeof(text), "%d", level);
         }
+        if (charging) lv_obj_clear_flag(battery_bolt, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(battery_bolt, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(battery_label, text);
         lv_obj_update_layout(battery_label);
         lv_obj_set_pos(battery_label, body_x - 3 - lv_obj_get_width(battery_label), 5);
@@ -1703,6 +1759,48 @@ void refresh_status_icons() {
 // load, when the voltage sags and would read low. The median of the last five readings is rounded to steps
 // of 5 and only changes when it has really moved, so the screen is not redrawn for noise. A change is also
 // sent to the phone.
+// Chooses the battery's tier for this charge. Returns true when it changed.
+bool update_power_mode(int percent) {
+    if (percent < 0) return false;
+    PowerMode next = power_auto_mode;
+    switch (power_auto_mode) {
+    case PowerMode::Saver:
+        if (percent <= kRecordOnlyBelowPercent) next = PowerMode::RecordOnly;
+        else if (percent <= kDeepBelowPercent) next = PowerMode::Deep;
+        break;
+    case PowerMode::Deep:
+        if (percent <= kRecordOnlyBelowPercent) next = PowerMode::RecordOnly;
+        else if (percent >= kDeepBelowPercent + kTierMarginPercent) next = PowerMode::Saver;
+        break;
+    case PowerMode::RecordOnly:
+        if (percent >= kDeepBelowPercent + kTierMarginPercent) next = PowerMode::Saver;
+        else if (percent >= kRecordOnlyBelowPercent + kTierMarginPercent) next = PowerMode::Deep;
+        break;
+    }
+    if (next == power_auto_mode) return false;
+    ESP_LOGW(kTag, "Power mode by battery: %s -> %s (%d%%)", power_mode_name(power_auto_mode), power_mode_name(next), percent);
+    power_auto_mode = next;
+    return true;
+}
+
+void save_power_choice() {
+    nvs_handle_t handle;
+    if (nvs_open("power", NVS_READWRITE, &handle) != ESP_OK) return;
+    nvs_set_u8(handle, "choice", static_cast<uint8_t>(power_choice));
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+void load_power_choice() {
+    nvs_handle_t handle;
+    uint8_t value = 0;
+    if (nvs_open("power", NVS_READONLY, &handle) != ESP_OK) return;
+    if (nvs_get_u8(handle, "choice", &value) == ESP_OK && value <= static_cast<uint8_t>(PowerChoice::Deep)) {
+        power_choice = static_cast<PowerChoice>(value);
+    }
+    nvs_close(handle);
+}
+
 void battery_tick() {
     static int ticks = 0;
     static int samples[5];
@@ -1719,7 +1817,7 @@ void battery_tick() {
     if (logged++ % 10 == 0) {
         ESP_LOGI(kTag, "Battery log: %d mV, uptime %lld s, phone %s, wifi %s%s", mv,
             static_cast<long long>(circuit_sync::now_ms() / 1000), connection_id != UINT16_MAX ? "connected" : "no",
-            wifi_ui == WifiUi::Connected ? "connected" : (wifi_ui == WifiUi::None ? "off" : "trying"),
+            wifi_ui == WifiUi::Connected ? "connected" : (wifi_ui == WifiUi::None ? "off" : (wifi_ui == WifiUi::Resting ? "resting" : "trying")),
             update_busy() ? ", updating" : "");
         log_power_use();
     }
@@ -1749,15 +1847,69 @@ void battery_tick() {
         power_off("Battery empty\nCharge it, then hold\nthe power key");
         return;
     }
-    const int raw = circuit_battery::percent_from_mv(sorted[n / 2]);
+    // Charging: take the push of the charger off the reading (about 150 mV at 3.8 V, less as the cell fills; the
+    // charger ends the cycle at about 4.2 V terminal, 4.12 V resting), and never let the figure fall while it
+    // lasts. Unplugged, it settles back on the resting reading.
+    static int last_mv = 0;
+    const int step = last_mv > 0 ? mv - last_mv : 0;
+    last_mv = mv;
+    static bool by_step = false;
+    static bool host_before = false;
+    if (step >= kBatteryChargeStepMv) by_step = true;
+    else if (step <= -kBatteryChargeStepMv || (host_before && !usb_host_connected)) by_step = false;
+    host_before = usb_host_connected;
+    // The charger ends its cycle when the cell is full and the voltage then sags back to its resting value; a
+    // reading well under the highest one of this charge means nothing is being pushed in any more.
+    static int peak_mv = 0;
+    static bool finished = false;
+    if (!by_step) { peak_mv = 0; finished = false; }
+    else if (mv > peak_mv) { peak_mv = mv; finished = false; }
+    else if (mv < peak_mv - kBatteryChargeEndMv) finished = true;
+    const bool now_charging = by_step && !finished;  // a cable alone proves nothing: a finished charger pushes no current
+    if (now_charging != battery_charging) {
+        battery_charging = now_charging;
+        ESP_LOGI(kTag, "Battery: charging %s (%d mV)", now_charging ? "started" : "ended", mv);
+        send_sync_status();
+    }
+    int effective_mv = sorted[n / 2];
+    if (battery_charging) {
+        const int push = effective_mv <= 3800 ? 150 : (effective_mv >= 4150 ? 80 : 150 - (effective_mv - 3800) * 70 / 350);
+        effective_mv -= push;
+    }
+    // The charger only ends its cycle when the cell is full, whatever the loaded voltage then reads (a board that
+    // is awake sags 30 to 40 mV): show 100 until the cable comes out.
+    static bool full_hold = false;
+    full_hold = by_step && (full_hold || finished);
+    int raw = full_hold ? 100 : circuit_battery::percent_from_mv(effective_mv);
     const int shown = battery_percent;
+    if (battery_charging && shown >= 0 && raw < shown) raw = shown;
     if (shown >= 0 && (raw - shown < 4 && shown - raw < 4)) return;
     int rounded = ((raw + 2) / 5) * 5;
     if (rounded > 100) rounded = 100;
     if (rounded == shown) return;
     battery_percent = rounded;
     ESP_LOGI(kTag, "Battery now %d%% (%d mV)", rounded, sorted[n / 2]);
+    if (update_power_mode(rounded)) apply_power_policy();
     send_sync_status();
+}
+
+// While a computer is on the USB cable the board stays awake: it is powered, its console and the programmer both
+// need the chip awake, and sleeping saves nothing worth having. A plain charger or a power bank does not count (the
+// chip sees no USB frames from them), and the board sleeps as usual: sleeping does not slow charging, which the
+// charger does by itself. Checked at each status tick, which wakes the chip about once a second even in sleep.
+void update_usb_awake() {
+    bool host = usb_serial_jtag_is_connected();
+    for (int i = 0; !host && i < 3; ++i) {  // just woken: give the USB frames a moment to show up
+        esp_rom_delay_us(2000);
+        host = usb_serial_jtag_is_connected();
+    }
+    if (host == usb_host_connected) return;
+    usb_host_connected = host;
+    if (usb_awake_lock != nullptr) {
+        if (host) esp_pm_lock_acquire(usb_awake_lock);
+        else esp_pm_lock_release(usb_awake_lock);
+    }
+    ESP_LOGW(kTag, "USB host %s: %s", host ? "connected" : "gone", host ? "staying awake" : "sleeping allowed");
 }
 
 void sync_ui_tick();
@@ -1766,6 +1918,7 @@ void status_icon_task(void *) {
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(900));
         ++status_icon_frame;
+        update_usb_awake();
         battery_tick();
         refresh_status_icons();
         sync_ui_tick();
@@ -1888,9 +2041,18 @@ void offer_upload(bool firmware) {
     uint32_t count = 0, bytes = 0;
     const char *what = firmware ? "Update" : "Broadcast";
     char problem[96];
+    if (recording_only()) {
+        snprintf(problem, sizeof(problem), "%s failed: battery is low, Circuit only records now", what);
+        report_audio_status(problem);
+        return;
+    }
     if (recording_active || audio_busy || circuit_sync::is_open()) {
         snprintf(problem, sizeof(problem), "%s failed: Circuit is busy", what);
         report_audio_status(problem);
+        return;
+    }
+    if (wifi_resting && wifi_ssid[0] != '\0') {  // switched off to save power: wake it, then come back here
+        request_after_wifi(firmware ? AfterWifi::Update : AfterWifi::Broadcast, false);
         return;
     }
     if (!can_offer_wifi_sync() || !circuit_sync::wifi_ip(ip, sizeof(ip))) {
@@ -2017,7 +2179,9 @@ bool previous_firmware(char *version, size_t version_size, char *build, size_t b
 // Switches back to the previous firmware: no upload, just the boot choice and a restart.
 void revert_firmware_task(void *) {
     char version[32], build[9];
-    if (update_busy() || audio_busy || recording_active || circuit_sync::is_open()) {
+    if (recording_only()) {
+        report_audio_status("Update failed: battery is low, Circuit only records now");
+    } else if (update_busy() || audio_busy || recording_active || circuit_sync::is_open()) {
         report_audio_status("Update failed: Circuit is busy");
     } else if (!previous_firmware(version, sizeof(version), build, sizeof(build))) {
         report_audio_status("Update failed: there is no previous firmware on Circuit");
@@ -2135,6 +2299,7 @@ void sync_supervisor_task(void *) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(circuit_sync::is_open() ? 500 : 7500));
         // A new firmware is kept only once it has run for 40 s AND a phone has connected to it (so one that cannot
         // talk to a phone is not kept), or after ten minutes with no phone about, so it is not left on trial forever.
+        if (circuit_sync::is_open()) wifi_last_needed_ms = circuit_sync::now_ms();  // checked twice a second then
         const int64_t up_s = esp_timer_get_time() / 1000000;
         if (!firmware_confirmed && up_s > 40 && (ble_seen_since_boot || up_s > 600)) {
             mark_firmware_good();
@@ -2166,6 +2331,19 @@ void sync_supervisor_task(void *) {
         }
         if (circuit_sync::now_ms() - last_slow_check_ms < pdTICKS_TO_MS(kSyncSupervisorInterval) - 600) continue;
         last_slow_check_ms = circuit_sync::now_ms();
+        // Once the radios are up (not at the very start), put the Bluetooth rhythm that goes with the power mode in place.
+        static bool policy_applied = false;
+        if (!policy_applied && esp_timer_get_time() > 10LL * 1000000) {
+            policy_applied = true;
+            apply_power_policy();
+        }
+        // Wi-Fi follows the power mode: resting below Saver once it has sat unused for a minute, back on in Saver.
+        if (circuit_sync::is_open() || after_wifi != AfterWifi::Nothing) wifi_last_needed_ms = circuit_sync::now_ms();
+        if (effective_power_mode() != PowerMode::Saver) {
+            if (!wifi_resting && circuit_sync::now_ms() - wifi_last_needed_ms > kWifiIdleBeforeRestMs) wifi_rest();
+        } else if (wifi_resting) {
+            wifi_wake();
+        }
         // After giving up, try again now and then (sooner if it was not a password problem).
         if (wifi_ui == WifiUi::Failed && wifi_ssid[0] != '\0' &&
             circuit_sync::now_ms() - wifi_failed_at_ms > (wifi_auth_failure ? 300000 : 60000)) {
@@ -2196,6 +2374,11 @@ void sync_supervisor_task(void *) {
 // on the device's own screen; the app is told in a status message.
 // `only_recording` (the app's "sync this note") limits the sync to that recording; 0 syncs everything.
 void start_audio_sync(bool forced, uint32_t only_recording = 0) {
+    if (recording_only()) {
+        report_audio_status("Battery is low: Circuit only records now. Charge it to sync");
+        if (forced) flash_sync_result("LOW");
+        return;
+    }
     if (update_busy()) {
         report_audio_status("Cannot sync while Circuit is updating");
         return;
@@ -2222,6 +2405,10 @@ void start_audio_sync(bool forced, uint32_t only_recording = 0) {
     }
     if (circuit_sync::is_open()) {
         report_audio_status("Sync already in progress");
+        return;
+    }
+    if (wifi_resting && wifi_ssid[0] != '\0') {  // switched off to save power: wake it, then come back here
+        request_after_wifi(AfterWifi::Sync, forced);
         return;
     }
     if (offer_wifi_sync(only_recording)) {
@@ -2403,12 +2590,17 @@ void dev_console_task(void *) {
             // Pretends the charge is N% until the next real reading (about a minute): for checking the LOW
             // header and the phone's low-battery alert without draining the cell.
             battery_percent = atoi(line + 12);
+            if (update_power_mode(battery_percent)) apply_power_policy();
             refresh_status_icons();
             send_sync_status();
-            ESP_LOGW(kTag, "DEV battery-set: showing %d%%", static_cast<int>(battery_percent));
+            ESP_LOGW(kTag, "DEV battery-set: showing %d%%, power mode %s", static_cast<int>(battery_percent),
+                power_mode_name(effective_power_mode()));
         } else if (strncmp(line, "sleep", 5) == 0) {
             if (strcmp(line, "sleep on") == 0) set_light_sleep(true);
-            else if (strcmp(line, "sleep off") == 0) set_light_sleep(false);
+            else if (strcmp(line, "sleep off") == 0) {
+                light_sleep_pinned_off = true;  // and not turned on again by the start-up timer
+                set_light_sleep(false);
+            }
             ESP_LOGW(kTag, "DEV sleep: light sleep is %s", light_sleep_on ? "on" : "off");
         } else if (strcmp(line, "pm") == 0) {
             log_power_use();
@@ -2828,11 +3020,38 @@ void set_light_sleep(bool on) {
     ESP_LOGW(kTag, "Light sleep %s: %s", on ? "on" : "off", esp_err_to_name(result));
 }
 
+#ifdef CIRCUIT_DEV_CONSOLE
+// A development build with sleep on starts with it off for 90 s, so a cable can still be used to read the card's
+// log or to flash it after a restart (the USB port is dead while the chip sleeps).
+void light_sleep_after_grace(void *) {
+    if (!light_sleep_pinned_off) set_light_sleep(true);
+}
+#endif
+
 void init_light_sleep() {
     esp_pm_sleep_cbs_register_config_t callbacks = {};
     callbacks.enter_cb = keys_enter_light_sleep;
     callbacks.exit_cb = keys_exit_light_sleep;
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_pm_light_sleep_register_cbs(&callbacks));
+    // With power management on, ESP-IDF disables every GPIO pad while the chip sleeps (PM_SLP_DISABLE_GPIO, which
+    // saves 200 to 300 uA). That let go of the battery latch: on USB nothing showed, but unplugged the board
+    // switched itself off a minute after sleep began. These three pads keep their normal state through a sleep:
+    // the battery latch, and the e-paper and audio power rails (dropping those would lose the codec's set-up).
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb_host", &usb_awake_lock));
+    gpio_sleep_sel_dis(kBatteryLatchPin);
+    gpio_sleep_sel_dis(GPIO_NUM_6);   // the e-paper's power (EPD_PWR_PIN in Waveshare's epaper_config.h)
+    gpio_sleep_sel_dis(GPIO_NUM_42);  // the audio codec and amplifier's power (Audio_PWR_PIN)
+#ifdef CIRCUIT_DEV_CONSOLE
+    if (kLightSleepDefault) {
+        set_light_sleep(false);
+        static esp_timer_handle_t grace_timer = nullptr;
+        esp_timer_create_args_t args = {};
+        args.callback = light_sleep_after_grace;
+        args.name = "sleep_grace";
+        if (esp_timer_create(&args, &grace_timer) == ESP_OK) esp_timer_start_once(grace_timer, 90LL * 1000000);
+        return;
+    }
+#endif
     set_light_sleep(kLightSleepDefault);
 }
 
@@ -2854,6 +3073,10 @@ void log_power_use() {
 }
 
 void start_playback() {
+    if (recording_only()) {
+        report_audio_status("Battery is low: Circuit only records now");
+        return;
+    }
     if (update_busy()) {
         report_audio_status("Cannot play while Circuit is updating");
         return;
@@ -3004,6 +3227,10 @@ bool parse_wifi_command(char *value, wifi_config_t *config) {
 }
 
 void provision_wifi(char *value) {
+    if (wifi_resting) {  // setting up a network needs the radio on
+        wifi_resting = false;
+        esp_wifi_start();
+    }
     wifi_config_t config = {};
     if (!parse_wifi_command(value, &config)) {
         update_connection_status("Wi-Fi setup failed\nCheck SSID/password");
@@ -3023,6 +3250,10 @@ void provision_wifi(char *value) {
 }
 
 void forget_wifi() {
+    if (wifi_resting) {
+        wifi_resting = false;
+        esp_wifi_start();
+    }
     wifi_manual_disconnect = wifi_connected;
     esp_wifi_disconnect();
     wifi_config_t empty = {};
@@ -3034,6 +3265,11 @@ void forget_wifi() {
 }
 
 void wifi_scan_task(void *) {
+    if (wifi_resting) {  // scanning needs the radio on
+        wifi_resting = false;
+        esp_wifi_start();
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
     update_connection_status("Wi-Fi: scanning nearby networks…");
     wifi_scan_config_t config = {};
     if (esp_wifi_scan_start(&config, true) != ESP_OK) {
@@ -3133,6 +3369,18 @@ void text_display_task(void *) {
                     snprintf(result, sizeof(result), "Notes cleaned: %u removed from Circuit", static_cast<unsigned>(removed));
                     report_audio_status(result);
                 }
+            } else if (strncmp(message.value, "@power-mode\n", 12) == 0) {
+                const char *want = message.value + 12;
+                const PowerChoice before = power_choice;
+                if (strcmp(want, "auto") == 0) power_choice = PowerChoice::Auto;
+                else if (strcmp(want, "saver") == 0) power_choice = PowerChoice::Saver;
+                else if (strcmp(want, "deep") == 0) power_choice = PowerChoice::Deep;
+                if (power_choice != before) {
+                    save_power_choice();
+                    apply_power_policy();
+                }
+                ESP_LOGW(kTag, "Power mode asked for by the phone: %s (now %s)", want, power_mode_name(effective_power_mode()));
+                send_sync_status();
             } else if (strcmp(message.value, "@speak-prepare") == 0) {
                 offer_speak();
             } else if (strcmp(message.value, "@firmware-prepare") == 0) {
@@ -3222,6 +3470,13 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
         break;
     case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
         ESP_LOGI(kTag, "Advertising as %s", kDeviceName);
+        break;
+    case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
+        if (adv_restart_pending && connection_id == UINT16_MAX) {
+            adv_restart_pending = false;
+            esp_ble_gap_start_advertising(&adv_params);
+        }
+        adv_restart_pending = false;
         break;
     case ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT:
         if (param->read_rssi_cmpl.status == ESP_BT_STATUS_SUCCESS) {
@@ -3371,13 +3626,8 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
     {
         // Ask the phone to keep the link relaxed: an event every 100 to 200 ms, and up to two skipped when there
         // is nothing to say. A message from the phone still arrives within about half a second.
-        esp_ble_conn_update_params_t relaxed = {};
-        memcpy(relaxed.bda, param->connect.remote_bda, sizeof(relaxed.bda));
-        relaxed.min_int = 0x50;
-        relaxed.max_int = 0xA0;
-        relaxed.latency = 2;
-        relaxed.timeout = 400;  // 4 s, comfortably above (1 + latency) x interval x 2
-        esp_ble_gap_update_conn_params(&relaxed);
+        memcpy(connected_bda, param->connect.remote_bda, sizeof(connected_bda));
+        apply_ble_rhythm();  // relaxed in Saver, slow below
     }
     {
         const uint8_t *a = param->connect.remote_bda;
@@ -3490,6 +3740,97 @@ void start_wifi() {
     }
 }
 
+void wifi_rest() {
+    if (wifi_resting || wifi_ssid[0] == '\0') return;  // already resting, or no network to rest
+    if (circuit_sync::is_open() || update_busy() || after_wifi != AfterWifi::Nothing) return;
+    wifi_resting = true;
+    wifi_manual_disconnect = wifi_connected;  // the disconnect that follows is ours
+    esp_wifi_disconnect();
+    esp_wifi_stop();
+    wifi_connected = false;
+    wifi_internet_online = false;
+    set_wifi_ui(WifiUi::Resting, "off to save power; on when needed");
+    ESP_LOGW(kTag, "Wi-Fi resting (power mode %s)", power_mode_name(effective_power_mode()));
+}
+
+void wifi_wake() {
+    if (!wifi_resting) return;
+    wifi_resting = false;
+    wifi_retries = 0;
+    wifi_last_needed_ms = circuit_sync::now_ms();
+    ESP_LOGW(kTag, "Wi-Fi waking");
+    esp_wifi_start();  // the network is saved in flash
+    set_wifi_ui(WifiUi::Connecting);
+    esp_wifi_connect();
+}
+
+void wifi_wait_task(void *) {
+    // Wi-Fi was off; wait for it (a few seconds) and do what was asked.
+    char ip[16];
+    int waited_ms = 0;
+    while (waited_ms < 25000 && !(wifi_connected && circuit_sync::wifi_ip(ip, sizeof(ip)))) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+        waited_ms += 250;
+    }
+    const AfterWifi action = after_wifi;
+    const bool forced = after_wifi_forced;
+    after_wifi = AfterWifi::Nothing;
+    wifi_last_needed_ms = circuit_sync::now_ms();
+    if (!(wifi_connected && circuit_sync::wifi_ip(ip, sizeof(ip)))) {
+        report_audio_status("Wi-Fi did not connect: try again, or check the network");
+        if (forced) flash_sync_result("ERR");
+    } else if (action == AfterWifi::Sync) {
+        start_audio_sync(forced);
+    } else if (action == AfterWifi::Broadcast) {
+        offer_upload(false);
+    } else if (action == AfterWifi::Update) {
+        offer_upload(true);
+    }
+    vTaskDelete(nullptr);
+}
+
+void request_after_wifi(AfterWifi action, bool forced) {
+    if (after_wifi != AfterWifi::Nothing) return;  // already waiting for it
+    after_wifi = action;
+    after_wifi_forced = forced;
+    wifi_wake();
+    if (xTaskCreate(wifi_wait_task, "wifi_wait", 4096, nullptr, 4, nullptr) != pdPASS) {
+        after_wifi = AfterWifi::Nothing;
+        report_audio_status("Could not wake Wi-Fi");
+    }
+}
+
+// The Bluetooth rhythm follows the power mode: relaxed (100 to 200 ms) in Saver, slow (about a second) below. The
+// phone is asked to change an open link; advertising for a phone that is away changes as well.
+void apply_ble_rhythm() {
+    if (connection_id == UINT16_MAX) return;
+    const bool slow = effective_power_mode() != PowerMode::Saver;
+    esp_ble_conn_update_params_t params = {};
+    memcpy(params.bda, connected_bda, sizeof(params.bda));
+    params.min_int = slow ? 0x280 : 0x50;  // 800 ms : 100 ms
+    params.max_int = slow ? 0x320 : 0xA0;  // 1000 ms : 200 ms
+    params.latency = slow ? 3 : 2;
+    params.timeout = slow ? 1000 : 400;    // 10 s : 4 s, above (1 + latency) x interval x 2 either way
+    esp_ble_gap_update_conn_params(&params);
+}
+
+void apply_adv_rhythm() {
+    const bool slow = effective_power_mode() != PowerMode::Saver;
+    adv_params.adv_int_min = slow ? 0x640 : 0xA0;  // 1 s : 100 ms (units of 0.625 ms)
+    adv_params.adv_int_max = slow ? 0x7D0 : 0x140;  // 1.25 s : 200 ms
+    if (connection_id == UINT16_MAX) {  // advertising for a phone that is away: restart it with the new rhythm
+        adv_restart_pending = true;
+        esp_ble_gap_stop_advertising();
+    }
+}
+
+void apply_power_policy() {
+    ESP_LOGW(kTag, "Power policy: %s", power_mode_name(effective_power_mode()));
+    apply_ble_rhythm();
+    apply_adv_rhythm();
+    if (effective_power_mode() == PowerMode::Saver) wifi_wake();  // resting ends at once; resting starts after a minute idle
+}
+
 void init_display() {
     BoardPower_Init();
     BoardPower_VBAT_ON();  // BoardPower_Init sets the pins up again; keep the battery latched
@@ -3564,6 +3905,14 @@ void init_display() {
         lv_obj_set_size(battery_fill, 12, 6);
         lv_obj_set_style_bg_color(battery_fill, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(battery_fill, LV_OPA_COVER, 0);
+        battery_bolt = lv_label_create(battery_body);
+        lv_obj_set_style_text_font(battery_bolt, &lv_font_montserrat_12, 0);
+        lv_label_set_text(battery_bolt, LV_SYMBOL_CHARGE);
+        lv_obj_set_style_text_color(battery_bolt, lv_color_black(), 0);
+        lv_obj_set_style_bg_color(battery_bolt, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(battery_bolt, LV_OPA_COVER, 0);
+        lv_obj_align(battery_bolt, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_add_flag(battery_bolt, LV_OBJ_FLAG_HIDDEN);
         battery_nub = lv_obj_create(lv_screen_active());
         lv_obj_remove_style_all(battery_nub);
         lv_obj_set_size(battery_nub, 2, 4);
@@ -3680,6 +4029,7 @@ extern "C" void app_main(void) {
         ESP_ERROR_CHECK(nvs_status);
     }
 
+    load_power_choice();
     crypto_self_test_ok = run_crypto_self_test();
     note_key_ready = circuit_secure::load_key(&note_key);
     ESP_LOGI(kTag, "Notes crypto self-test: %s; notes key: %s", crypto_self_test_ok ? "PASS" : "FAIL",
@@ -3751,6 +4101,7 @@ extern "C" void app_main(void) {
             if (battery_percent < 0) {
                 const int first = ((circuit_battery::percent_from_mv(battery_mv) + 2) / 5) * 5;
                 battery_percent = first > 100 ? 100 : first;
+                update_power_mode(battery_percent);  // the policy is applied once the radios are up (start-up)
             }
         } else {
             ESP_LOGI(kTag, "Battery: not readable");
