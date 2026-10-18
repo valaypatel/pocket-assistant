@@ -25,4 +25,20 @@ class NoteListingTest {
         assertNull(notes[0].group)
         assertEquals(0L, notes[1].epoch)
     }
+
+    @Test
+    fun `the parts of one recording count as one note`() {
+        // One long recording in three parts, then two plain notes: three notes, not five files.
+        val notes = NoteListing.parse(
+            "10,100,1,10,1,0\n11,100,1,10,2,0\n12,100,1,10,3,1\n20,100,2\n21,100,3\n"
+        )
+        assertEquals(3, NoteListing.recordingCount(notes))
+        assertEquals(listOf(1, 1, 1, 2, 3), notes.indices.map { NoteListing.recordingNumber(notes, it) })
+    }
+
+    @Test
+    fun `one recording in three parts shows as a single note`() {
+        val notes = NoteListing.parse("10,100,1,10,1,0\n11,100,1,10,2,0\n12,100,1,10,3,1\n")
+        assertEquals(1, NoteListing.recordingCount(notes))
+    }
 }

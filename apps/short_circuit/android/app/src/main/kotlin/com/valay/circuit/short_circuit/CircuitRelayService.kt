@@ -805,8 +805,8 @@ class CircuitRelayService : Service() {
                                         val notePercent = (partial.length() * 100 / bytes).toInt().coerceIn(0, 99)
                                         if (notePercent != lastNotePercent && notePercent % 2 == 0) {
                                             lastNotePercent = notePercent
-                                            publishAudioStatus("Sync note #$id: $notePercent% (${noteIndex + 1} of ${notes.size})")
-                                            setSyncNotification(noteIndex + 1, notes.size, notePercent)
+                                            publishAudioStatus("Sync note #$id: $notePercent% (${NoteListing.recordingNumber(notes, noteIndex)} of ${NoteListing.recordingCount(notes)})")
+                                            setSyncNotification(NoteListing.recordingNumber(notes, noteIndex), NoteListing.recordingCount(notes), notePercent)
                                         }
                                     }
                                 }
