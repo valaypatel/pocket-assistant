@@ -1648,11 +1648,32 @@ extension _ScPages on _CircuitHomePageState {
             label: 'Repair pairing',
             onPressed: _connecting ? null : _repairPairing,
           )
+        else if (asleep)
+          // The app looks by itself every few seconds while this page is open, so there is no button to press
+          // (one would flicker between enabled and disabled with each attempt): a steady line says so.
+          Semantics(
+            liveRegion: false,
+            label: 'Looking for Circuit',
+            child: Row(
+              children: [
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: ScSpace.sm),
+                Text(
+                  'Looking for Circuit…',
+                  style: ScType.caption.copyWith(color: context.sc.muted),
+                ),
+              ],
+            ),
+          )
         else if (_savedCircuitId != null) ...[
           ScButton(
             primary: true,
-            icon: asleep ? LucideIcons.search : LucideIcons.rotateCw,
-            label: asleep ? 'Look for Circuit' : 'Reconnect',
+            icon: LucideIcons.rotateCw,
+            label: 'Reconnect',
             onPressed: _connecting
                 ? null
                 : () => _connect(
@@ -1660,7 +1681,7 @@ extension _ScPages on _CircuitHomePageState {
                     savedReconnect: true,
                   ),
           ),
-          if (!asleep) ...[
+          ...[
             const SizedBox(height: ScSpace.sm),
             ScButton(
               icon: LucideIcons.bluetoothSearching,
