@@ -63,14 +63,14 @@ jobs:
       - name: Work out the version
         id: version
         # The firmware's own version, shown on the board and in the app. A release is the tag's number; any
-        # other build is 2.0.<run number>, which only ever goes up, so the app can tell which of two builds is
-        # newer. (A build made by hand on a machine is 2.0.0-dev.N, see tools/board_dev.py.)
+        # other build is 3.0.<run number>, which only ever goes up, so the app can tell which of two builds is
+        # newer. (A build made by hand on a machine is 3.0.0-dev.N, see tools/board_dev.py.)
         run: |
           if [[ "$GITHUB_REF" == refs/tags/firmware-v* ]]; then
             version="${GITHUB_REF_NAME#firmware-v}"
             [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::The tag must look like firmware-v1.2.3"; exit 1; }
           else
-            version="2.0.${GITHUB_RUN_NUMBER}"
+            version="3.0.${GITHUB_RUN_NUMBER}"
           fi
           echo "name=$version" >> "$GITHUB_OUTPUT"
 

@@ -218,8 +218,8 @@ inside the app, over Wi-Fi, with no cable. The version is decided in one place p
 
 | Build | Version | Where |
 |---|---|---|
-| Made by hand (`tools/board_dev.py build`) | `2.0.0-dev.N`, one higher every build | counted in `firmware/CircuitBleDisplay/.build-number`, not committed |
-| CI, a push or pull request | `2.0.<run number>`, which only goes up | `firmware.yml` |
+| Made by hand (`tools/board_dev.py build`) | `3.0.0-dev.N`, one higher every build | counted in `firmware/CircuitBleDisplay/.build-number`, not committed |
+| CI, a push or pull request | `3.0.<run number>`, which only goes up | `firmware.yml` |
 | CI, a tag `firmware-vX.Y.Z` | `X.Y.Z` | `firmware.yml` |
 
 The app compares versions as numbers, and a `-dev` build is older than the release with the same numbers, so it

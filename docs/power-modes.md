@@ -1,33 +1,48 @@
-# Power modes
+# Power: standalone and sync mode (firmware 3)
 
-Circuit decides how much it does from its battery. The phone can ask it to save more, never less than the battery
-allows. The board reports its mode in the third `@sync-status` packet as `pm=<mode>|<choice>`.
+From firmware 3.0.0 Circuit works on its own. Its radios (Bluetooth advertising, Wi-Fi) are off and the chip sleeps
+between jobs. The phone is only involved during a **sync mode** that the person starts on the board.
 
-| Battery | Mode (`pm=`) | What the board does |
-|---|---|---|
-| above 35% | **Saver** (`saver`) | Light sleep; Bluetooth connected at a relaxed rhythm; sync, broadcast, updates and playback all work. |
-| 35% down to 10% | **Deep** (`deep`) | The radios are used sparingly (stage 3 below). Recording works. |
-| 10% or below | **Recording only** (`rec`) | It records and nothing else: no sync, no broadcast, no update, no playback. The app greys those actions out. |
+## Standalone (the default)
 
-A tier is entered at its threshold and left 5 points higher: Saver to Deep at 35% and back at 40%; Deep to
-recording-only at 10% and back to Deep at 15%. The percentage is rounded to steps of 5 and comes from the voltage,
-so it wobbles with load; the margin keeps it from flipping. The empty-battery switch-off at about 3.25 V stays as the
-last line of defence.
+- Records, plays back and shows its screen by itself. Nothing waits for a phone.
+- Bluetooth does not advertise and Wi-Fi is stopped (the network is remembered).
+- Notes wait on the card until the next sync. The phone cannot ask the board anything, so the app shows what it last
+  knew ("Last seen 2 h ago · 90%") and no count of waiting notes.
+- The phone cannot record, play or broadcast on the board in this mode (those commands are refused with a message).
 
-The phone's choice (`@power-mode\n<auto|saver|deep>`) is kept across restarts. "Deep" asks for that tier early;
-"Saver" and "Auto" follow the battery. Whichever is chosen, the battery's tier wins when it is higher.
+## Sync mode
 
-## Stages
+1. Hold the record key for **5 seconds** while idle. A tap (under 1.2 s) still records; a hold between the two does
+   nothing. The ring fills while the key is held.
+2. The board advertises and shows the sync picture with "Sync mode / Open the app".
+3. Open the app. It connects (the phone does not look for the board in the background) and the board starts the sync
+   by itself. The phone also brings the clock and time zone, the Wi-Fi network, deletes of notes removed on the phone,
+   and a firmware update if one is chosen. Wi-Fi is switched on only when a sync or an update needs it.
+4. It ends 60 seconds after the last activity (a command, a sync, an update, a key press), after 2 minutes with no
+   phone, or when the key is held for 5 seconds again. Radios go down; the app stops chasing the board.
 
-1. **Mode logic** (built): the tiers with their margins, the phone's choice, the report to the app, and a line and a
-   "Power mode" row in the app.
-2. **Recording-only lock** (built): sync, broadcast, update, firmware revert and playback are refused at 10% or below,
-   with a message that says why.
-3. **Deep sleep** (not built yet): in Deep the board turns its radios off and wakes on a key press or a short timer
-   window every 15 minutes, when it advertises for about 10 seconds so the phone can connect and sync; a 2-second
-   press does the same on demand. It needs the battery-switch pin held through sleep (or the board switches itself
-   off), and a fast-start path so that a key press starts recording in 1 to 2 seconds instead of the 8 seconds a full
-   start takes.
+A board that has never been paired stays in sync mode until a phone has paired.
 
-Test the tiers without draining the battery with the development console: `tools/board_dev.py battery-set N`
-pretends the charge is N% for about a minute and logs the mode it picks.
+## Battery
+
+- At **10% or below** on battery the hold shows "LOW" and the radios stay off, so the last charge goes to recording.
+  With a charger or a computer on the cable the hold works as normal.
+- A **firmware update needs 30%** battery.
+- Charging: a bolt shows in the battery icon, the charger's push is taken off the reading, and 100 shows once the
+  charger has ended its cycle (see `battery_tick` in `main.cpp`).
+
+## What is kept for later
+
+The always-connected behaviour (Saver, Deep and recording-only tiers, the phone's Auto/Saver/Deep choice, Wi-Fi
+resting, broadcast, remote record and play) is still in the firmware behind `connected_mode`, a development switch
+(`tools/board_dev.py connected on|off`, restarts the board). It is the base for a "stay connected" option later.
+The board reports `mode=sync` or `mode=connected` in its status; a board that reports none is firmware 2 and stays
+linked, and the app treats it that way.
+
+## Testing
+
+- `tools/board_dev.py syncmode on|off` opens and closes sync mode; `key hold 6` does it with the real key code.
+- `tools/quick_regression.py` (board only) checks the 3 s hold, the 5 s hold, closing, and a tap still recording.
+- `tools/regression.py` (full, with the phone) syncs over the old connected behaviour: run it after
+  `board_dev.py connected on`, then switch back with `connected off`.

@@ -154,6 +154,17 @@ class BoardReport {
     return (mode: match.group(1)!, choice: match.group(2)!);
   }
 
+  /// `mode=<sync|connected>` in a status: "sync" when the board works on its own and only has its radios on for a
+  /// sync (firmware 3), "connected" when it stays linked (the old behaviour, kept for a "stay connected" option).
+  /// Null when the board sent none (older firmware, which stays linked).
+  static String? modeFrom(String status) {
+    final match = RegExp(r'mode=(sync|connected)').firstMatch(status);
+    return match?.group(1);
+  }
+
+  /// A firmware update needs at least this much battery.
+  static const minUpdatePercent = 30;
+
   /// "3.1 GB of 29.7 GB used" (or in MB for small figures).
   static String describeStorage(({int usedKb, int totalKb}) card) {
     String size(int kb) => kb >= 1024 * 1024

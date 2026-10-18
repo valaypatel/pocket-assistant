@@ -208,7 +208,7 @@ extension _ScPages on _CircuitHomePageState {
                 ),
                 SizedBox(width: 10),
                 Text(
-                  'Sync needs attention',
+                  'Sync stopped',
                   style: TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
@@ -550,7 +550,7 @@ extension _ScPages on _CircuitHomePageState {
       return ScStatusStrip(
         tone: ScStripTone.danger,
         leading: LucideIcons.refreshCwOff,
-        title: 'Sync needs attention',
+        title: 'Sync stopped',
         detail: error,
         actions: [
           TextButton(onPressed: _retrySync, child: const Text('Retry')),
@@ -789,33 +789,41 @@ extension _ScPages on _CircuitHomePageState {
             ScTile(
               icon: LucideIcons.radio,
               title: 'Circuit',
-              subtitle: _circuitAvailable
+              subtitle: _boardWorksAlone
+                  ? 'Press Circuit’s record key. It works on its own.'
+                  : _circuitAvailable
                   ? 'Record on your connected device.'
                   : 'Connect Circuit to use its microphone.',
-              onTap: () {
-                Navigator.pop(sheetContext);
-                if (_circuitAvailable) {
-                  _recordAudio();
-                } else {
-                  _goTo(_AppPage.circuit);
-                }
-              },
+              onTap: _boardWorksAlone
+                  ? null
+                  : () {
+                      Navigator.pop(sheetContext);
+                      if (_circuitAvailable) {
+                        _recordAudio();
+                      } else {
+                        _goTo(_AppPage.circuit);
+                      }
+                    },
               trailing: const Icon(LucideIcons.chevronRight, size: 18),
             ),
             ScTile(
               icon: LucideIcons.music,
               title: 'Identify a song',
-              subtitle: _circuitAvailable
+              subtitle: _boardWorksAlone
+                  ? 'Not available while Circuit works on its own.'
+                  : _circuitAvailable
                   ? 'Capture a short clip on Circuit.'
                   : 'Connect Circuit to capture a song.',
-              onTap: () {
-                Navigator.pop(sheetContext);
-                if (_circuitAvailable) {
-                  _identifySong();
-                } else {
-                  _goTo(_AppPage.circuit);
-                }
-              },
+              onTap: _boardWorksAlone
+                  ? null
+                  : () {
+                      Navigator.pop(sheetContext);
+                      if (_circuitAvailable) {
+                        _identifySong();
+                      } else {
+                        _goTo(_AppPage.circuit);
+                      }
+                    },
               trailing: const Icon(LucideIcons.chevronRight, size: 18),
             ),
           ],
@@ -1436,7 +1444,22 @@ extension _ScPages on _CircuitHomePageState {
   }
 
   /// What Circuit runs now, for the Update row.
+  /// An update needs 30% battery; unknown (not reported yet) is let through, the board checks as well.
+  bool get _updateBatteryOk =>
+      _boardBattery == null || _boardBattery! >= BoardReport.minUpdatePercent;
+
+  /// "Last seen 2 h ago · battery 90% · firmware 3.0.0": the figures from the last time Circuit was reachable.
+  String _lastBoardLine(({int? battery, String? version, DateTime at}) board) {
+    return [
+      'Last seen ${_ago(board.at)}',
+      if (board.battery != null) '${board.battery}%',
+    ].join(' · ');
+  }
+
   String _firmwareCaption() {
+    if (!_updateBatteryOk) {
+      return 'Needs ${BoardReport.minUpdatePercent}% battery · Circuit has $_boardBattery%';
+    }
     final running = _boardFirmware;
     return running == null
         ? 'Choose a firmware file to install'
@@ -1507,8 +1530,13 @@ extension _ScPages on _CircuitHomePageState {
         !_audioBusy &&
         !_recordingAudio &&
         _circuitPlayback == CircuitPlaybackPhase.idle;
-    final headline = available
-        ? (_relayActive
+    final asleep = !available && _boardWorksAlone && _savedCircuitId != null;
+    final headline = asleep
+        ? 'Working on its own'
+        : available
+        ? (_boardWorksAlone
+              ? 'Sync mode'
+              : _relayActive
               ? 'Connected through your phone'
               : 'Connected over Bluetooth')
         : _needsPairingRepair
@@ -1521,6 +1549,8 @@ extension _ScPages on _CircuitHomePageState {
         : !available
         ? (_savedCircuitId == null
               ? 'Scan to find your Circuit and bring your thoughts here.'
+              : _boardWorksAlone
+              ? 'Hold its record key for 5 s to sync.'
               : 'Turn Circuit on and keep it close.')
         : [
             waiting == 0 ? 'Everything is synced' : '$waiting waiting to sync',
@@ -1554,6 +1584,8 @@ extension _ScPages on _CircuitHomePageState {
                         Icon(
                           available
                               ? LucideIcons.circleCheck
+                              : asleep
+                              ? LucideIcons.moon
                               : LucideIcons.bluetoothOff,
                           size: 18,
                           color: available
@@ -1577,6 +1609,13 @@ extension _ScPages on _CircuitHomePageState {
                       detail,
                       style: ScType.caption.copyWith(color: context.sc.muted),
                     ),
+                    if (!available && _lastBoard != null) ...[
+                      const SizedBox(height: ScSpace.xs),
+                      Text(
+                        _lastBoardLine(_lastBoard!),
+                        style: ScType.caption.copyWith(color: context.sc.muted),
+                      ),
+                    ],
                     if (available && _boardBattery != null) ...[
                       const SizedBox(height: ScSpace.xs),
                       _batteryLine(_boardBattery!),
@@ -1585,7 +1624,9 @@ extension _ScPages on _CircuitHomePageState {
                       const SizedBox(height: ScSpace.xs),
                       _storageLine(_boardStorage!),
                     ],
-                    if (available && _boardPower != null) ...[
+                    if (available &&
+                        _boardPower != null &&
+                        !_boardWorksAlone) ...[
                       const SizedBox(height: ScSpace.xs),
                       _powerLine(_boardPower!),
                     ],
@@ -1610,8 +1651,8 @@ extension _ScPages on _CircuitHomePageState {
         else if (_savedCircuitId != null) ...[
           ScButton(
             primary: true,
-            icon: LucideIcons.rotateCw,
-            label: 'Reconnect',
+            icon: asleep ? LucideIcons.search : LucideIcons.rotateCw,
+            label: asleep ? 'Look for Circuit' : 'Reconnect',
             onPressed: _connecting
                 ? null
                 : () => _connect(
@@ -1619,13 +1660,15 @@ extension _ScPages on _CircuitHomePageState {
                     savedReconnect: true,
                   ),
           ),
-          const SizedBox(height: ScSpace.sm),
-          ScButton(
-            icon: LucideIcons.bluetoothSearching,
-            label: _scanning ? 'Scanning…' : 'Scan for Circuit',
-            busy: _scanning,
-            onPressed: _connecting ? null : _scan,
-          ),
+          if (!asleep) ...[
+            const SizedBox(height: ScSpace.sm),
+            ScButton(
+              icon: LucideIcons.bluetoothSearching,
+              label: _scanning ? 'Scanning…' : 'Scan for Circuit',
+              busy: _scanning,
+              onPressed: _connecting ? null : _scan,
+            ),
+          ],
         ] else
           ScButton(
             primary: true,
@@ -1653,32 +1696,33 @@ extension _ScPages on _CircuitHomePageState {
           const SizedBox(height: ScSpace.md),
         ],
       ] else ...[
-        Row(
-          children: [
-            Expanded(
-              child: _captureButton(
-                icon: LucideIcons.circle,
-                iconSize: 11,
-                label: 'Record',
-                tooltip: 'Record a voice note on Circuit',
-                color: context.sc.accent,
-                onTap: idle ? _recordAudio : null,
+        if (!_boardWorksAlone)
+          Row(
+            children: [
+              Expanded(
+                child: _captureButton(
+                  icon: LucideIcons.circle,
+                  iconSize: 11,
+                  label: 'Record',
+                  tooltip: 'Record a voice note on Circuit',
+                  color: context.sc.accent,
+                  onTap: idle ? _recordAudio : null,
+                ),
               ),
-            ),
-            const SizedBox(width: ScSpace.md),
-            Expanded(
-              child: _captureButton(
-                icon: LucideIcons.music,
-                iconSize: 15,
-                label: 'Identify song',
-                tooltip:
-                    'Listen for $_songClipSeconds seconds and identify the song',
-                color: context.sc.dark,
-                onTap: idle ? _identifySong : null,
+              const SizedBox(width: ScSpace.md),
+              Expanded(
+                child: _captureButton(
+                  icon: LucideIcons.music,
+                  iconSize: 15,
+                  label: 'Identify song',
+                  tooltip:
+                      'Listen for $_songClipSeconds seconds and identify the song',
+                  color: context.sc.dark,
+                  onTap: idle ? _identifySong : null,
+                ),
               ),
-            ),
-          ],
-        ),
+            ],
+          ),
         if (waiting > 0 && !_syncActive && !_recordingAudio) ...[
           const SizedBox(height: ScSpace.md),
           ScButton(
@@ -1699,63 +1743,73 @@ extension _ScPages on _CircuitHomePageState {
         ],
         const SizedBox(height: ScSpace.xl),
         const ScGroupLabel('On Circuit'),
-        Tooltip(
-          message: switch (_circuitPlayback) {
-            CircuitPlaybackPhase.playing =>
-              _circuitPlaybackSupportsStop
-                  ? 'Stop playback on Circuit'
-                  : 'Playing on Circuit',
-            _ => 'Play latest recording on Circuit',
-          },
-          child: ScRow(
-            title: _circuitPlayback == CircuitPlaybackPhase.playing
-                ? (_circuitPlaybackSupportsStop
-                      ? 'Stop playback'
-                      : 'Playing on Circuit')
-                : 'Play latest recording',
-            caption: 'Plays through Circuit’s speaker',
-            onTap: _audioBusy || _recordingAudio
-                ? null
-                : _circuitPlayback == CircuitPlaybackPhase.playing
-                ? (_circuitPlaybackSupportsStop ? _stopCircuitPlayback : null)
-                : _circuitPlayback == CircuitPlaybackPhase.idle
-                ? _playAudio
+        if (!_boardWorksAlone)
+          Tooltip(
+            message: switch (_circuitPlayback) {
+              CircuitPlaybackPhase.playing =>
+                _circuitPlaybackSupportsStop
+                    ? 'Stop playback on Circuit'
+                    : 'Playing on Circuit',
+              _ => 'Play latest recording on Circuit',
+            },
+            child: ScRow(
+              title: _circuitPlayback == CircuitPlaybackPhase.playing
+                  ? (_circuitPlaybackSupportsStop
+                        ? 'Stop playback'
+                        : 'Playing on Circuit')
+                  : 'Play latest recording',
+              caption: 'Plays through Circuit’s speaker',
+              onTap: _audioBusy || _recordingAudio
+                  ? null
+                  : _circuitPlayback == CircuitPlaybackPhase.playing
+                  ? (_circuitPlaybackSupportsStop ? _stopCircuitPlayback : null)
+                  : _circuitPlayback == CircuitPlaybackPhase.idle
+                  ? _playAudio
+                  : null,
+              trailing:
+                  _circuitPlayback == CircuitPlaybackPhase.requesting ||
+                      _circuitPlayback == CircuitPlaybackPhase.stopping
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(
+                      _circuitPlayback == CircuitPlaybackPhase.playing
+                          ? LucideIcons.square
+                          : LucideIcons.play,
+                      size: 18,
+                      color: context.sc.muted,
+                    ),
+            ),
+          ),
+        if (!_boardWorksAlone)
+          ScRow(
+            title: 'Broadcast a message',
+            caption: 'Type it and Circuit says it out loud',
+            onTap: idle && !_broadcasting && _boardPower?.mode != 'rec'
+                ? _broadcastToCircuit
                 : null,
-            trailing:
-                _circuitPlayback == CircuitPlaybackPhase.requesting ||
-                    _circuitPlayback == CircuitPlaybackPhase.stopping
+            trailing: _broadcasting
                 ? const SizedBox(
                     width: 18,
                     height: 18,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : Icon(
-                    _circuitPlayback == CircuitPlaybackPhase.playing
-                        ? LucideIcons.square
-                        : LucideIcons.play,
+                    LucideIcons.megaphone,
                     size: 18,
                     color: context.sc.muted,
                   ),
           ),
-        ),
-        ScRow(
-          title: 'Broadcast a message',
-          caption: 'Type it and Circuit says it out loud',
-          onTap: idle && !_broadcasting && _boardPower?.mode != 'rec'
-              ? _broadcastToCircuit
-              : null,
-          trailing: _broadcasting
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : Icon(LucideIcons.megaphone, size: 18, color: context.sc.muted),
-        ),
         ScRow(
           title: 'Update Circuit',
           caption: _firmwareCaption(),
-          onTap: idle && !_updatingFirmware && _boardPower?.mode != 'rec'
+          onTap:
+              idle &&
+                  !_updatingFirmware &&
+                  _boardPower?.mode != 'rec' &&
+                  _updateBatteryOk
               ? _updateCircuitFirmware
               : null,
           trailing: _updatingFirmware
@@ -1778,16 +1832,17 @@ extension _ScPages on _CircuitHomePageState {
             color: context.sc.muted,
           ),
         ),
-        ScRow(
-          title: 'Power mode',
-          caption: switch (_boardPower?.choice) {
-            'saver' => 'Saver (your choice)',
-            'deep' => 'Deep (your choice)',
-            _ => 'Auto: Circuit decides from its battery',
-          },
-          onTap: available ? _choosePowerMode : null,
-          trailing: Icon(LucideIcons.leaf, size: 18, color: context.sc.muted),
-        ),
+        if (!_boardWorksAlone)
+          ScRow(
+            title: 'Power mode',
+            caption: switch (_boardPower?.choice) {
+              'saver' => 'Saver (your choice)',
+              'deep' => 'Deep (your choice)',
+              _ => 'Auto: Circuit decides from its battery',
+            },
+            onTap: available ? _choosePowerMode : null,
+            trailing: Icon(LucideIcons.leaf, size: 18, color: context.sc.muted),
+          ),
         ScRow(
           title: 'Free up space',
           caption: 'Remove notes already saved on your phone',
@@ -1812,15 +1867,16 @@ extension _ScPages on _CircuitHomePageState {
             : null,
         onTap: available ? () => _goTo(_AppPage.wifi) : null,
       ),
-      ScRow(
-        title: 'Stay connected',
-        caption: _relayActive
-            ? 'Circuit stays linked in the background. Tap to turn off.'
-            : 'Keeps Circuit linked in the background',
-        value: _relayActive ? 'On' : 'Off',
-        valueColor: _relayActive ? context.sc.green : context.sc.muted,
-        onTap: _relayActive ? _stopPhoneRelay : null,
-      ),
+      if (!_boardWorksAlone)
+        ScRow(
+          title: 'Stay connected',
+          caption: _relayActive
+              ? 'Circuit stays linked in the background. Tap to turn off.'
+              : 'Keeps Circuit linked in the background',
+          value: _relayActive ? 'On' : 'Off',
+          valueColor: _relayActive ? context.sc.green : context.sc.muted,
+          onTap: _relayActive ? _stopPhoneRelay : null,
+        ),
       if (_textCharacteristic != null)
         ScRow(title: 'Disconnect', onTap: () => _device?.disconnect()),
       if (_savedCircuitId != null) ...[

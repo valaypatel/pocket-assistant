@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Development helper for the Circuit board: test sync without recording by hand.
 
-  board_dev.py build [--sleep]  build the development firmware (--sleep: light sleep on from the start; the USB console then drops out while it sleeps) (adds a USB command console); each build gets the next number, 2.0.0-dev.N
+  board_dev.py build [--sleep]  build the development firmware (--sleep: light sleep on from the start; the USB console then drops out while it sleeps) (adds a USB command console); each build gets the next number, 3.0.0-dev.N
   board_dev.py flash            stop the logger, flash the development firmware, restart the logger
   board_dev.py copy [N]         copy the N newest synced notes (default 3) as new, unsynced notes
   board_dev.py sync             offer a Wi-Fi sync to the phone now and wait for it to end
@@ -11,6 +11,8 @@
   board_dev.py speak-open       open a broadcast session and print its address, port, token and fingerprint
   board_dev.py firmware-open    open an update session and print its address, port, token and fingerprint (then PUT the .bin to /firmware)
   board_dev.py sleep on|off     turn light sleep on or off now (the USB port drops out while it is on and the chip sleeps)
+  board_dev.py connected on|off  the old always-connected behaviour (restarts the board; default off: it works on its own)
+  board_dev.py syncmode on|off  open or close sync mode now (what holding the record key for 5 s does)
   board_dev.py pm               log the power manager's table: time at each speed and asleep, and what holds the chip awake
   board_dev.py update-screen [N]  show the firmware-update screen at N% for a minute (no update happens)
   board_dev.py battery-set N    pretend the charge is N% for about a minute (checks the LOW header and the phone's alert)
@@ -65,11 +67,11 @@ def idf_shell(command, cwd):
 
 
 BUILD_NUMBER_FILE = os.path.join(PROJECT, ".build-number")  # not committed: it counts builds on this machine
-VERSION_BASE = "2.0.0-dev"
+VERSION_BASE = "3.0.0-dev"
 
 
 def next_version():
-    """2.0.0-dev.N, with N one higher than the last development build, so a newer build is always a bigger number."""
+    """3.0.0-dev.N, with N one higher than the last development build, so a newer build is always a bigger number."""
     try:
         with open(BUILD_NUMBER_FILE) as f:
             number = int(f.read().strip()) + 1
@@ -186,6 +188,12 @@ def main():
         return send(f"copy-sync {n}", ("SYNCSTAT", "0 file(s)"), 600)
     if cmd == "sleep" and len(args) > 1:
         return send("sleep " + args[1], "DEV sleep", 15)
+    if cmd == "power-choice" and len(args) > 1:
+        return send("power-choice " + args[1], "DEV power-choice", 15)
+    if cmd == "connected" and len(args) > 1:
+        return send("connected " + args[1], "DEV connected", 15)
+    if cmd == "syncmode" and len(args) > 1:
+        return send("syncmode " + args[1], "Sync mode", 15)
     if cmd == "pm":
         return send("pm", "DEV pm", 15)
     if cmd == "update-screen":
