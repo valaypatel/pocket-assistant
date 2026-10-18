@@ -1346,7 +1346,12 @@ class _CircuitHomePageState extends State<CircuitHomePage>
 
   /// What the board said the last time it was reachable: shown while it is asleep, so the figures are marked old.
   ({int? battery, String? version, DateTime at})? _lastBoard;
-  bool get _boardWorksAlone => _boardMode == 'sync';
+
+  /// Firmware 3 works on its own; a board whose mode was never reported counts as such when its last known version
+  /// is 3 or later (the app was closed or restarted while it slept).
+  bool get _boardWorksAlone =>
+      _boardMode == 'sync' ||
+      (_boardMode == null && (_lastBoard?.version?.startsWith('3.') ?? false));
   bool _resetNoticeShown = false;
   int _lookTicks = 0;
 
