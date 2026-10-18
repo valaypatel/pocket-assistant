@@ -547,87 +547,116 @@ extension _ScPages on _CircuitHomePageState {
   Widget _notesStatusStrip(int arriving) {
     final error = _syncError;
     if (error != null) {
-      return ScStatusStrip(
-        tone: ScStripTone.danger,
-        leading: LucideIcons.refreshCwOff,
-        title: 'Sync stopped',
-        detail: error,
-        actions: [
-          TextButton(onPressed: _retrySync, child: const Text('Retry')),
-          IconButton(
-            tooltip: 'Dismiss sync error',
-            icon: const Icon(LucideIcons.x, size: 18),
-            onPressed: () => _update(() => _syncError = null),
-          ),
-        ],
+      return _syncPill(
+        icon: LucideIcons.refreshCwOff,
+        text: 'Sync stopped · Retry',
+        danger: true,
+        onTap: _retrySync,
+        onClose: () => _update(() => _syncError = null),
       );
     }
     if (_syncingNoteId != null || _syncActive) {
-      // Each note shows its own progress bar in its row; the strip only says a sync is running and how far
-      // along the list it is. Without per-note figures it keeps the single bar.
+      // Each note shows its own progress bar in its row; the pill only says a sync is running.
       final perNote = _noteProgress.isNotEmpty;
-      return ScStatusStrip(
-        tone: ScStripTone.progress,
-        title: perNote ? 'Syncing from Circuit' : 'Syncing a voice note',
-        detail: perNote
+      return _syncPill(
+        spinner: true,
+        text: perNote
             ? (_syncNoteCount > 1
-                  ? 'Note $_syncNoteIndex of $_syncNoteCount'
-                  : null)
-            : '${_syncProgress ?? 0}%',
-        showProgress: !perNote,
-        progress: _syncProgress == null ? null : _syncProgress! / 100,
+                  ? 'Syncing · $_syncNoteIndex of $_syncNoteCount'
+                  : 'Syncing')
+            : 'Syncing · ${_syncProgress ?? 0}%',
       );
     }
     if (_recordingAudio) {
-      // Each finished minute of a long recording is a note on Circuit, but nothing syncs until it ends.
-      return const ScStatusStrip(
-        tone: ScStripTone.neutral,
-        leading: LucideIcons.mic,
-        title: 'Circuit is recording',
-        detail: 'Its notes sync when the recording ends.',
-      );
+      return _syncPill(icon: LucideIcons.mic, text: 'Circuit recording');
     }
     if (arriving > 0) {
-      return ScStatusStrip(
-        tone: ScStripTone.neutral,
-        leading: LucideIcons.download,
-        title: arriving == 1
-            ? 'A longer recording is arriving from Circuit'
-            : '$arriving longer recordings are arriving from Circuit',
-        detail: 'They appear here when all of each is on your phone.',
-      );
+      return _syncPill(spinner: true, text: 'Receiving');
     }
     if (!_circuitAvailable) {
-      return ScStatusStrip(
-        tone: ScStripTone.neutral,
-        leading: LucideIcons.unplug,
-        title: 'Circuit is not connected',
-        detail: 'Notes already on your phone are still here.',
-        actions: [
-          TextButton(
-            onPressed: () => _goTo(_AppPage.circuit),
-            child: const Text('Open Circuit'),
-          ),
-        ],
+      return _syncPill(
+        icon: LucideIcons.moon,
+        text: 'Not syncing',
+        onTap: () => _goTo(_AppPage.circuit),
       );
     }
     final waiting = _waitingCount;
     if (waiting > 0) {
-      return ScStatusStrip(
-        tone: ScStripTone.neutral,
-        leading: LucideIcons.refreshCw,
-        title: waiting == 1
-            ? '1 note is waiting on Circuit'
-            : '$waiting notes are waiting on Circuit',
-        actions: [
-          TextButton(onPressed: _retrySync, child: const Text('Sync now')),
-        ],
+      return _syncPill(
+        icon: LucideIcons.refreshCw,
+        text: '$waiting waiting · Sync now',
+        onTap: _retrySync,
       );
     }
-    return const ScStatusStrip(
-      tone: ScStripTone.good,
-      leading: LucideIcons.circleCheck,
-      title: 'Circuit is connected and everything is synced',
+    return _syncPill(icon: LucideIcons.circleCheck, text: 'Synced', good: true);
+  }
+
+  /// A small pill, not a banner: whether a sync is running, in a few words. Red only when a sync really stopped.
+  Widget _syncPill({
+    IconData? icon,
+    bool spinner = false,
+    required String text,
+    bool danger = false,
+    bool good = false,
+    VoidCallback? onTap,
+    VoidCallback? onClose,
+  }) {
+    final color = danger
+        ? context.sc.danger
+        : good
+        ? context.sc.green
+        : context.sc.muted;
+    final pill = Material(
+      color: danger ? context.sc.dangerSoft : context.sc.hero,
+      borderRadius: BorderRadius.circular(99),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(99),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (spinner)
+                SizedBox(
+                  width: 13,
+                  height: 13,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: context.sc.accent,
+                  ),
+                )
+              else if (icon != null)
+                Icon(icon, size: 15, color: color),
+              const SizedBox(width: 8),
+              Text(
+                text,
+                style: ScType.caption.copyWith(
+                  color: danger ? context.sc.danger : context.sc.ink,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              if (onClose != null) ...[
+                const SizedBox(width: 4),
+                InkResponse(
+                  onTap: onClose,
+                  radius: 14,
+                  child: Tooltip(
+                    message: 'Dismiss',
+                    child: Icon(LucideIcons.x, size: 15, color: color),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      label: text,
+      child: Align(alignment: Alignment.centerLeft, child: pill),
     );
   }
 
