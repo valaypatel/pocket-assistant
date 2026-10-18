@@ -87,6 +87,7 @@ for _ in range(30):  # a sync left over from an earlier run must finish first
     time.sleep(2)
 note("Q0 board answers, idle, reports a version", s0.get("recording") == 0 and s0.get("playing") == 0
      and s0.get("sync_open") == 0 and bool(s0.get("version")), str(s0))
+note("Q0 firmware is version 3 or later", str(s0.get("version", "")).startswith("3."), str(s0.get("version")))
 ids = [int(x) for x in re.findall(r"DEV note (\d+):", b("list", timeout=60))]
 start_id = max(ids) if ids else 0
 
@@ -167,6 +168,30 @@ print("== Q5 lower key", flush=True)
 lw = b("lower")
 m = re.search(r"GPIO18 level=(\d) .*presses=(\d+)", lw)
 note("Q5 lower key reads as released and the presses were counted", bool(m) and m.group(1) == "1" and int(m.group(2)) >= 3, lw.strip()[-120:])
+
+print("== Q8 standalone and sync mode", flush=True)
+p = pos()
+b("key", "hold", "3")  # too short for sync mode, too long for a tap: nothing happens
+time.sleep(2)
+t = since(p)
+note("Q8 a 3 s hold does nothing (no sync mode, no recording)",
+     "Sync mode: on" not in t and "Recording" not in t and status().get("recording") == 0, "")
+p = pos()
+b("key", "hold", "6")
+ok = wait_for("Sync mode: on", p, 15)
+adv = wait_for("Advertising as", p, 10)
+note("Q8 a 5 s hold opens sync mode and the board advertises", ok and adv, "")
+p = pos()
+b("syncmode", "off")
+off = wait_for("Sync mode: off", p, 15)
+note("Q8 sync mode can be closed (Bluetooth stops, Wi-Fi rests)", off, "")
+p = pos()
+b("key", "tap")
+time.sleep(3)
+rec = status().get("recording") == 1
+b("rec-stop")
+wait_for("Saved recording", p, 20)
+note("Q8 a short tap still starts a recording", rec, "")
 
 print("== Q6 RTC", flush=True)
 m = re.search(r"chip=(\w+) \d+, system=\d+, difference=(-?\d+) s", b("rtc", timeout=60))

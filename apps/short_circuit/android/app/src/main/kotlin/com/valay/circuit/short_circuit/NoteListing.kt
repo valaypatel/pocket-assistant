@@ -4,6 +4,16 @@ package com.valay.circuit.short_circuit
 data class ListedNote(val id: Long, val bytes: Long, val epoch: Long, val group: String?)
 
 object NoteListing {
+    /** Which recording a listed file belongs to: the parts of one long recording share their first part's id. */
+    fun recordingKey(note: ListedNote): String = note.group?.substringBefore(',') ?: note.id.toString()
+
+    /** How many recordings (not files) the list holds. */
+    fun recordingCount(notes: List<ListedNote>): Int = notes.map(::recordingKey).distinct().size
+
+    /** The 1-based place of the recording that file [index] belongs to, counting recordings only. */
+    fun recordingNumber(notes: List<ListedNote>, index: Int): Int =
+        notes.take(index + 1).map(::recordingKey).distinct().size
+
     /** Next to a downloaded part of a longer recording: "<first part's id>,<part>,<1 if last>". */
     const val groupPrefix = "circuit-group-"
     const val momentsPrefix = "circuit-moments-"

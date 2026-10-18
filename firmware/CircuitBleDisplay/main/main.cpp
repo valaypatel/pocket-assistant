@@ -172,7 +172,7 @@ volatile uint32_t recording_audio_ms = 0;  // audio recorded so far; a pause doe
 std::atomic<bool> playback_active{false};
 std::atomic<bool> playback_stop_requested{false};
 std::atomic<uint32_t> playback_audio_ms{0};
-enum class DeviceScreen : uint8_t { Idle, Recording, Saved, Syncing, Pairing, Playback };
+enum class DeviceScreen : uint8_t { Idle, Recording, Saved, Syncing, Pairing, Playback, SyncMode };
 volatile DeviceScreen active_screen = DeviceScreen::Idle;
 volatile TickType_t recording_started_at = 0;
 uint32_t pairing_passkey = 0;
@@ -283,10 +283,34 @@ PowerMode effective_power_mode() {
     PowerMode wanted = power_choice == PowerChoice::Deep ? PowerMode::Deep : PowerMode::Saver;
     return static_cast<uint8_t>(power_auto_mode) > static_cast<uint8_t>(wanted) ? power_auto_mode : wanted;
 }
-bool recording_only() { return effective_power_mode() == PowerMode::RecordOnly; }
+bool battery_charging_or_usb();
+bool recording_only() { return effective_power_mode() == PowerMode::RecordOnly && !battery_charging_or_usb(); }
 const char *power_mode_name(PowerMode mode) {
     return mode == PowerMode::RecordOnly ? "rec" : mode == PowerMode::Deep ? "deep" : "saver";
 }
+
+// ---- Standalone and sync mode -------------------------------------------------
+// Circuit works on its own: its radios (Bluetooth advertising, Wi-Fi) are off and it sleeps. Holding the record key
+// for 5 seconds turns them on for a sync (sync mode): the phone connects, takes the new recordings and brings the
+// clock, the Wi-Fi network and a firmware update; the radios go off again a minute after the last of it. The old
+// always-connected behaviour (the power modes above) is kept behind `connected_mode`, a development switch for
+// now, for a "stay connected" option later.
+bool connected_mode = false;                  // development switch: the old always-connected behaviour
+volatile bool sync_mode = false;              // the radios are on for a sync
+volatile bool unpaired = false;               // no phone is bonded yet: the radios stay on so one can pair
+volatile int64_t sync_mode_started_ms = 0;
+volatile int64_t sync_mode_activity_ms = 0;   // the last command, sync, update or key press in sync mode
+constexpr int64_t kSyncModeWaitMs = 120000;   // no phone within this long: give up
+constexpr int64_t kSyncModeIdleMs = 60000;    // nothing for this long once connected: done
+constexpr uint32_t kSyncModeHoldMs = 5000;    // the record key held this long (idle, standalone) opens sync mode
+constexpr uint32_t kTapMaxMs = 1200;          // a key press shorter than this is a tap (starts a recording)
+constexpr int kUpdateMinPercent = 30;         // a firmware update needs at least this much battery
+bool radios_wanted() { return connected_mode || sync_mode || unpaired; }
+void sync_mode_phone_connected();
+void sync_mode_note_activity();
+void sync_mode_poll();
+void enter_sync_mode();
+void leave_sync_mode(const char *why);
 
 // ---- Radios in Deep ---------------------------------------------------------
 // Below the Saver tier the board keeps the phone's Bluetooth link but slows it right down (an event about once a
@@ -308,6 +332,7 @@ bool adv_restart_pending = false;
 bool ble_seen_since_boot = false;  // a phone has connected and secured the link since the board started
 bool light_sleep_pinned_off = false;  // the development console asked for it off: stay off
 bool usb_host_connected = false;      // a computer is on the USB cable: the board stays awake (see update_usb_awake)
+bool battery_charging_or_usb() { return battery_charging || usb_host_connected; }
 esp_pm_lock_handle_t usb_awake_lock = nullptr;
 bool light_sleep_on = false;  // see "Light sleep" further down
 void set_light_sleep(bool on);
@@ -687,7 +712,7 @@ void screen_timeout_task(void *argument) {
     delete static_cast<ScreenTimeout *>(argument);
     vTaskDelay(pdMS_TO_TICKS(timeout.delay_ms));
     if (!(timeout.expected == DeviceScreen::Playback && playback_active.load())) {
-        show_device_screen(DeviceScreen::Idle, true, timeout.expected);
+        show_device_screen(sync_mode ? DeviceScreen::SyncMode : DeviceScreen::Idle, true, timeout.expected);
     }
     vTaskDelete(nullptr);
 }
@@ -715,6 +740,7 @@ void show_device_screen(DeviceScreen screen, bool only_if_showing, DeviceScreen 
         &circuit_sync_screen,
         &circuit_pair_screen,
         &circuit_idle_screen,  // playback uses live labels, with the artwork hidden
+        &circuit_sync_screen,  // sync mode: the sync picture, still, with a line under it
     };
     if (!Lvgl_lock(-1)) {
         return;
@@ -774,6 +800,8 @@ void show_device_screen(DeviceScreen screen, bool only_if_showing, DeviceScreen 
         lv_obj_clear_flag(recording_timer_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(recording_timer_label);
     } else {
+        lv_obj_set_width(message_label, 176);
+        lv_obj_set_style_text_align(message_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(message_label, LV_ALIGN_BOTTOM_MID, 0, -12);
         lv_obj_set_width(recording_timer_label, 84);
         lv_obj_set_style_text_align(recording_timer_label, LV_TEXT_ALIGN_LEFT, 0);
@@ -1657,9 +1685,10 @@ void send_sync_status() {
     //   sd   the card's space in use, then its total size, in KB (absent without a card)
     char build_id[9] = "";
     esp_app_get_elf_sha256(build_id, sizeof(build_id));
-    snprintf(message, sizeof(message), "@sync-status\nfw=%.20s|%s\nprev=%.40s\nsd=%.30s\npm=%s|%s",
+    snprintf(message, sizeof(message), "@sync-status\nfw=%.20s|%s\nprev=%.40s\nsd=%.30s\npm=%s|%s\nmode=%s",
         esp_app_get_description()->version, build_id, previous, card, power_mode_name(effective_power_mode()),
-        power_choice == PowerChoice::Deep ? "deep" : power_choice == PowerChoice::Saver ? "saver" : "auto");
+        power_choice == PowerChoice::Deep ? "deep" : power_choice == PowerChoice::Saver ? "saver" : "auto",
+        connected_mode ? "connected" : "sync");
     send_relay_request(message);
 }
 
@@ -1695,7 +1724,7 @@ void refresh_status_icons() {
     const int battery = battery_percent < 0 ? battery_percent : battery_percent + (battery_charging ? 1000 : 0);
     // "zzz" says the board is in its sleeping mode and idle: it goes as soon as something wakes it up to work
     // (a recording, playback, a sync, an update), and comes back to the idle screen. Redrawn only when it flips.
-    const bool zzz = light_sleep_on && !usb_host_connected && active_screen == DeviceScreen::Idle;
+    const bool zzz = false;  // the board sleeps nearly all the time now: a label for it says nothing
     if (zzz != zzz_shown && Lvgl_lock(-1)) {
         zzz_shown = zzz;
         if (zzz) {
@@ -1781,6 +1810,22 @@ bool update_power_mode(int percent) {
     ESP_LOGW(kTag, "Power mode by battery: %s -> %s (%d%%)", power_mode_name(power_auto_mode), power_mode_name(next), percent);
     power_auto_mode = next;
     return true;
+}
+
+void save_connected_mode() {
+    nvs_handle_t handle;
+    if (nvs_open("power", NVS_READWRITE, &handle) != ESP_OK) return;
+    nvs_set_u8(handle, "connected", connected_mode ? 1 : 0);
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+void load_connected_mode() {
+    nvs_handle_t handle;
+    uint8_t value = 0;
+    if (nvs_open("power", NVS_READONLY, &handle) != ESP_OK) return;
+    if (nvs_get_u8(handle, "connected", &value) == ESP_OK) connected_mode = value != 0;
+    nvs_close(handle);
 }
 
 void save_power_choice() {
@@ -2046,6 +2091,12 @@ void offer_upload(bool firmware) {
         report_audio_status(problem);
         return;
     }
+    if (firmware && battery_percent >= 0 && battery_percent < kUpdateMinPercent) {
+        snprintf(problem, sizeof(problem), "Update failed: needs %d%% battery, Circuit has %d%%", kUpdateMinPercent,
+            static_cast<int>(battery_percent));
+        report_audio_status(problem);
+        return;
+    }
     if (recording_active || audio_busy || circuit_sync::is_open()) {
         snprintf(problem, sizeof(problem), "%s failed: Circuit is busy", what);
         report_audio_status(problem);
@@ -2296,7 +2347,8 @@ void sync_supervisor_task(void *) {
     while (true) {
         // A broadcast or update session is watched twice a second; with none open it sleeps, and offering one
         // wakes it (so an idle board is not woken twice a second for nothing).
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(circuit_sync::is_open() ? 500 : 7500));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(circuit_sync::is_open() ? 500 : (sync_mode ? 2000 : 7500)));
+        sync_mode_poll();
         // A new firmware is kept only once it has run for 40 s AND a phone has connected to it (so one that cannot
         // talk to a phone is not kept), or after ten minutes with no phone about, so it is not left on trial forever.
         if (circuit_sync::is_open()) wifi_last_needed_ms = circuit_sync::now_ms();  // checked twice a second then
@@ -2339,13 +2391,13 @@ void sync_supervisor_task(void *) {
         }
         // Wi-Fi follows the power mode: resting below Saver once it has sat unused for a minute, back on in Saver.
         if (circuit_sync::is_open() || after_wifi != AfterWifi::Nothing) wifi_last_needed_ms = circuit_sync::now_ms();
-        if (effective_power_mode() != PowerMode::Saver) {
+        if (!connected_mode || effective_power_mode() != PowerMode::Saver) {
             if (!wifi_resting && circuit_sync::now_ms() - wifi_last_needed_ms > kWifiIdleBeforeRestMs) wifi_rest();
         } else if (wifi_resting) {
             wifi_wake();
         }
         // After giving up, try again now and then (sooner if it was not a password problem).
-        if (wifi_ui == WifiUi::Failed && wifi_ssid[0] != '\0' &&
+        if (!wifi_resting && wifi_ui == WifiUi::Failed && wifi_ssid[0] != '\0' &&
             circuit_sync::now_ms() - wifi_failed_at_ms > (wifi_auth_failure ? 300000 : 60000)) {
             wifi_retries = 0;
             set_wifi_ui(WifiUi::Connecting);
@@ -2602,6 +2654,22 @@ void dev_console_task(void *) {
                 set_light_sleep(false);
             }
             ESP_LOGW(kTag, "DEV sleep: light sleep is %s", light_sleep_on ? "on" : "off");
+        } else if (strncmp(line, "power-choice ", 13) == 0) {
+            const char *want = line + 13;
+            power_choice = strcmp(want, "deep") == 0 ? PowerChoice::Deep : strcmp(want, "saver") == 0 ? PowerChoice::Saver : PowerChoice::Auto;
+            save_power_choice();
+            apply_power_policy();
+            ESP_LOGW(kTag, "DEV power-choice: %s", want);
+        } else if (strncmp(line, "connected ", 10) == 0) {
+            connected_mode = strcmp(line + 10, "on") == 0;
+            save_connected_mode();
+            ESP_LOGW(kTag, "DEV connected mode %s: restarting", connected_mode ? "on" : "off");
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_restart();
+        } else if (strcmp(line, "syncmode on") == 0) {
+            enter_sync_mode();
+        } else if (strcmp(line, "syncmode off") == 0) {
+            leave_sync_mode("dev command");
         } else if (strcmp(line, "pm") == 0) {
             log_power_use();
             ESP_LOGW(kTag, "DEV pm: light sleep is %s", light_sleep_on ? "on" : "off");
@@ -2802,6 +2870,114 @@ void dev_console_task(void *) {
 }
 #endif
 
+
+// ---- Sync mode ---------------------------------------------------------------
+lv_obj_t *hold_arc = nullptr;  // the ring that fills while the record key is held for sync mode
+
+// The key-hold ring was dropped (no ring is created, so this does nothing); the hold just opens sync mode at 5 s.
+void show_hold_ring(int percent) {
+    static bool drawn = false;
+    if (hold_arc == nullptr || !Lvgl_lock(-1)) return;
+    if (percent <= 0 || active_screen != DeviceScreen::Idle) {
+        if (drawn) ghost_clear_pending = true;  // the e-paper keeps a faint trace of the ring: wipe it with the next refresh
+        drawn = false;
+        lv_obj_add_flag(hold_arc, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        drawn = true;
+        lv_arc_set_value(hold_arc, percent > 100 ? 100 : percent);
+        lv_obj_clear_flag(hold_arc, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(hold_arc);
+    }
+    Lvgl_unlock();
+}
+
+void sync_mode_note_activity() {
+    sync_mode_activity_ms = circuit_sync::now_ms();
+    wifi_last_needed_ms = sync_mode_activity_ms;  // Wi-Fi is not put to rest while the phone is busy with the board
+}
+
+void show_sync_mode_screen(const char *line) {
+    show_device_screen(DeviceScreen::SyncMode);
+    if (Lvgl_lock(-1)) {
+        lv_label_set_text(message_label, line);
+        // To the right of the sync picture (it sits at the lower left), left-aligned, so the two never overlap.
+        lv_obj_set_width(message_label, 94);
+        lv_obj_set_style_text_align(message_label, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_align(message_label, LV_ALIGN_TOP_LEFT, 104, 122);
+        lv_obj_clear_flag(message_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(message_label);
+        Lvgl_unlock();
+    }
+}
+
+// The hold finished on the record key: turn the radios on for a sync.
+void enter_sync_mode() {
+    if (connected_mode || sync_mode) return;  // always connected already / already in it
+    if (recording_active || audio_busy || update_busy() || circuit_sync::is_open()) return;
+    if (recording_only()) {  // the last charge is for recording, unless a charger is plugged in
+        report_audio_status("Battery is low: Circuit only records now. Charge it to sync");
+        flash_sync_result("LOW");
+        return;
+    }
+    sync_mode_started_ms = circuit_sync::now_ms();
+    sync_mode_activity_ms = sync_mode_started_ms;
+    sync_mode = true;
+    ESP_LOGW(kTag, "Sync mode: on (radios up)");
+    show_sync_mode_screen("Sync mode\nOpen the app");
+    if (connection_id == UINT16_MAX) {
+        adv_restart_pending = false;
+        esp_ble_gap_start_advertising(&adv_params);
+    }
+    if (sync_supervisor_handle != nullptr) xTaskNotifyGive(sync_supervisor_handle);  // it watches sync mode
+}
+
+void leave_sync_mode(const char *why) {
+    if (!sync_mode) return;
+    sync_mode = false;
+    ESP_LOGW(kTag, "Sync mode: off (%s); radios down", why);
+    if (!unpaired) esp_ble_gap_stop_advertising();
+    if (connection_id != UINT16_MAX && server_if != ESP_GATT_IF_NONE) esp_ble_gatts_close(server_if, connection_id);
+    wifi_rest();
+    if (active_screen == DeviceScreen::SyncMode) show_device_screen(DeviceScreen::Idle);
+}
+
+// The phone connected in sync mode: sync what is waiting. Runs in a task of its own (starting a sync is heavy).
+void sync_mode_sync_task(void *) {
+    vTaskDelay(pdMS_TO_TICKS(2500));  // let the link finish securing and the phone subscribe
+    if (sync_mode && ble_encrypted) {
+        sync_mode_note_activity();
+        start_audio_sync(true);
+    }
+    vTaskDelete(nullptr);
+}
+
+void sync_mode_phone_connected() {
+    sync_mode_note_activity();
+    if (xTaskCreate(sync_mode_sync_task, "sync_mode_sync", 6144, nullptr, 4, nullptr) != pdPASS) {
+        report_audio_status("Could not start the sync");
+    }
+}
+
+// Watches sync mode: gives up if no phone comes, and ends it a minute after the last sign of use. Called by the sync
+// supervisor task (every 2 s while sync mode is on), so it needs no stack of its own.
+void sync_mode_poll() {
+    if (!sync_mode) return;
+    const int64_t now = circuit_sync::now_ms();
+    const bool busy = circuit_sync::is_open() || update_busy() || after_wifi != AfterWifi::Nothing || recording_active ||
+                      audio_busy || active_screen == DeviceScreen::Syncing;
+    if (busy) {
+        sync_mode_note_activity();
+        return;
+    }
+    if (connection_id == UINT16_MAX) {
+        if (!unpaired && now - sync_mode_started_ms > kSyncModeWaitMs && now - sync_mode_activity_ms > kSyncModeWaitMs) {
+            leave_sync_mode("no phone connected");
+        }
+    } else if (now - sync_mode_activity_ms > kSyncModeIdleMs) {
+        leave_sync_mode("idle");
+    }
+}
+
 void force_sync_task(void *) {
     update_storage_status("Force sync requested\nStarting sync…");
     report_audio_status("Force sync requested");
@@ -2827,6 +3003,7 @@ void record_button_task(void *) {
     bool was_pressed = gpio_get_level(kRecordButtonPin) == 0;
     TickType_t pressed_at = 0;
     bool hold_handled = false;
+    int ring_shown = 0;
     while (true) {
         bool is_pressed = gpio_get_level(kRecordButtonPin) == 0;
 #ifdef CIRCUIT_DEV_CONSOLE
@@ -2834,20 +3011,44 @@ void record_button_task(void *) {
 #endif
         if (is_pressed && !was_pressed) {
             vTaskDelay(kButtonDebounceDelay);
-            if (gpio_get_level(kRecordButtonPin) == 0) {
+            bool still_down = gpio_get_level(kRecordButtonPin) == 0;
+#ifdef CIRCUIT_DEV_CONSOLE
+            still_down = still_down || dev_key_down.load();
+#endif
+            if (still_down) {
                 pressed_at = xTaskGetTickCount();
                 hold_handled = false;
+                ring_shown = 0;
             } else {
                 was_pressed = false;
                 continue;
             }
         }
-        const TickType_t hold_needed = recording_active ? kPauseHoldTime : kForceSyncHoldTime;
-        if (is_pressed && !hold_handled && xTaskGetTickCount() - pressed_at >= hold_needed) {
+        const uint32_t held_ms = is_pressed ? pdTICKS_TO_MS(xTaskGetTickCount() - pressed_at) : 0;
+        // Standalone and idle: the key held for 5 s opens sync mode, with a ring that fills while it is held.
+        const bool wants_sync_mode = !connected_mode && !sync_mode && !recording_active;
+        const uint32_t hold_needed_ms = recording_active ? pdTICKS_TO_MS(kPauseHoldTime)
+                                                         : (connected_mode ? pdTICKS_TO_MS(kForceSyncHoldTime) : kSyncModeHoldMs);
+        if (is_pressed && !hold_handled && wants_sync_mode && held_ms >= kTapMaxMs) {
+            const int step = static_cast<int>(held_ms / 1000);  // the ring moves once a second (the e-paper is slow)
+            if (step != ring_shown) {
+                ring_shown = step;
+                show_hold_ring(static_cast<int>(step * 1000 * 100 / kSyncModeHoldMs));
+            }
+        }
+        if (is_pressed && !hold_handled && held_ms >= hold_needed_ms) {
             hold_handled = true;
             if (recording_active) {
                 ESP_LOGI(kTag, "BOOT held: pause or resume");
                 toggle_pause_recording();
+            } else if (!connected_mode) {
+                ESP_LOGI(kTag, "BOOT held: sync mode");
+                show_hold_ring(0);
+                if (sync_mode) {
+                    leave_sync_mode("key held");
+                } else {
+                    enter_sync_mode();
+                }
             } else {
                 ESP_LOGI(kTag, "BOOT held: force sync");
                 // Starting a sync is heavy (it lists the card and opens a session), far more than
@@ -2857,16 +3058,19 @@ void record_button_task(void *) {
                 }
             }
         }
-        if (!is_pressed && was_pressed && !hold_handled) {  // released: it was a tap
+        if (!is_pressed && was_pressed && !hold_handled) {  // released: it was a tap, or a hold that fell short
+            show_hold_ring(0);
+            const uint32_t pressed_for = pdTICKS_TO_MS(xTaskGetTickCount() - pressed_at);
             if (recording_active) {
                 stop_recording();
-            } else {
+            } else if (connected_mode || pressed_for <= kTapMaxMs) {
                 // Records until stopped or the cap is hit.
                 char command[32];
                 snprintf(command, sizeof(command), "@audio-record\n%lu", static_cast<unsigned long>(kMaxRecordingSeconds));
                 start_recording(command);
             }
         }
+        if (sync_mode && (is_pressed != was_pressed)) sync_mode_note_activity();
         was_pressed = is_pressed;
         if (is_pressed) {
             vTaskDelay(kButtonPollInterval);  // held: keep timing it
@@ -3301,8 +3505,14 @@ void text_display_task(void *) {
     TextMessage message{};
     while (true) {
         if (xQueueReceive(text_queue, &message, portMAX_DELAY) == pdTRUE) {
+            if (sync_mode) sync_mode_note_activity();
             if (strcmp(message.value, kWifiScanCommand) == 0) {
                 xTaskCreate(wifi_scan_task, "wifi_scan", 4096, nullptr, 3, nullptr);
+            } else if (!connected_mode && (strncmp(message.value, "@audio-record", 13) == 0 ||
+                                           strcmp(message.value, "@audio-play") == 0 ||
+                                           strcmp(message.value, "@speak-prepare") == 0)) {
+                // Standalone: Circuit records and plays on its own keys; the phone does not drive it.
+                report_audio_status("Not available: Circuit works on its own, use its keys");
             } else if (strncmp(message.value, "@audio-record", 13) == 0) {
                 start_recording(message.value);
             } else if (strcmp(message.value, "@audio-stop") == 0) {
@@ -3466,13 +3676,14 @@ void bond_watch_task(void *) {
 void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
     switch (event) {
     case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
-        ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&adv_params));
+        if (radios_wanted()) ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&adv_params));
+        else ESP_LOGI(kTag, "Standalone: not advertising (hold the record key for 5 s for sync mode)");
         break;
     case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
         ESP_LOGI(kTag, "Advertising as %s", kDeviceName);
         break;
     case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
-        if (adv_restart_pending && connection_id == UINT16_MAX) {
+        if (adv_restart_pending && connection_id == UINT16_MAX && radios_wanted()) {
             adv_restart_pending = false;
             esp_ble_gap_start_advertising(&adv_params);
         }
@@ -3513,7 +3724,11 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             ble_encrypted = true;
             ble_seen_since_boot = true;
             ensure_note_key();
-            if (active_screen == DeviceScreen::Pairing) show_device_screen(DeviceScreen::Idle);
+            unpaired = false;
+            if (active_screen == DeviceScreen::Pairing) {
+                show_device_screen(sync_mode ? DeviceScreen::SyncMode : DeviceScreen::Idle);
+            }
+            if (sync_mode) sync_mode_phone_connected();
         } else {
             ESP_LOGW(kTag, "BLE security failed with %02x:%02x:%02x:%02x:%02x:%02x (address type %d): reason 0x%x, %d bonded phone(s) stored",
                 a[0], a[1], a[2], a[3], a[4], a[5], auth.addr_type, auth.fail_reason, esp_ble_get_bond_device_num());
@@ -3672,7 +3887,7 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         } else {
             ESP_LOGI(kTag, "Client disconnected (reason 0x%x); no signal reading yet; advertising again", param->disconnect.reason);
         }
-        ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&adv_params));
+        if (radios_wanted()) ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&adv_params));
         break;
     default:
         break;
@@ -3694,6 +3909,11 @@ void start_ble() {
     ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
+    if (esp_ble_get_bond_device_num() == 0) {  // nobody to pair with yet: the radios stay on until a phone has paired
+        unpaired = true;
+        sync_mode = true;
+        sync_mode_started_ms = sync_mode_activity_ms = circuit_sync::now_ms();
+    }
     ESP_ERROR_CHECK(esp_ble_gatt_set_local_mtu(185));
     ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_event_handler));
     esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
@@ -3730,6 +3950,14 @@ void start_wifi() {
 
     wifi_config_t saved_config = {};
     ESP_ERROR_CHECK(esp_wifi_get_config(WIFI_IF_STA, &saved_config));
+    if (!radios_wanted()) {  // standalone: the network is remembered, the radio stays off until sync mode needs it
+        snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", reinterpret_cast<const char *>(saved_config.sta.ssid));
+        wifi_resting = true;
+        esp_wifi_stop();
+        set_wifi_ui(wifi_ssid[0] != '\0' ? WifiUi::Resting : WifiUi::None, "off until sync mode");
+        update_connection_status("Wi-Fi: off\nInternet: offline\nPhone relay: unavailable");
+        return;
+    }
     if (saved_config.sta.ssid[0] != '\0') {
         snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", reinterpret_cast<const char *>(saved_config.sta.ssid));
         update_connection_status("Wi-Fi: reconnecting…\nInternet: checking…\nPhone relay: unavailable");
@@ -3760,8 +3988,32 @@ void wifi_wake() {
     wifi_last_needed_ms = circuit_sync::now_ms();
     ESP_LOGW(kTag, "Wi-Fi waking");
     esp_wifi_start();  // the network is saved in flash
+    if (wifi_ssid[0] == '\0') {  // nothing to join yet: the phone is about to set one up
+        set_wifi_ui(WifiUi::None);
+        return;
+    }
     set_wifi_ui(WifiUi::Connecting);
     esp_wifi_connect();
+}
+
+// What was asked while Wi-Fi was resting, done once it is up. It runs in a task of its own with the stack the sync
+// itself needs (opening a session builds certificates; the 4 KB wait task overflowed there).
+struct AfterJob {
+    AfterWifi action;
+    bool forced;
+};
+
+void after_wifi_job_task(void *argument) {
+    const AfterJob job = *static_cast<AfterJob *>(argument);
+    delete static_cast<AfterJob *>(argument);
+    if (job.action == AfterWifi::Sync) {
+        start_audio_sync(job.forced);
+    } else if (job.action == AfterWifi::Broadcast) {
+        offer_upload(false);
+    } else if (job.action == AfterWifi::Update) {
+        offer_upload(true);
+    }
+    vTaskDelete(nullptr);
 }
 
 void wifi_wait_task(void *) {
@@ -3779,12 +4031,12 @@ void wifi_wait_task(void *) {
     if (!(wifi_connected && circuit_sync::wifi_ip(ip, sizeof(ip)))) {
         report_audio_status("Wi-Fi did not connect: try again, or check the network");
         if (forced) flash_sync_result("ERR");
-    } else if (action == AfterWifi::Sync) {
-        start_audio_sync(forced);
-    } else if (action == AfterWifi::Broadcast) {
-        offer_upload(false);
-    } else if (action == AfterWifi::Update) {
-        offer_upload(true);
+    } else {
+        auto *job = new AfterJob{action, forced};
+        if (xTaskCreate(after_wifi_job_task, "after_wifi", 6144, job, 4, nullptr) != pdPASS) {
+            delete job;
+            report_audio_status("Could not start the sync");
+        }
     }
     vTaskDelete(nullptr);
 }
@@ -3804,7 +4056,7 @@ void request_after_wifi(AfterWifi action, bool forced) {
 // phone is asked to change an open link; advertising for a phone that is away changes as well.
 void apply_ble_rhythm() {
     if (connection_id == UINT16_MAX) return;
-    const bool slow = effective_power_mode() != PowerMode::Saver;
+    const bool slow = connected_mode && effective_power_mode() != PowerMode::Saver;  // sync mode wants it quick
     esp_ble_conn_update_params_t params = {};
     memcpy(params.bda, connected_bda, sizeof(params.bda));
     params.min_int = slow ? 0x280 : 0x50;  // 800 ms : 100 ms
@@ -3815,7 +4067,7 @@ void apply_ble_rhythm() {
 }
 
 void apply_adv_rhythm() {
-    const bool slow = effective_power_mode() != PowerMode::Saver;
+    const bool slow = connected_mode && effective_power_mode() != PowerMode::Saver;
     adv_params.adv_int_min = slow ? 0x640 : 0xA0;  // 1 s : 100 ms (units of 0.625 ms)
     adv_params.adv_int_max = slow ? 0x7D0 : 0x140;  // 1.25 s : 200 ms
     if (connection_id == UINT16_MAX) {  // advertising for a phone that is away: restart it with the new rhythm
@@ -3828,7 +4080,7 @@ void apply_power_policy() {
     ESP_LOGW(kTag, "Power policy: %s", power_mode_name(effective_power_mode()));
     apply_ble_rhythm();
     apply_adv_rhythm();
-    if (effective_power_mode() == PowerMode::Saver) wifi_wake();  // resting ends at once; resting starts after a minute idle
+    if (connected_mode && effective_power_mode() == PowerMode::Saver) wifi_wake();  // resting ends at once; resting starts after a minute idle
 }
 
 void init_display() {
@@ -4030,6 +4282,7 @@ extern "C" void app_main(void) {
     }
 
     load_power_choice();
+    load_connected_mode();
     crypto_self_test_ok = run_crypto_self_test();
     note_key_ready = circuit_secure::load_key(&note_key);
     ESP_LOGI(kTag, "Notes crypto self-test: %s; notes key: %s", crypto_self_test_ok ? "PASS" : "FAIL",

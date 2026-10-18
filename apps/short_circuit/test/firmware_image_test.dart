@@ -21,6 +21,32 @@ Uint8List image({
 }
 
 void main() {
+  test(
+    'reads whether Circuit works on its own (sync mode) or stays linked',
+    () {
+      expect(
+        BoardReport.modeFrom(
+          '@sync-status\nfw=3.0.1|aa\npm=saver|auto\nmode=sync',
+        ),
+        'sync',
+      );
+      expect(
+        BoardReport.modeFrom('@sync-status\npm=saver|auto\nmode=connected'),
+        'connected',
+      );
+      // Older firmware sends none: it stays linked.
+      expect(
+        BoardReport.modeFrom('@sync-status\nfw=2.0.0|aaaaaaaa\npm=deep|auto'),
+        isNull,
+      );
+      expect(BoardReport.modeFrom('@sync-status\nmode=weird'), isNull);
+    },
+  );
+
+  test('a firmware update needs 30% battery', () {
+    expect(BoardReport.minUpdatePercent, 30);
+  });
+
   test('reads the power mode Circuit reports', () {
     expect(
       BoardReport.powerFrom('@sync-status\nfw=2.0.0|aaaaaaaa\npm=deep|auto'),
@@ -34,27 +60,21 @@ void main() {
     expect(BoardReport.powerFrom('@sync-status\npm=weird|auto'), isNull);
   });
 
-  test(
-    'compares firmware versions as numbers, with dev builds below the release',
-    () {
-      int c(String a, String b) => FirmwareImage.compareVersions(a, b).sign;
-      expect(c('2.0.0-dev.10', '2.0.0-dev.9'), 1);
-      expect(c('2.0.0-dev.2', '2.0.0-dev1'), 1);
-      expect(c('2.0.0-dev.3', '2.0.0-dev.3'), 0);
-      expect(c('2.0.0', '2.0.0-dev.99'), 1);
-      expect(c('2.1.0-dev.1', '2.0.9'), 1);
-      expect(c('1.9.0', '2.0.0-dev.1'), -1);
-      expect(
-        FirmwareImage.relation('2.0.0-dev.3', '2.0.0-dev.2'),
-        'newer than',
-      );
-      expect(
-        FirmwareImage.relation('2.0.0-dev.1', '2.0.0-dev.2'),
-        'older than',
-      );
-      expect(FirmwareImage.relation('2.0.0', '2.0.0'), 'the same version as');
-    },
-  );
+  test('compares firmware versions as numbers, with dev builds below the release', () {
+    int c(String a, String b) => FirmwareImage.compareVersions(a, b).sign;
+    expect(c('2.0.0-dev.10', '2.0.0-dev.9'), 1);
+    expect(c('2.0.0-dev.2', '2.0.0-dev1'), 1);
+    expect(c('2.0.0-dev.3', '2.0.0-dev.3'), 0);
+    expect(c('2.0.0', '2.0.0-dev.99'), 1);
+    expect(c('2.1.0-dev.1', '2.0.9'), 1);
+    expect(c('1.9.0', '2.0.0-dev.1'), -1);
+    // Firmware 3 is newer than every 2.x, and its development builds count up.
+    expect(c('3.0.0-dev.34', '2.0.99'), 1);
+    expect(c('3.0.12', '3.0.0-dev.40'), 1);
+    expect(FirmwareImage.relation('2.0.0-dev.3', '2.0.0-dev.2'), 'newer than');
+    expect(FirmwareImage.relation('2.0.0-dev.1', '2.0.0-dev.2'), 'older than');
+    expect(FirmwareImage.relation('2.0.0', '2.0.0'), 'the same version as');
+  });
 
   test('reads the previous firmware and the card figures Circuit reports', () {
     const status =

@@ -135,8 +135,8 @@ void main() {
       ]),
     });
     await open(tester, tab: 'Notes');
-    expect(find.text('1 note is waiting on Circuit'), findsOneWidget);
-    expect(find.textContaining('everything is synced'), findsNothing);
+    expect(find.text('1 waiting · Sync now'), findsOneWidget);
+    expect(find.text('Synced'), findsNothing);
     await close(tester);
   });
 
@@ -147,8 +147,8 @@ void main() {
     await status(tester, 'Recording started');
     // A minute is done on the board: one part waits, but the recording is still going.
     await status(tester, '@sync-status\nwaiting=1\nreset=1\nuptime=500');
-    expect(find.text('Circuit is recording'), findsOneWidget);
-    expect(find.textContaining('waiting on Circuit'), findsNothing);
+    expect(find.text('Circuit recording'), findsOneWidget);
+    expect(find.textContaining('waiting ·'), findsNothing);
     await close(tester);
   });
 
@@ -172,7 +172,7 @@ void main() {
       expect(find.text('Syncing 40%'), findsOneWidget);
       // One bar, in the note that is downloading; the other note just waits.
       expect(find.byType(LinearProgressIndicator), findsOneWidget);
-      expect(find.text('Note 1 of 2'), findsOneWidget);
+      expect(find.text('Syncing · 1 of 2'), findsOneWidget);
       expect(find.text('Syncing a voice note'), findsNothing);
       expect(find.text('Waiting to sync'), findsOneWidget);
       await status(tester, 'Sync note #78: 10% (2 of 2)');

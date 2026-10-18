@@ -1330,7 +1330,6 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   DateTime? _lastSyncActivity;
   DateTime? _lastSyncOk;
   int? _boardWaiting; // notes Circuit says are still waiting to sync
-  DateTime? _waitingSince;
   int? _boardReset; // esp_reset_reason of Circuit's last start
   int _boardUptime = 0;
 
@@ -1340,7 +1339,62 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   ({String version, String built})? _boardPrevious;
   ({int usedKb, int totalKb})? _boardStorage;
   ({String mode, String choice})? _boardPower;
+
+  /// "sync" when the board works on its own and is only reachable while it is in sync mode; "connected" or null
+  /// for a board that stays linked. Remembered, so the app can say so when the board is asleep.
+  String? _boardMode;
+
+  /// What the board said the last time it was reachable: shown while it is asleep, so the figures are marked old.
+  ({int? battery, String? version, DateTime at})? _lastBoard;
+
+  /// Firmware 3 works on its own; a board whose mode was never reported counts as such when its last known version
+  /// is 3 or later (the app was closed or restarted while it slept).
+  bool get _boardWorksAlone =>
+      _boardMode == 'sync' ||
+      (_boardMode == null && (_lastBoard?.version?.startsWith('3.') ?? false));
   bool _resetNoticeShown = false;
+  int _lookTicks = 0;
+
+  static const _lastBoardKey = 'last_board';
+
+  Future<void> _loadLastBoard() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final raw = preferences.getString(_lastBoardKey);
+      if (raw == null) return;
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+      final at = DateTime.tryParse(data['at'] as String? ?? '');
+      if (at == null || !mounted) return;
+      setState(() {
+        _lastBoard = (
+          battery: data['battery'] as int?,
+          version: data['version'] as String?,
+          at: at,
+        );
+        _boardMode ??= data['mode'] as String?;
+      });
+    } catch (_) {
+      // Nothing remembered yet, or unreadable: the page just shows no history.
+    }
+  }
+
+  Future<void> _saveLastBoard() async {
+    final board = _lastBoard;
+    if (board == null) return;
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setString(
+        _lastBoardKey,
+        jsonEncode({
+          'battery': board.battery,
+          'version': board.version,
+          'at': board.at.toIso8601String(),
+          'mode': _boardMode,
+        }),
+      );
+    } catch (_) {}
+  }
+
   // What Circuit reports about its own Wi-Fi: none, connecting, connected, failed.
   String _wifiState = 'none';
   String _wifiSsid = '';
@@ -1403,6 +1457,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     unawaited(_loadGroups());
     unawaited(_relayChannel.invokeMethod<bool>('requestLocalNetwork'));
     _loadPreferences();
+    unawaited(_loadLastBoard());
     _loadGeminiState();
     _loadAiState();
     _loadMusicState();
@@ -1419,6 +1474,23 @@ class _CircuitHomePageState extends State<CircuitHomePage>
               _page == _AppPage.wifi ||
               _page == _AppPage.hiddenWifi);
       if (watchingCircuit) _requestWifiStatus();
+      // A board that works on its own is only reachable after its key was held for sync mode: while the Circuit page
+      // is open, look for it every 10 s, so holding the key is enough.
+      if (watchingCircuit &&
+          _page == _AppPage.circuit &&
+          !_circuitAvailable &&
+          !_connecting &&
+          !_relayActive &&
+          !_needsPairingRepair &&
+          _savedCircuitId != null &&
+          (++_lookTicks % 2 == 0)) {
+        unawaited(
+          _connect(
+            BluetoothDevice.fromId(_savedCircuitId!),
+            savedReconnect: true,
+          ),
+        );
+      }
       _checkSyncHealth();
       _processBoardDeletes();
       _retryEnrichmentIfDue();
@@ -1451,6 +1523,20 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     if (state == AppLifecycleState.resumed) {
       unawaited(_recoverPhoneRecording().then((_) => _checkLaunchAction()));
       unawaited(_takeReminderEvents());
+      // A board that works on its own is only on the air after its key was held for sync mode, and the phone does
+      // not look for it in the background: opening the app is the moment to try once.
+      if (!_circuitAvailable &&
+          !_connecting &&
+          !_relayActive &&
+          !_needsPairingRepair &&
+          _savedCircuitId != null) {
+        unawaited(
+          _connect(
+            BluetoothDevice.fromId(_savedCircuitId!),
+            savedReconnect: true,
+          ),
+        );
+      }
     }
   }
 
@@ -2434,10 +2520,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     }
     if (status.startsWith('Sync needs Wi-Fi')) {
       final waitingNoteId = _syncingNoteId ?? _pendingSyncNoteId();
+      _toast('Put this phone on the same Wi-Fi as Circuit');
       setState(() {
         _syncActive = false;
-        _syncError =
-            'Circuit and this phone need to be on the same Wi-Fi to sync.';
         _audioBusy = false;
         _syncingNoteId = null;
         _syncProgress = null;
@@ -2503,11 +2588,17 @@ class _CircuitHomePageState extends State<CircuitHomePage>
         _boardStorage = BoardReport.storageFrom(message);
       }
       _boardPower = BoardReport.powerFrom(message) ?? _boardPower;
+      _boardMode = BoardReport.modeFrom(message) ?? _boardMode;
+      if (message.contains('\nbat=') || message.contains('\nfw=')) {
+        _lastBoard = (
+          battery: _boardBattery,
+          version: _boardFirmware?.version,
+          at: DateTime.now(),
+        );
+        unawaited(_saveLastBoard());
+      }
       if (waiting != null) {
-        if (waiting > 0 && (_boardWaiting ?? 0) == 0)
-          _waitingSince = DateTime.now();
         if (waiting == 0) {
-          _waitingSince = null;
           if (!_syncActive) _syncError = null; // everything made it across
           unawaited(_pruneLostNotes());
         }
@@ -2536,17 +2627,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _failSync('No progress from Circuit for 45 seconds.');
       return;
     }
-    final waiting = _boardWaiting ?? 0;
-    if (waiting > 0 &&
-        !_syncActive &&
-        _syncError == null &&
-        _waitingSince != null &&
-        now.difference(_waitingSince!) > const Duration(minutes: 3)) {
-      setState(() {
-        _syncError =
-            '$waiting note${waiting == 1 ? ' is' : 's are'} waiting on Circuit and ${waiting == 1 ? 'has' : 'have'} not synced.';
-      });
-    }
+    // Notes waiting on Circuit are normal now (it works on its own until its key is held for sync), so a long
+    // wait is not reported as a problem.
   }
 
   /// Pull down on Notes or Circuit: ask Circuit whether anything is waiting (and sync it), or try to
@@ -2560,9 +2642,13 @@ class _CircuitHomePageState extends State<CircuitHomePage>
             savedReconnect: true,
           ),
         );
-        _toast('Looking for Circuit…');
+        _toast(
+          _boardWorksAlone
+              ? 'Circuit is asleep. Hold its key for 5 s.'
+              : 'Looking for Circuit…',
+        );
       } else {
-        _toast('Circuit is not connected');
+        _toast('Circuit is asleep');
       }
       await Future<void>.delayed(const Duration(seconds: 1));
       return;
@@ -3108,6 +3194,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       unawaited(_saveBoardDeletes());
       _lastBoardDeleteSent = null;
       _processBoardDeletes();
+      if (!_circuitAvailable && mounted) {
+        _toast('Removed here. Circuit’s copy goes at the next sync.');
+      }
     }
     final firstPart = note?.boardId;
     final arriving = firstPart == null

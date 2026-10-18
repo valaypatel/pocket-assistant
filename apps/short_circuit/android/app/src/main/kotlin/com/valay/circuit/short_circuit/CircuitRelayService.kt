@@ -61,6 +61,12 @@ class CircuitRelayService : Service() {
         private val relayUuid = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb")
         private val cccdUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
         @Volatile var relayStatus: String = "Stopped"
+        /**
+         * What the board last said about itself: "sync" (firmware 3: it works on its own and only has its radios on
+         * for a sync, so its link ends by itself and is not worth chasing), "connected" (it stays linked), or null
+         * (an older firmware, which stays linked).
+         */
+        @Volatile var boardMode: String? = null
         @Volatile private var activeService: CircuitRelayService? = null
         @Volatile var wifiNetworks: List<String> = emptyList()
         @Volatile var audioStatus: String? = null
@@ -287,6 +293,7 @@ class CircuitRelayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        boardMode = null
         activeService = this
         registerReceiver(bondReceiver, IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED))
         registerReceiver(adapterReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
@@ -366,7 +373,24 @@ class CircuitRelayService : Service() {
         this.gatt = null
         candidate.close()
         setRelayStatus(reason)
+        if (boardMode == "sync") {  // it ended sync mode (or left): it is asleep, and does not advertise until asked
+            giveUpAsleep()
+            return
+        }
         scheduleReconnect()
+    }
+
+    /**
+     * Circuit (firmware 3) only has its radios on while someone holds its key for a sync. The link ending means it
+     * went back to sleep, so there is nothing to chase: stop quietly. Opening the app next time connects again.
+     */
+    private fun giveUpAsleep() {
+        BtEventLog.add(this, "relay stopped: Circuit went back to sleep")
+        shouldReconnect = false
+        reconnectHandler.removeCallbacks(reconnectRunnable)
+        getSharedPreferences(preferencesName, MODE_PRIVATE).edit().putBoolean(stoppedKey, true).apply()
+        setRelayStatus("Circuit is asleep")
+        stopSelf()
     }
 
     private val callback = object : BluetoothGattCallback() {
@@ -502,6 +526,7 @@ class CircuitRelayService : Service() {
             return
         }
         if (request.startsWith("@sync-status\n")) {
+            request.lineSequence().firstOrNull { it.startsWith("mode=") }?.let { boardMode = it.substringAfter("mode=").trim() }
             Diagnostics.boardHealth(this, request)
             BoardBattery.onStatus(this, request)
             // Board health and playback snapshots belong to Dart as well as diagnostics.
@@ -780,8 +805,8 @@ class CircuitRelayService : Service() {
                                         val notePercent = (partial.length() * 100 / bytes).toInt().coerceIn(0, 99)
                                         if (notePercent != lastNotePercent && notePercent % 2 == 0) {
                                             lastNotePercent = notePercent
-                                            publishAudioStatus("Sync note #$id: $notePercent% (${noteIndex + 1} of ${notes.size})")
-                                            setSyncNotification(noteIndex + 1, notes.size, notePercent)
+                                            publishAudioStatus("Sync note #$id: $notePercent% (${NoteListing.recordingNumber(notes, noteIndex)} of ${NoteListing.recordingCount(notes)})")
+                                            setSyncNotification(NoteListing.recordingNumber(notes, noteIndex), NoteListing.recordingCount(notes), notePercent)
                                         }
                                     }
                                 }

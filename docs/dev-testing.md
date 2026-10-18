@@ -43,6 +43,10 @@ cleanup of its own notes. Prints PASS/FAIL per check, exit code 1 on any failure
 ~/.espressif/python_env/idf5.5_py3.9_env/bin/python firmware/CircuitBleDisplay/tools/quick_regression.py
 ```
 
+Firmware 3 starts standalone (radios off). The quick regression includes a sync-mode section (Q8: a 3 s hold does
+nothing, a 5 s hold opens sync mode, `syncmode off` closes it, a tap still records). The full regression syncs with the
+phone, so run `board_dev.py connected on` first (the old always-connected behaviour) and `connected off` after.
+
 Use the full regression below only for changes to sync, the app link or the recording join, and before a release.
 
 ## Regression test (full)
