@@ -6,6 +6,7 @@
   app_dev.py sync               ask Circuit to sync all waiting notes
   app_dev.py sync-note ID       sync one note (the app's note id from `state`)
   app_dev.py play               play the latest recording on Circuit
+  app_dev.py broadcast "TEXT"   speak TEXT out of Circuit (Gemini voice, then the upload); prints how it went
   app_dev.py play-stop          stop playback on Circuit
   app_dev.py rec-start          start a phone recording
   app_dev.py rec-pause | rec-resume | rec-stop
@@ -83,7 +84,7 @@ def main():
     if argv[0] == "install":
         return install()
     known = {"state", "sync", "sync-note", "play", "play-stop", "rec-start", "rec-pause", "rec-resume",
-             "rec-stop", "delete", "delete-from", "btlog", "moments", "play-moment", "transcribe", "add-note", "tasks", "notes", "add-reminder", "delete-tasks"}
+             "rec-stop", "delete", "delete-from", "btlog", "moments", "play-moment", "transcribe", "add-note", "tasks", "notes", "add-reminder", "delete-tasks", "broadcast"}
     if argv[0] not in known:
         print(__doc__)
         return 1

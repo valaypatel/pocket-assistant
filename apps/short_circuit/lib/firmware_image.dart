@@ -145,6 +145,15 @@ class BoardReport {
     return total <= 0 ? null : (usedKb: used, totalKb: total);
   }
 
+  /// `pm=<mode>|<choice>` in a status: the board's power mode ("saver", "deep" or "rec", which only records) and
+  /// what the phone asked for ("auto", "saver" or "deep"). Null when the board sent none (older firmware).
+  static ({String mode, String choice})? powerFrom(String status) {
+    final match = RegExp(r'pm=(saver|deep|rec)\|(auto|saver|deep)')
+        .firstMatch(status);
+    if (match == null) return null;
+    return (mode: match.group(1)!, choice: match.group(2)!);
+  }
+
   /// "3.1 GB of 29.7 GB used" (or in MB for small figures).
   static String describeStorage(({int usedKb, int totalKb}) card) {
     String size(int kb) => kb >= 1024 * 1024

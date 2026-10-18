@@ -1339,6 +1339,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   ({String version, String built})? _boardFirmware;
   ({String version, String built})? _boardPrevious;
   ({int usedKb, int totalKb})? _boardStorage;
+  ({String mode, String choice})? _boardPower;
   bool _resetNoticeShown = false;
   // What Circuit reports about its own Wi-Fi: none, connecting, connected, failed.
   String _wifiState = 'none';
@@ -1410,7 +1411,14 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       if (mounted && _recordingAudio) setState(() {});
     });
     _wifiPollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      _requestWifiStatus();
+      // Circuit pushes its own changes, so it is only asked while a page that shows its Wi-Fi is on screen
+      // (each question wakes the board and makes it answer with several packets).
+      final watchingCircuit =
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed &&
+          (_page == _AppPage.circuit ||
+              _page == _AppPage.wifi ||
+              _page == _AppPage.hiddenWifi);
+      if (watchingCircuit) _requestWifiStatus();
       _checkSyncHealth();
       _processBoardDeletes();
       _retryEnrichmentIfDue();
@@ -1429,7 +1437,9 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       (_) => _refreshRelayStatus(),
     );
     _homeStatusTimer = Timer.periodic(
-      const Duration(seconds: 30),
+      const Duration(
+        minutes: 5,
+      ), // a slow refresh: the app also sends it whenever a count changes
       (_) => _sendHomeStatus(),
     );
   }
@@ -2492,6 +2502,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       if (message.contains('\nsd=')) {
         _boardStorage = BoardReport.storageFrom(message);
       }
+      _boardPower = BoardReport.powerFrom(message) ?? _boardPower;
       if (waiting != null) {
         if (waiting > 0 && (_boardWaiting ?? 0) == 0)
           _waitingSince = DateTime.now();
@@ -3426,32 +3437,36 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       builder: (context) => const _BroadcastDialog(),
     );
     if (choice == null || !mounted) return;
+    await _runBroadcast(speech: choice.speech, text: choice.text);
+  }
+
+  /// Makes the clip (Gemini speaks [text], or [speech] is raw 16 kHz microphone audio), sends it to Circuit, and
+  /// returns the one line that says how it went (also shown in the status line).
+  Future<String> _runBroadcast({Uint8List? speech, String? text}) async {
     setState(() => _broadcasting = true);
+    var outcome = 'Circuit is playing your message';
     try {
       final Uint8List wav;
-      if (choice.speech != null) {
-        wav = broadcastWav(choice.speech!, sourceRate: 16000);
+      if (speech != null) {
+        wav = broadcastWav(speech, sourceRate: 16000);
       } else {
         _setStatus('Making the voice message…');
-        wav = await _gemini.speakWav(choice.text!);
+        wav = await _gemini.speakWav(text ?? '');
       }
       _setStatus('Sending it to Circuit…');
       await _relayChannel.invokeMethod<bool>('requestLocalNetwork');
       final problem = await _relayChannel.invokeMethod<String>('speakOnBoard', {
         'bytes': wav,
       });
-      _setStatus(
-        problem == null
-            ? 'Circuit is playing your message'
-            : 'Broadcast failed: $problem',
-      );
+      if (problem != null) outcome = 'Broadcast failed: $problem';
     } catch (error) {
-      _setStatus(
-        'Broadcast failed: ${error.toString().replaceFirst('Exception: ', '').replaceFirst('Bad state: ', '')}',
-      );
+      outcome =
+          'Broadcast failed: ${error.toString().replaceFirst('Exception: ', '').replaceFirst('Bad state: ', '')}';
     } finally {
       if (mounted) setState(() => _broadcasting = false);
     }
+    _setStatus(outcome);
+    return outcome;
   }
 
   /// The firmware this app was built with (assets/firmware/circuit.bin, see tool/bundle_firmware.py), or null
@@ -3467,37 +3482,82 @@ class _CircuitHomePageState extends State<CircuitHomePage>
     }
   }
 
-  /// "Update Circuit": installs the firmware that came with this app, after one confirmation. Circuit keeps
-  /// its old firmware until the new one is written and checked, and goes back to it by itself if the new one
-  /// fails to start.
+  /// "Update Circuit": pick a firmware file (.bin) from the phone's storage and install it, after one
+  /// confirmation. Circuit keeps its old firmware until the new one is written and checked, and goes back to
+  /// it by itself if the new one fails to start.
   Future<void> _updateCircuitFirmware() async {
-    final bundled = _bundledFirmwareImage ?? await _bundledFirmware();
-    if (!mounted) return;
-    if (bundled == null) {
-      _setStatus(
-        'This app has no firmware to install. Use "Reset Circuit firmware" to pick a file.',
-      );
-      return;
+    final picked = await FilePicker.platform.pickFiles(withData: true);
+    final bytes = picked?.files.single.bytes;
+    if (bytes == null || !mounted) return;
+    try {
+      await _installCircuitFirmware(FirmwareImage.parse(bytes));
+    } on FormatException catch (error) {
+      _setStatus(error.message);
     }
-    await _installCircuitFirmware(bundled);
   }
 
-  /// "Reset Circuit firmware": the two other ways to change firmware, a file of your own, or the firmware
-  /// Circuit had before its last update.
-  Future<void> _resetCircuitFirmware() async {
-    final previous = _boardPrevious;
+  /// "Power mode": Circuit chooses by itself from its battery (Saver above 35%, Deep from 35% down to 10%, and
+  /// recording only at 10% or below). This lets the phone ask it to save more: it can never ask for less than the
+  /// battery allows.
+  Future<void> _choosePowerMode() async {
+    final current = _boardPower?.choice ?? 'auto';
     final choice = await showModalBottomSheet<String>(
       context: context,
       builder: (context) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(
-              leading: const Icon(LucideIcons.fileUp),
-              title: const Text('Choose a firmware file…'),
-              subtitle: const Text('A .bin built for Circuit'),
-              onTap: () => Navigator.pop(context, 'file'),
-            ),
+            for (final (value, title, detail) in const [
+              (
+                'auto',
+                'Auto',
+                'Circuit decides from its battery: Saver above 35%, Deep below',
+              ),
+              (
+                'saver',
+                'Saver',
+                'Light sleep, everything works (Deep and recording-only still apply when the battery is low)',
+              ),
+              (
+                'deep',
+                'Deep',
+                'Use less power now: the radios are used sparingly, notes reach the phone in the next check-in',
+              ),
+            ])
+              ListTile(
+                leading: Icon(
+                  current == value ? LucideIcons.circleDot : LucideIcons.circle,
+                ),
+                title: Text(title),
+                subtitle: Text(detail),
+                onTap: () => Navigator.pop(context, value),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || choice == current || !mounted) return;
+    try {
+      await _writeCircuit('@power-mode\n$choice');
+      _setStatus('Asked Circuit to use $choice power mode');
+    } catch (error) {
+      _setStatus('Could not ask Circuit: $error');
+    }
+  }
+
+  /// "Reset Circuit firmware": go back to the firmware Circuit had before its last update, or install the
+  /// stable firmware that came inside this app (the factory version).
+  Future<void> _resetCircuitFirmware() async {
+    final previous = _boardPrevious;
+    final stable = _bundledFirmwareImage ?? await _bundledFirmware();
+    if (!mounted) return;
+    final running = _boardFirmware;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
             ListTile(
               enabled: previous != null,
               leading: const Icon(LucideIcons.undo2),
@@ -3511,22 +3571,30 @@ class _CircuitHomePageState extends State<CircuitHomePage>
                   ? null
                   : () => Navigator.pop(context, 'previous'),
             ),
+            ListTile(
+              enabled: stable != null,
+              leading: const Icon(LucideIcons.shieldCheck),
+              title: const Text('Install the stable firmware'),
+              subtitle: Text(
+                stable == null
+                    ? 'This app has no firmware inside'
+                    : running == null
+                    ? '${stable.version} · came with this app'
+                    : '${stable.version} · came with this app, ${FirmwareImage.relation(stable.version, running.version)} Circuit\'s ${running.version}',
+              ),
+              onTap: stable == null
+                  ? null
+                  : () => Navigator.pop(context, 'stable'),
+            ),
           ],
         ),
       ),
     );
     switch (choice) {
-      case 'file':
-        final picked = await FilePicker.platform.pickFiles(withData: true);
-        final bytes = picked?.files.single.bytes;
-        if (bytes == null || !mounted) return;
-        try {
-          await _installCircuitFirmware(FirmwareImage.parse(bytes));
-        } on FormatException catch (error) {
-          _setStatus(error.message);
-        }
       case 'previous':
         await _revertCircuitFirmware();
+      case 'stable':
+        if (stable != null) await _installCircuitFirmware(stable);
     }
   }
 

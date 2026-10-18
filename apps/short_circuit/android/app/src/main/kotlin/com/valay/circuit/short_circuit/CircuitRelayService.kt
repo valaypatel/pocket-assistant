@@ -186,7 +186,9 @@ class CircuitRelayService : Service() {
     private val homeStatusRunnable = object : Runnable {
         override fun run() {
             if (relayReady) sendHomeStatus()
-            reconnectHandler.postDelayed(this, 30_000)
+            // Circuit keeps its own clock and counts, and the app also sends this whenever a count changes, so
+            // this is only a slow refresh.
+            reconnectHandler.postDelayed(this, 300_000)
         }
     }
     private val reconnectRunnable = Runnable { circuitAddress?.let(::connect) }
@@ -385,7 +387,10 @@ class CircuitRelayService : Service() {
                     return
                 }
                 reconnectDelayMs = 1000L
-                gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                // A relaxed rhythm (an event every 100 to 125 ms): Circuit sends short commands and status here, and
+                // files go over Wi-Fi. The high-priority mode (an event every 11 to 15 ms) kept its radio and
+                // processor busy all day for nothing.
+                gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER)
                 setRelayStatus("Securing the connection…")
                 if (!gatt.requestMtu(185) && !gatt.discoverServices()) {
                     failConnection(gatt, "Could not discover Circuit services")

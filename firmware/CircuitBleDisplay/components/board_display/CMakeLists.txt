@@ -5,7 +5,7 @@ idf_component_register(
     SRCS
         "${WAVESHARE_BSP}/port_power.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/port_display.cpp"
-        "${WAVESHARE_BSP}/port_lvgl.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/circuit_lvgl.cpp"
         "${WAVESHARE_BSP}/port_codec.cpp"
     INCLUDE_DIRS
         "${WAVESHARE_BSP}"
