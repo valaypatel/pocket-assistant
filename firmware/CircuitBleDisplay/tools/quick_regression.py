@@ -125,10 +125,10 @@ print("== Q3 record during playback", flush=True)
 p = pos()
 b("play")
 time.sleep(3)
-b("rec", "5")
-time.sleep(2)
+b("rec", "30")  # long enough that the (slow) status call below still finds it recording, then it is stopped by hand
 a = status()
-wait_for("Saved recording", p, 15)
+b("rec-stop")
+wait_for("Saved recording", p, 20)
 t = since(p)
 note("Q3 recording during playback stops playback and records", "Playback stopped" in t and a.get("recording") == 1 and "Saved recording" in t)
 
