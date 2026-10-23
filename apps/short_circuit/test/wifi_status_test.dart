@@ -31,4 +31,15 @@ void main() {
   test('an empty status is ignored', () {
     expect(parseWifiStatus('@wifi-status'), isNull);
   });
+
+  test('reads how many networks Circuit remembers', () {
+    final status = parseWifiStatus(
+      '@wifi-status\nconnected\nHome\n10.0.0.5\nmac=AA:BB:CC:DD:EE:FF\nsaved=3',
+    );
+    expect(status!.saved, 3);
+    expect(status.mac, 'AA:BB:CC:DD:EE:FF');
+    expect(status.detail, '10.0.0.5');
+    final old = parseWifiStatus('@wifi-status\nconnected\nHome\n10.0.0.5');
+    expect(old!.saved, isNull);
+  });
 }

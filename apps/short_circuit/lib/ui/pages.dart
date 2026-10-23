@@ -2136,7 +2136,9 @@ extension _ScPages on _CircuitHomePageState {
       const ScTitle('Connect Circuit'),
       const SizedBox(height: 8),
       Text(
-        'Choose a nearby network and enter its password. Circuit will prefer Wi‑Fi when it is available.',
+        _wifiSaved > 0
+            ? 'Circuit remembers $_wifiSaved of 15 networks and joins the strongest one in range. Add another below.'
+            : 'Choose a nearby network and enter its password. Circuit remembers up to 15 and joins the strongest in range.',
         style: TextStyle(color: context.sc.muted, fontSize: 12, height: 1.4),
       ),
       const SizedBox(height: 20),

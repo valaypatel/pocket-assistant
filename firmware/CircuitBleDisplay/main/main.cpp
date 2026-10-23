@@ -327,6 +327,13 @@ void wifi_wake();
 void wifi_rest();
 void apply_ble_rhythm();
 void apply_power_policy();
+void wifi_connect_best();
+void dev_wifi_add(const char *ssid);
+void dev_wifi_nets();
+void dev_wifi_scan_test();
+void dev_wifi_clear();
+void dev_wifi_try_fake();
+int saved_net_count = 0;  // how many Wi-Fi networks are remembered (see "Saved Wi-Fi networks")
 uint8_t connected_bda[6] = {};
 bool adv_restart_pending = false;
 bool ble_seen_since_boot = false;  // a phone has connected and secured the link since the board started
@@ -612,7 +619,10 @@ void restore_clock_from_rtc() {
     time_t from_chip = 0;
     const bool chip_ok = circuit_rtc::read(&from_chip, kMinValidEpoch);
     const time_t now = time(nullptr);
-    if (chip_ok && now < kMinValidEpoch) {
+    // The chip keeps time through a restart; the system clock loses the seconds a restart takes (about 10 to 20 s each).
+    // So the chip wins whenever it holds a valid time that differs by more than 2 s.
+    const bool chip_differs = chip_ok && (now < kMinValidEpoch || from_chip > now + 2 || from_chip + 2 < now);
+    if (chip_differs) {
         timeval tv = {.tv_sec = from_chip, .tv_usec = 0};
         settimeofday(&tv, nullptr);
         clock_set = true;
@@ -1625,8 +1635,9 @@ void send_wifi_status() {
     // third line as the detail, just show it there and newer ones pick it out.
     uint8_t mac[6] = {};
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf(message, sizeof(message), "@wifi-status\n%s\n%s\n%s\nmac=%02X:%02X:%02X:%02X:%02X:%02X",
-        names[static_cast<int>(wifi_ui)], wifi_ssid, wifi_detail, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    snprintf(message, sizeof(message), "@wifi-status\n%s\n%s\n%s\nmac=%02X:%02X:%02X:%02X:%02X:%02X\nsaved=%d",
+        names[static_cast<int>(wifi_ui)], wifi_ssid, wifi_detail, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        saved_net_count);
     send_relay_request(message);
 }
 
@@ -2401,7 +2412,7 @@ void sync_supervisor_task(void *) {
             circuit_sync::now_ms() - wifi_failed_at_ms > (wifi_auth_failure ? 300000 : 60000)) {
             wifi_retries = 0;
             set_wifi_ui(WifiUi::Connecting);
-            esp_wifi_connect();
+            wifi_connect_best();
         }
         if (circuit_sync::is_open()) {
             const bool all_synced = circuit_sync::state.acked > 0 && circuit_sync::waiting_in_session() == 0;
@@ -2654,6 +2665,16 @@ void dev_console_task(void *) {
                 set_light_sleep(false);
             }
             ESP_LOGW(kTag, "DEV sleep: light sleep is %s", light_sleep_on ? "on" : "off");
+        } else if (strncmp(line, "wifi-add ", 9) == 0) {
+            dev_wifi_add(line + 9);
+        } else if (strcmp(line, "wifi-nets") == 0) {
+            dev_wifi_nets();
+        } else if (strcmp(line, "wifi-scan-test") == 0) {
+            dev_wifi_scan_test();
+        } else if (strcmp(line, "wifi-clear") == 0) {
+            dev_wifi_clear();
+        } else if (strcmp(line, "wifi-try-fake") == 0) {
+            dev_wifi_try_fake();
         } else if (strncmp(line, "power-choice ", 13) == 0) {
             const char *want = line + 13;
             power_choice = strcmp(want, "deep") == 0 ? PowerChoice::Deep : strcmp(want, "saver") == 0 ? PowerChoice::Saver : PowerChoice::Auto;
@@ -3075,7 +3096,10 @@ void record_button_task(void *) {
         if (is_pressed) {
             vTaskDelay(kButtonPollInterval);  // held: keep timing it
         } else {
-            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // idle: sleep until the key changes
+            // Idle: sleep until the key changes. While a recording runs the key is also looked at every 40 ms: a quick tap
+            // (to stop it) can land while the chip is waking from light sleep and its edge is missed, so it was
+            // sometimes necessary to press the key more than once.
+            ulTaskNotifyTake(pdTRUE, recording_active ? pdMS_TO_TICKS(40) : portMAX_DELAY);
         }
     }
 }
@@ -3366,6 +3390,184 @@ void start_sntp() {
     esp_sntp_init();
 }
 
+// ---- Saved Wi-Fi networks ------------------------------------------------------
+// Up to 15 networks are remembered (in flash, in the order they were added; the oldest goes when a 16th arrives).
+// To connect, the board scans, picks the strongest one it knows, and moves on to the next known network in range
+// if that one will not take it. A scan pauses connection attempts: the radio refuses to scan while it is trying.
+constexpr int kMaxSavedNets = 15;
+struct SavedNet {
+    char ssid[33];
+    char password[65];
+};
+SavedNet saved_nets[kMaxSavedNets];
+volatile bool wifi_scanning = false;
+int candidate_nets[kMaxSavedNets];  // indexes into saved_nets: the known networks in range, strongest first
+int candidate_count = 0;
+int candidate_at = 0;
+
+void load_saved_nets() {
+    saved_net_count = 0;
+    nvs_handle_t handle;
+    if (nvs_open("wifinets", NVS_READONLY, &handle) != ESP_OK) return;
+    size_t size = sizeof(saved_nets);
+    if (nvs_get_blob(handle, "list", saved_nets, &size) == ESP_OK) {
+        saved_net_count = static_cast<int>(size / sizeof(SavedNet));
+        if (saved_net_count > kMaxSavedNets) saved_net_count = kMaxSavedNets;
+    }
+    nvs_close(handle);
+}
+
+void store_saved_nets() {
+    nvs_handle_t handle;
+    if (nvs_open("wifinets", NVS_READWRITE, &handle) != ESP_OK) return;
+    nvs_set_blob(handle, "list", saved_nets, static_cast<size_t>(saved_net_count) * sizeof(SavedNet));
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+int find_saved_net(const char *ssid) {
+    for (int i = 0; i < saved_net_count; ++i) {
+        if (strcmp(saved_nets[i].ssid, ssid) == 0) return i;
+    }
+    return -1;
+}
+
+// Adds a network (or updates its password) and returns its index; the newest sits last.
+int remember_net(const char *ssid, const char *password) {
+    int at = find_saved_net(ssid);
+    if (at >= 0) {  // keep the order, but a re-entered network becomes the newest
+        for (int i = at; i + 1 < saved_net_count; ++i) saved_nets[i] = saved_nets[i + 1];
+        --saved_net_count;
+    }
+    if (saved_net_count == kMaxSavedNets) {  // full: the oldest makes room
+        for (int i = 0; i + 1 < saved_net_count; ++i) saved_nets[i] = saved_nets[i + 1];
+        --saved_net_count;
+    }
+    SavedNet &net = saved_nets[saved_net_count];
+    memset(&net, 0, sizeof(net));
+    snprintf(net.ssid, sizeof(net.ssid), "%s", ssid);
+    snprintf(net.password, sizeof(net.password), "%s", password);
+    store_saved_nets();
+    return saved_net_count++;
+}
+
+void forget_net(const char *ssid) {
+    const int at = find_saved_net(ssid);
+    if (at < 0) return;
+    for (int i = at; i + 1 < saved_net_count; ++i) saved_nets[i] = saved_nets[i + 1];
+    --saved_net_count;
+    store_saved_nets();
+}
+
+// Makes this the network the radio will join (nothing is written to flash: the list above is the memory).
+void apply_net(int index) {
+    wifi_config_t config = {};
+    const SavedNet &net = saved_nets[index];
+    memcpy(config.sta.ssid, net.ssid, sizeof(config.sta.ssid) - 1);
+    memcpy(config.sta.password, net.password, sizeof(config.sta.password) - 1);
+    config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    config.sta.threshold.authmode = net.password[0] != '\0' ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+    esp_wifi_set_config(WIFI_IF_STA, &config);
+    snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", net.ssid);
+}
+
+// A scan that survives a connection attempt in progress: the radio is told to stop trying first, and the event
+// handler leaves it alone while `wifi_scanning` is set. Returns how many access points were found (0 on failure).
+int wifi_scan_aps(wifi_ap_record_t *records, uint16_t capacity) {
+    wifi_scanning = true;
+    esp_wifi_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(300));
+    wifi_scan_config_t config = {};
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < 3 && err != ESP_OK; ++attempt) {
+        err = esp_wifi_scan_start(&config, true);
+        if (err != ESP_OK) {
+            esp_wifi_scan_stop();
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+    }
+    uint16_t count = capacity;
+    if (err != ESP_OK || esp_wifi_scan_get_ap_records(&count, records) != ESP_OK) count = 0;
+    wifi_scanning = false;
+    return count;
+}
+
+#ifdef CIRCUIT_DEV_CONSOLE
+void dev_wifi_add(const char *ssid) {
+    remember_net(ssid, "testpassword");
+    ESP_LOGW(kTag, "DEV wifi-add: %d saved", saved_net_count);
+}
+
+void dev_wifi_clear() {  // forgets the list; the network an older firmware kept in flash is imported again at the restart
+    saved_net_count = 0;
+    store_saved_nets();
+    ESP_LOGW(kTag, "DEV wifi-clear: list emptied, restarting");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+}
+
+void dev_wifi_try_fake() {  // the field case: a network that is not there, so the radio keeps trying to join it
+    wifi_wake();
+    wifi_config_t config = {};
+    snprintf(reinterpret_cast<char *>(config.sta.ssid), sizeof(config.sta.ssid), "NoSuchNetwork");
+    snprintf(reinterpret_cast<char *>(config.sta.password), sizeof(config.sta.password), "nopassword");
+    esp_wifi_set_config(WIFI_IF_STA, &config);
+    wifi_retries = 0;
+    candidate_count = 0;
+    set_wifi_ui(WifiUi::Connecting);
+    esp_wifi_connect();
+    ESP_LOGW(kTag, "DEV wifi-try-fake: trying a network that is not there");
+}
+
+void dev_wifi_nets() {
+    char names[600] = "";
+    for (int i = 0; i < saved_net_count && strlen(names) < 500; ++i) {
+        strlcat(names, saved_nets[i].ssid, sizeof(names));
+        strlcat(names, ",", sizeof(names));
+    }
+    ESP_LOGW(kTag, "DEV wifi-nets: %d saved: %s", saved_net_count, names);
+}
+
+void dev_wifi_scan_test() {
+    auto *records = static_cast<wifi_ap_record_t *>(
+        heap_caps_calloc(30, sizeof(wifi_ap_record_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    const int found = records != nullptr ? wifi_scan_aps(records, 30) : -1;
+    ESP_LOGW(kTag, "DEV wifi-scan-test: %d access points", found);
+    if (records != nullptr) heap_caps_free(records);
+}
+#endif
+
+// Joins the strongest known network in range (the only one saved, if there is just one). Scans, so it takes a few
+// seconds; it is called from tasks, not from the Wi-Fi event handler.
+void wifi_connect_best() {
+    if (saved_net_count == 0) return;
+    candidate_count = 0;
+    candidate_at = 0;
+    if (saved_net_count > 1) {
+        auto *records = static_cast<wifi_ap_record_t *>(
+            heap_caps_calloc(24, sizeof(wifi_ap_record_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (records != nullptr) {
+            const int found = wifi_scan_aps(records, 24);
+            for (int i = 0; i < found && candidate_count < kMaxSavedNets; ++i) {  // strongest first
+                const int at = find_saved_net(reinterpret_cast<const char *>(records[i].ssid));
+                bool listed = false;
+                for (int c = 0; c < candidate_count; ++c) listed = listed || candidate_nets[c] == at;
+                if (at >= 0 && !listed) candidate_nets[candidate_count++] = at;
+            }
+            heap_caps_free(records);
+        }
+    }
+    if (candidate_count == 0) {  // one network, or none seen: try them newest first
+        for (int i = saved_net_count - 1; i >= 0; --i) candidate_nets[candidate_count++] = i;
+    }
+    ESP_LOGI(kTag, "Wi-Fi: %d saved, trying %s first (%d candidate(s))", saved_net_count,
+        saved_nets[candidate_nets[0]].ssid, candidate_count);
+    apply_net(candidate_nets[0]);
+    wifi_retries = 0;
+    esp_wifi_connect();
+}
+
 void wifi_event_handler(void *, esp_event_base_t event_base, int32_t event_id, void *event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
         wifi_connected = true;
@@ -3380,9 +3582,15 @@ void wifi_event_handler(void *, esp_event_base_t event_base, int32_t event_id, v
             wifi_manual_disconnect = false;
             return;
         }
-        if (wifi_ui == WifiUi::None) return;
+        if (wifi_ui == WifiUi::None || wifi_scanning) return;
         if (wifi_retries < kWifiMaxRetries) {
             ++wifi_retries;
+            set_wifi_ui(WifiUi::Connecting);
+            esp_wifi_connect();
+        } else if (candidate_at + 1 < candidate_count) {  // this network will not take it: the next known one
+            ++candidate_at;
+            apply_net(candidate_nets[candidate_at]);
+            wifi_retries = 0;
             set_wifi_ui(WifiUi::Connecting);
             esp_wifi_connect();
         } else {
@@ -3447,10 +3655,14 @@ void provision_wifi(char *value) {
     esp_wifi_disconnect();
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &config));
     snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", reinterpret_cast<const char *>(config.sta.ssid));
+    const int chosen = remember_net(wifi_ssid, reinterpret_cast<const char *>(config.sta.password));
+    candidate_nets[0] = chosen;  // the person picked this one: it is tried first (and only)
+    candidate_count = 1;
+    candidate_at = 0;
     wifi_retries = 0;
     update_connection_status("Wi-Fi: connecting…\nInternet: checking…\nPhone relay: unavailable");
     set_wifi_ui(WifiUi::Connecting);
-    ESP_ERROR_CHECK(esp_wifi_connect());
+    esp_wifi_connect();
 }
 
 void forget_wifi() {
@@ -3458,12 +3670,20 @@ void forget_wifi() {
         wifi_resting = false;
         esp_wifi_start();
     }
+    char forgotten[33];
+    snprintf(forgotten, sizeof(forgotten), "%s", wifi_ssid);
     wifi_manual_disconnect = wifi_connected;
     esp_wifi_disconnect();
+    forget_net(forgotten);
     wifi_config_t empty = {};
     esp_wifi_set_config(WIFI_IF_STA, &empty);
     wifi_ssid[0] = '\0';
     wifi_retries = 0;
+    if (saved_net_count > 0) {  // another saved network takes over
+        set_wifi_ui(WifiUi::Connecting);
+        wifi_connect_best();
+        return;
+    }
     set_wifi_ui(WifiUi::None);
     update_connection_status("Wi-Fi: not configured\nInternet: offline\nPhone relay: unavailable");
 }
@@ -3475,29 +3695,36 @@ void wifi_scan_task(void *) {
         vTaskDelay(pdMS_TO_TICKS(500));
     }
     update_connection_status("Wi-Fi: scanning nearby networks…");
-    wifi_scan_config_t config = {};
-    if (esp_wifi_scan_start(&config, true) != ESP_OK) {
-        send_relay_request("@wifi-list\n");
-        vTaskDelete(nullptr);
-        return;
-    }
-
-    wifi_ap_record_t access_points[10] = {};
-    uint16_t count = 10;
-    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&count, access_points));
+    constexpr uint16_t kCapacity = 30;
+    auto *records = static_cast<wifi_ap_record_t *>(
+        heap_caps_calloc(kCapacity, sizeof(wifi_ap_record_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    int found = 0;
+    if (records != nullptr) found = wifi_scan_aps(records, kCapacity);
     char response[kMaxTextBytes + 1] = "@wifi-list";
     size_t used = strlen(response);
-    for (uint16_t index = 0; index < count; ++index) {
-        const char *ssid = reinterpret_cast<const char *>(access_points[index].ssid);
+    for (int index = 0; index < found; ++index) {  // strongest first, each name once
+        const char *ssid = reinterpret_cast<const char *>(records[index].ssid);
         const size_t length = strlen(ssid);
         if (length == 0 || used + length + 1 > kMaxTextBytes) continue;
+        bool listed = false;
+        for (int before = 0; before < index && !listed; ++before) {
+            listed = strcmp(reinterpret_cast<const char *>(records[before].ssid), ssid) == 0;
+        }
+        if (listed) continue;
         response[used++] = '\n';
         memcpy(response + used, ssid, length);
         used += length;
         response[used] = '\0';
     }
+    if (records != nullptr) heap_caps_free(records);
     send_relay_request(response);
-    update_connection_status("Wi-Fi: select a network\nInternet: offline\nPhone relay: unavailable");
+    // The scan paused the connection attempts: pick them up again if the board is not on a network.
+    if (!wifi_connected && saved_net_count > 0 && wifi_ui != WifiUi::None) {
+        set_wifi_ui(WifiUi::Connecting);
+        wifi_connect_best();
+    }
+    update_connection_status(wifi_connected ? "Wi-Fi: connected\nInternet: checking…\nPhone relay: unavailable"
+                                            : "Wi-Fi: select a network\nInternet: offline\nPhone relay: unavailable");
     vTaskDelete(nullptr);
 }
 
@@ -3950,7 +4177,16 @@ void start_wifi() {
 
     wifi_config_t saved_config = {};
     ESP_ERROR_CHECK(esp_wifi_get_config(WIFI_IF_STA, &saved_config));
-    if (!radios_wanted()) {  // standalone: the network is remembered, the radio stays off until sync mode needs it
+    load_saved_nets();
+    if (saved_net_count == 0 && saved_config.sta.ssid[0] != '\0') {  // the one network an older firmware kept
+        remember_net(reinterpret_cast<const char *>(saved_config.sta.ssid),
+            reinterpret_cast<const char *>(saved_config.sta.password));
+    }
+    esp_wifi_set_storage(WIFI_STORAGE_RAM);  // the saved list is the memory now: no flash write per connection
+    if (saved_net_count > 0) {
+        memcpy(saved_config.sta.ssid, saved_nets[saved_net_count - 1].ssid, sizeof(saved_config.sta.ssid) - 1);
+    }
+    if (!radios_wanted()) {  // standalone: the networks are remembered, the radio stays off until sync mode needs it
         snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", reinterpret_cast<const char *>(saved_config.sta.ssid));
         wifi_resting = true;
         esp_wifi_stop();
@@ -3962,7 +4198,7 @@ void start_wifi() {
         snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", reinterpret_cast<const char *>(saved_config.sta.ssid));
         update_connection_status("Wi-Fi: reconnecting…\nInternet: checking…\nPhone relay: unavailable");
         set_wifi_ui(WifiUi::Connecting);
-        ESP_ERROR_CHECK(esp_wifi_connect());
+        wifi_connect_best();
     } else {
         update_connection_status("Wi-Fi: not configured\nInternet: offline\nPhone relay: unavailable");
     }
@@ -3993,7 +4229,7 @@ void wifi_wake() {
         return;
     }
     set_wifi_ui(WifiUi::Connecting);
-    esp_wifi_connect();
+    wifi_connect_best();
 }
 
 // What was asked while Wi-Fi was resting, done once it is up. It runs in a task of its own with the stack the sync

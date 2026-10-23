@@ -188,6 +188,16 @@ def main():
         return send(f"copy-sync {n}", ("SYNCSTAT", "0 file(s)"), 600)
     if cmd == "sleep" and len(args) > 1:
         return send("sleep " + args[1], "DEV sleep", 15)
+    if cmd == "wifi-add" and len(args) > 1:
+        return send("wifi-add " + args[1], "DEV wifi-add", 15)
+    if cmd == "wifi-try-fake":
+        return send("wifi-try-fake", "DEV wifi-try-fake", 30)
+    if cmd == "wifi-clear":
+        return send("wifi-clear", "DEV wifi-clear", 15)
+    if cmd == "wifi-nets":
+        return send("wifi-nets", "DEV wifi-nets", 15)
+    if cmd == "wifi-scan-test":
+        return send("wifi-scan-test", "DEV wifi-scan-test", 60)
     if cmd == "power-choice" and len(args) > 1:
         return send("power-choice " + args[1], "DEV power-choice", 15)
     if cmd == "connected" and len(args) > 1:
