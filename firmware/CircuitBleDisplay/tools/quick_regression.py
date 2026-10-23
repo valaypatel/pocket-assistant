@@ -192,6 +192,22 @@ rec = status().get("recording") == 1
 b("rec-stop")
 wait_for("Saved recording", p, 20)
 note("Q8 a short tap still starts a recording", rec, "")
+# a quick tap stops a recording at the first try (the key used to be missed now and then while the chip woke from sleep)
+time.sleep(6)  # the previous recording is still being saved
+p = pos()
+b("rec")
+time.sleep(3)
+started = status().get("recording") == 1
+b("key", "tap")
+time.sleep(2)
+stopped = status().get("recording") == 0
+wait_for("Saved recording", p, 20)
+note("Q8 one tap on the key stops a recording", started and stopped, "")
+b("wifi-try-fake", timeout=60)  # the radio keeps trying a network that is not there...
+time.sleep(8)
+scan = b("wifi-scan-test", timeout=90)
+m = re.search(r"wifi-scan-test: (\d+) access points", scan)
+note("Q8 a Wi-Fi scan works while the board is failing to join a network", bool(m) and int(m.group(1)) > 0, scan.strip()[-60:])
 
 print("== Q6 RTC", flush=True)
 m = re.search(r"chip=(\w+) \d+, system=\d+, difference=(-?\d+) s", b("rtc", timeout=60))

@@ -1132,11 +1132,14 @@ Future<void> main() async {
 /// Circuit's Wi-Fi status: "@wifi-status", the state, the network name, then the detail (its IP
 /// address when connected, the reason when not) and, from newer firmware, a last "mac=" line.
 class WifiStatus {
-  const WifiStatus(this.state, this.ssid, this.detail, this.mac);
+  const WifiStatus(this.state, this.ssid, this.detail, this.mac, [this.saved]);
   final String state;
   final String ssid;
   final String detail;
   final String mac;
+
+  /// How many networks Circuit remembers (it keeps up to 15); null from older firmware.
+  final int? saved;
 }
 
 WifiStatus? parseWifiStatus(String message) {
@@ -1144,6 +1147,11 @@ WifiStatus? parseWifiStatus(String message) {
   if (lines.length < 2) return null;
   var tail = lines.length > 3 ? lines.sublist(3) : <String>[];
   var mac = '';
+  int? saved;
+  if (tail.isNotEmpty && tail.last.startsWith('saved=')) {
+    saved = int.tryParse(tail.last.substring(6).trim());
+    tail = tail.sublist(0, tail.length - 1);
+  }
   if (tail.isNotEmpty && tail.last.startsWith('mac=')) {
     mac = tail.last.substring(4).trim();
     tail = tail.sublist(0, tail.length - 1);
@@ -1153,6 +1161,7 @@ WifiStatus? parseWifiStatus(String message) {
     lines.length > 2 ? lines[2] : '',
     tail.join('\n'),
     mac,
+    saved,
   );
 }
 
@@ -1398,6 +1407,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   // What Circuit reports about its own Wi-Fi: none, connecting, connected, failed.
   String _wifiState = 'none';
   String _wifiSsid = '';
+  int _wifiSaved = 0; // networks Circuit remembers (up to 15)
   String _wifiDetail = '';
   String _wifiMac = ''; // Circuit's Wi-Fi MAC address, once it has said
   bool _showWifiPassword = false;
@@ -3314,6 +3324,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _wifiSsid = status.ssid;
       _wifiDetail = status.detail;
       if (status.mac.isNotEmpty) _wifiMac = status.mac;
+      if (status.saved != null) _wifiSaved = status.saved!;
       if (status.state == 'connecting') {
         _wifiConnectingSince ??= DateTime.now();
       } else {
