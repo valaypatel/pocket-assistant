@@ -190,6 +190,10 @@ def main():
         return send("sleep " + args[1], "DEV sleep", 15)
     if cmd == "wifi-add" and len(args) > 1:
         return send("wifi-add " + args[1], "DEV wifi-add", 15)
+    if cmd == "wifi-fake-only":
+        return send("wifi-fake-only", "DEV wifi-fake-only", 15)
+    if cmd == "wifi-need":
+        return send("wifi-need", "DEV wifi-need", 15)
     if cmd == "wifi-try-fake":
         return send("wifi-try-fake", "DEV wifi-try-fake", 30)
     if cmd == "wifi-clear":

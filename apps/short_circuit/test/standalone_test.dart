@@ -131,4 +131,27 @@ void main() {
     expect(find.text('Sync running · update when it finishes'), findsNothing);
     await close(tester);
   });
+
+  testWidgets(
+    'no known Wi-Fi is a calm pill that opens the Wi-Fi page, not an error',
+    (tester) async {
+      await open(
+        tester,
+        '@sync-status\nfw=3.0.1|aaaaaaaa\npm=saver|auto\nmode=sync\nbat=80',
+      );
+      await tester.tap(find.text('Notes').last);
+      await tester.pump();
+      await status(
+        tester,
+        'No known Wi-Fi in range: add one on the Wi-Fi page',
+      );
+      await tester.pump();
+      expect(find.text('No Wi‑Fi · Add one'), findsOneWidget);
+      expect(find.text('Sync stopped · Retry'), findsNothing);
+      await tester.tap(find.text('No Wi‑Fi · Add one'));
+      await tester.pump();
+      expect(find.text('Connect Circuit'), findsOneWidget);
+      await close(tester);
+    },
+  );
 }
