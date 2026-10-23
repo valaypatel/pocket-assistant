@@ -309,6 +309,7 @@ bool radios_wanted() { return connected_mode || sync_mode || unpaired; }
 void sync_mode_phone_connected();
 void sync_mode_note_activity();
 void sync_mode_poll();
+void show_sync_mode_screen(const char *line);
 void enter_sync_mode();
 void leave_sync_mode(const char *why);
 
@@ -333,6 +334,7 @@ void dev_wifi_nets();
 void dev_wifi_scan_test();
 void dev_wifi_clear();
 void dev_wifi_try_fake();
+void dev_wifi_fake_only();
 int saved_net_count = 0;  // how many Wi-Fi networks are remembered (see "Saved Wi-Fi networks")
 uint8_t connected_bda[6] = {};
 bool adv_restart_pending = false;
@@ -722,7 +724,11 @@ void screen_timeout_task(void *argument) {
     delete static_cast<ScreenTimeout *>(argument);
     vTaskDelay(pdMS_TO_TICKS(timeout.delay_ms));
     if (!(timeout.expected == DeviceScreen::Playback && playback_active.load())) {
-        show_device_screen(sync_mode ? DeviceScreen::SyncMode : DeviceScreen::Idle, true, timeout.expected);
+        if (sync_mode && active_screen == timeout.expected) {
+            show_sync_mode_screen("Sync mode\nOpen the app");  // back to the sync-mode picture, with its line
+        } else {
+            show_device_screen(DeviceScreen::Idle, true, timeout.expected);
+        }
     }
     vTaskDelete(nullptr);
 }
@@ -2673,6 +2679,11 @@ void dev_console_task(void *) {
             dev_wifi_scan_test();
         } else if (strcmp(line, "wifi-clear") == 0) {
             dev_wifi_clear();
+        } else if (strcmp(line, "wifi-fake-only") == 0) {
+            dev_wifi_fake_only();
+        } else if (strcmp(line, "wifi-need") == 0) {
+            request_after_wifi(AfterWifi::Sync, false);  // what a sync request does when Wi-Fi is resting
+            ESP_LOGW(kTag, "DEV wifi-need: asked for Wi-Fi");
         } else if (strcmp(line, "wifi-try-fake") == 0) {
             dev_wifi_try_fake();
         } else if (strncmp(line, "power-choice ", 13) == 0) {
@@ -3507,6 +3518,12 @@ void dev_wifi_clear() {  // forgets the list; the network an older firmware kept
     esp_restart();
 }
 
+void dev_wifi_fake_only() {  // the list holds one network that is not there; `wifi-clear` brings the real one back
+    saved_net_count = 0;
+    remember_net("NoSuchNetwork", "nopassword");
+    ESP_LOGW(kTag, "DEV wifi-fake-only: %d saved", saved_net_count);
+}
+
 void dev_wifi_try_fake() {  // the field case: a network that is not there, so the radio keeps trying to join it
     wifi_wake();
     wifi_config_t config = {};
@@ -4256,7 +4273,7 @@ void wifi_wait_task(void *) {
     // Wi-Fi was off; wait for it (a few seconds) and do what was asked.
     char ip[16];
     int waited_ms = 0;
-    while (waited_ms < 25000 && !(wifi_connected && circuit_sync::wifi_ip(ip, sizeof(ip)))) {
+    while (waited_ms < 45000 && !(wifi_connected && circuit_sync::wifi_ip(ip, sizeof(ip)))) {
         vTaskDelay(pdMS_TO_TICKS(250));
         waited_ms += 250;
     }
@@ -4265,8 +4282,17 @@ void wifi_wait_task(void *) {
     after_wifi = AfterWifi::Nothing;
     wifi_last_needed_ms = circuit_sync::now_ms();
     if (!(wifi_connected && circuit_sync::wifi_ip(ip, sizeof(ip)))) {
-        report_audio_status("Wi-Fi did not connect: try again, or check the network");
-        if (forced) flash_sync_result("ERR");
+        // None of the saved networks is in range (or none is saved): say so, on the board and in the app, and keep
+        // sync mode open so one can be added from the phone's Wi-Fi page.
+        ESP_LOGW(kTag, "No known Wi-Fi in range (%d saved)", saved_net_count);
+        report_audio_status(saved_net_count == 0 ? "No known Wi-Fi: add one on the Wi-Fi page"
+                                                  : "No known Wi-Fi in range: add one on the Wi-Fi page");
+        if (sync_mode) {
+            sync_mode_note_activity();
+            show_sync_mode_screen("No Wi-Fi\nAdd one\nin the app");
+        } else if (forced) {
+            flash_sync_result("ERR");
+        }
     } else {
         auto *job = new AfterJob{action, forced};
         if (xTaskCreate(after_wifi_job_task, "after_wifi", 6144, job, 4, nullptr) != pdPASS) {

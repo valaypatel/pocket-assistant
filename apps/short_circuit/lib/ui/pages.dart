@@ -573,6 +573,13 @@ extension _ScPages on _CircuitHomePageState {
     if (arriving > 0) {
       return _syncPill(spinner: true, text: 'Receiving');
     }
+    if (_noKnownWifi && _circuitAvailable) {
+      return _syncPill(
+        icon: LucideIcons.wifiOff,
+        text: 'No Wi‑Fi · Add one',
+        onTap: () => _goTo(_AppPage.wifi),
+      );
+    }
     if (!_circuitAvailable) {
       return _syncPill(
         icon: LucideIcons.moon,

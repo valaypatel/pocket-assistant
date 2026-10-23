@@ -1408,6 +1408,8 @@ class _CircuitHomePageState extends State<CircuitHomePage>
   String _wifiState = 'none';
   String _wifiSsid = '';
   int _wifiSaved = 0; // networks Circuit remembers (up to 15)
+  bool _noKnownWifi =
+      false; // the board is in sync mode with no known network in range
   String _wifiDetail = '';
   String _wifiMac = ''; // Circuit's Wi-Fi MAC address, once it has said
   bool _showWifiPassword = false;
@@ -2528,6 +2530,18 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       unawaited(_pruneLostNotes());
       return;
     }
+    if (status.startsWith('No known Wi-Fi')) {
+      // The board found none of its saved networks: nothing is broken, a network just has to be added.
+      setState(() {
+        _noKnownWifi = true;
+        _syncActive = false;
+        _audioBusy = false;
+        _syncingNoteId = null;
+        _syncProgress = null;
+      });
+      _toast('Circuit found no known Wi-Fi. Add one under Circuit › Wi-Fi.');
+      return;
+    }
     if (status.startsWith('Sync needs Wi-Fi')) {
       final waitingNoteId = _syncingNoteId ?? _pendingSyncNoteId();
       _toast('Put this phone on the same Wi-Fi as Circuit');
@@ -3325,6 +3339,7 @@ class _CircuitHomePageState extends State<CircuitHomePage>
       _wifiDetail = status.detail;
       if (status.mac.isNotEmpty) _wifiMac = status.mac;
       if (status.saved != null) _wifiSaved = status.saved!;
+      if (status.state == 'connected') _noKnownWifi = false;
       if (status.state == 'connecting') {
         _wifiConnectingSince ??= DateTime.now();
       } else {
