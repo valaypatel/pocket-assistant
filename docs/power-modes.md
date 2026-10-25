@@ -32,6 +32,17 @@ A board that has never been paired stays in sync mode until a phone has paired.
 - Charging: a bolt shows in the battery icon, the charger's push is taken off the reading, and 100 shows once the
   charger has ended its cycle (see `battery_tick` in `main.cpp`).
 
+## Wi-Fi networks
+
+- The board remembers up to **15** networks (a 16th replaces the oldest). To connect it scans, joins the strongest saved
+  network in range, and tries the next one if that fails. Setting up a network from the app adds it (or updates its
+  password) and tries it first.
+- A scan pauses the connection attempts, because the radio refuses to scan while it is trying to join a network.
+  That is how the phone gets its list even when the saved network is away.
+- If none of the saved networks can be joined during sync mode, the board shows "No Wi-Fi / Add one in the app", the app
+  shows a calm "No Wi-Fi · Add one" pill that opens the Wi-Fi page, and sync mode stays open so one can be added.
+- Dev helpers: `board_dev.py wifi-nets | wifi-add NAME | wifi-clear | wifi-scan-test | wifi-try-fake | wifi-fake-only | wifi-need`.
+
 ## What is kept for later
 
 The always-connected behaviour (Saver, Deep and recording-only tiers, the phone's Auto/Saver/Deep choice, Wi-Fi
